@@ -36,7 +36,7 @@
 #include "psb_intel_reg.h"
 #include "psb_irq.h"
 #include "psb_reg.h"
-#include "sgx_boot.h"
+#include "gma_sgx.h"
 
 static const struct drm_driver driver;
 static int psb_pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent);

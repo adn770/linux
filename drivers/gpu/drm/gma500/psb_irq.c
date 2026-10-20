@@ -17,7 +17,7 @@
 #include "psb_intel_reg.h"
 #include "psb_irq.h"
 #include "psb_reg.h"
-#include "sgx_boot.h"
+#include "gma_sgx.h"
 
 /*
  * inline functions

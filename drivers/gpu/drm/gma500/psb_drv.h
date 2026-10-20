@@ -187,6 +187,7 @@ struct drm_fb_helper;
 struct drm_fb_helper_surface_size;
 
 struct opregion_header;
+struct sgxfive;
 struct opregion_acpi;
 struct opregion_swsci;
 struct opregion_asle;
@@ -406,7 +407,7 @@ struct drm_psb_private {
 	struct psb_mmu_pd *pf_pd;
 
 	/* SGX545 microkernel (Cedarview), see sgx_boot.c */
-	struct gma_sgx *sgx;
+	struct sgxfive *sgx;
 
 	/* Register base */
 	uint8_t __iomem *sgx_reg;
