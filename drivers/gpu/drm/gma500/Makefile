@@ -37,8 +37,8 @@ gma500_gfx-y += \
 	  psb_irq.o
 
 gma500_gfx-$(CONFIG_ACPI) +=  opregion.o
-gma500_gfx-y += sgxfive/sgx_fw.o sgxfive/sgx_seq.o sgxfive/sgx_xfer.o sgxfive/sgx_mmu.o
-gma500_gfx-$(CONFIG_DEBUG_FS) += sgxfive/sgxfive.o gma_sgx.o
+gma500_gfx-y += sgxfive/sgx_fw.o sgxfive/sgx_seq.o sgxfive/sgx_xfer.o sgxfive/sgx_mmu.o \
+	sgxfive/sgxfive.o sgxfive/sgxfive_drv.o gma_sgx.o
 gma500_gfx-$(CONFIG_DRM_GMA500_KUNIT_TEST) += sgxfive/sgx_fw_test.o sgxfive/sgx_seq_test.o \
 	sgxfive/sgx_xfer_test.o sgxfive/sgx_mmu_test.o
 gma500_gfx-$(CONFIG_DRM_FBDEV_EMULATION) +=  fbdev.o

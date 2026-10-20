@@ -89,12 +89,6 @@ static const struct pci_device_id pciidlist[] = {
 };
 MODULE_DEVICE_TABLE(pci, pciidlist);
 
-/*
- * Standard IOCTLs.
- */
-static const struct drm_ioctl_desc psb_ioctls[] = {
-};
-
 /**
  *	psb_spank		-	reset the 2D engine
  *	@dev_priv: our PSB DRM device
@@ -364,6 +358,8 @@ static int psb_driver_load(struct drm_device *dev, unsigned long flags)
 	PSB_WSGX32(0x20000000, PSB_CR_PDS_EXEC_BASE);
 	PSB_WSGX32(0x30000000, PSB_CR_BIF_3D_REQ_BASE);
 
+	gma_sgx_init(dev);
+
 	acpi_video_register();
 
 	/* Setup vertical blanking handling */
@@ -506,13 +502,14 @@ static const struct file_operations psb_gem_fops = {
 };
 
 static const struct drm_driver driver = {
-	.driver_features = DRIVER_MODESET | DRIVER_GEM,
+	.driver_features = DRIVER_MODESET | DRIVER_GEM | DRIVER_RENDER,
 
-	.num_ioctls = ARRAY_SIZE(psb_ioctls),
+	.num_ioctls = GMA_SGX_NUM_IOCTLS,
+	.gem_create_object = gma_sgx_gem_create_object,
 
 	.dumb_create = psb_gem_dumb_create,
 	PSB_FBDEV_DRIVER_OPS,
-	.ioctls = psb_ioctls,
+	.ioctls = gma_sgx_ioctls,
 	.fops = &psb_gem_fops,
 #if defined(CONFIG_DEBUG_FS)
 	.debugfs_init = gma_sgx_debugfs_init,
