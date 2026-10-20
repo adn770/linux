@@ -54,24 +54,12 @@ static struct dma_fence *sgxfive_run_job(struct drm_sched_job *sched_job)
 		sgxfive_fence_fail_all(ctx, ret);
 		dma_fence_put(fence);
 		fence = ERR_PTR(ret);
+	} else {
+		sgxfive_watchdog_arm(sgx);
 	}
 out:
 	mutex_unlock(&sgx->lock);
 	return fence;
-}
-
-/* The order of the oldest job the firmware has not finished, or U64_MAX. */
-static u64 sgxfive_oldest(struct sgxfive *sgx)
-{
-	struct sgxfive_ctx *ctx;
-	u64 oldest = U64_MAX, order;
-
-	spin_lock_irq(&sgx->ctx_lock);
-	list_for_each_entry(ctx, &sgx->ctx_list, link)
-		if (sgxfive_ctx_oldest(ctx, &order))
-			oldest = min(oldest, order);
-	spin_unlock_irq(&sgx->ctx_lock);
-	return oldest;
 }
 
 /*
@@ -93,7 +81,7 @@ static enum drm_gpu_sched_stat sgxfive_timedout_job(struct drm_sched_job *sched_
 		return DRM_GPU_SCHED_STAT_NO_HANG;
 	}
 	drm_err(sgx->dev, "sgxfive: transfer job %llu hung, recovering\n", oldest);
-	sgxfive_recover(sgx, true);
+	sgxfive_recover(sgx, oldest);
 	sgx->hang_oldest = U64_MAX;
 	return DRM_GPU_SCHED_STAT_NO_HANG;
 }
