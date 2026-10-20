@@ -33,6 +33,7 @@ static struct dma_fence *sgxfive_run_job(struct drm_sched_job *sched_job)
 	struct sgxfive_ctx *ctx = job->ctx;
 	struct sgxfive *sgx = ctx->sgx;
 	u32 *ctl = sgxfive_ctx_cpu(ctx, SGXFIVE_CTX_CTL_OFF);
+	struct sgxfive_fence *hw;
 	struct dma_fence *fence;
 	int ret;
 
@@ -41,11 +42,10 @@ static struct dma_fence *sgxfive_run_job(struct drm_sched_job *sched_job)
 		fence = ERR_PTR(-ECANCELED);
 		goto out;
 	}
-	fence = sgxfive_fence_create(ctx, job->seqno, ++sgx->kicks, job->cmd,
-				     job->size);
-	if (IS_ERR(fence))
-		goto out;
-	memcpy(sgxfive_ctx_cpu(ctx, SGXFIVE_CTX_CCB_OFF + ctx->woff), job->cmd,
+	hw = job->hw;
+	job->hw = NULL;			/* the fence's own from here */
+	fence = sgxfive_fence_init(hw, ctx, job->seqno, ++sgx->kicks, job->size);
+	memcpy(sgxfive_ctx_cpu(ctx, SGXFIVE_CTX_CCB_OFF + ctx->woff), hw->cmd,
 	       SGX_XFER_CMD_SIZE);
 	ctx->woff = (ctx->woff + job->size) & (SGX_XFER_CCB_SIZE - 1);
 	WRITE_ONCE(ctl[0], ctx->woff);		/* host write offset */
@@ -104,6 +104,7 @@ static void sgxfive_free_job(struct drm_sched_job *sched_job)
 
 	drm_sched_job_cleanup(sched_job);
 	sgxfive_ctx_put(job->ctx);
+	kfree(job->hw);			/* if it never ran */
 	kfree(job);
 }
 
