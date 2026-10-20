@@ -17,3 +17,12 @@ config DRM_GMA500
 	  Say yes for an experimental 2D KMS framebuffer driver for the
 	  Intel GMA500 (Poulsbo), Intel GMA600 (Moorestown/Oak Trail) and
 	  Intel GMA3600/3650 (Cedar Trail).
+
+config DRM_GMA500_KUNIT_TEST
+	bool "KUnit tests for the GMA3600 SGX firmware loader" if !KUNIT_ALL_TESTS
+	depends on DRM_GMA500 && KUNIT
+	default KUNIT_ALL_TESTS
+	help
+	  Unit tests for sgx_fw.c, the parser for the SGX545 firmware file
+	  (sgx545_ukernel.fw). They run when gma500_gfx is loaded with KUnit
+	  available. If unsure, say N.
