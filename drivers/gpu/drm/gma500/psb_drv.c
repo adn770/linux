@@ -506,6 +506,8 @@ static const struct drm_driver driver = {
 
 	.num_ioctls = GMA_SGX_NUM_IOCTLS,
 	.gem_create_object = gma_sgx_gem_create_object,
+	.open = gma_sgx_open,
+	.postclose = gma_sgx_postclose,
 
 	.dumb_create = psb_gem_dumb_create,
 	PSB_FBDEV_DRIVER_OPS,
