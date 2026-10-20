@@ -17,6 +17,7 @@
 #include "psb_intel_reg.h"
 #include "psb_irq.h"
 #include "psb_reg.h"
+#include "sgx_boot.h"
 
 /*
  * inline functions
@@ -152,6 +153,10 @@ static void gma_sgx_interrupt(struct drm_device *dev, u32 stat_1, u32 stat_2)
 {
 	struct drm_psb_private *dev_priv = to_drm_psb_private(dev);
 	u32 val, addr;
+
+	/* While the SGX545 firmware runs, its events are not ours to clear. */
+	if (gma_sgx_irq(dev, stat_1, stat_2))
+		return;
 
 	if (stat_1 & _PSB_CE_TWOD_COMPLETE)
 		val = PSB_RSGX32(PSB_CR_2D_BLIT_STATUS);
