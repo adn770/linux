@@ -36,6 +36,7 @@
 #include "psb_intel_reg.h"
 #include "psb_irq.h"
 #include "psb_reg.h"
+#include "sgx_boot.h"
 
 static const struct drm_driver driver;
 static int psb_pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent);
@@ -178,6 +179,8 @@ static void psb_driver_unload(struct drm_device *dev)
 		dev_priv->ops->chip_teardown(dev);
 
 	psb_intel_opregion_fini(dev);
+
+	gma_sgx_fini(dev);
 
 	if (dev_priv->pf_pd) {
 		psb_mmu_free_pagedir(dev_priv->pf_pd);
@@ -511,6 +514,9 @@ static const struct drm_driver driver = {
 	PSB_FBDEV_DRIVER_OPS,
 	.ioctls = psb_ioctls,
 	.fops = &psb_gem_fops,
+#if defined(CONFIG_DEBUG_FS)
+	.debugfs_init = gma_sgx_debugfs_init,
+#endif
 	.name = DRIVER_NAME,
 	.desc = DRIVER_DESC,
 	.major = DRIVER_MAJOR,

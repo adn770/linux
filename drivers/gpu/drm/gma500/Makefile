@@ -38,6 +38,7 @@ gma500_gfx-y += \
 
 gma500_gfx-$(CONFIG_ACPI) +=  opregion.o
 gma500_gfx-y += sgx_fw.o
+gma500_gfx-$(CONFIG_DEBUG_FS) += sgx_boot.o
 gma500_gfx-$(CONFIG_DRM_GMA500_KUNIT_TEST) += sgx_fw_test.o
 gma500_gfx-$(CONFIG_DRM_FBDEV_EMULATION) +=  fbdev.o
 

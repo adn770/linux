@@ -405,6 +405,9 @@ struct drm_psb_private {
 	struct psb_mmu_driver *mmu;
 	struct psb_mmu_pd *pf_pd;
 
+	/* SGX545 microkernel (Cedarview), see sgx_boot.c */
+	struct gma_sgx *sgx;
+
 	/* Register base */
 	uint8_t __iomem *sgx_reg;
 	uint8_t __iomem *vdc_reg;
