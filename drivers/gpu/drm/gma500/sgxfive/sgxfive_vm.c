@@ -161,7 +161,7 @@ int sgxfive_ioctl_vm_map(struct sgxfive *sgx, void *data, struct drm_file *file)
 		return ret;
 	obj = drm_gem_object_lookup(file, a->handle);
 	if (!obj)
-		return -EINVAL;
+		return -ENOENT;
 	if (!sgxfive_is_bo(obj) || a->offset > obj->size ||
 	    a->size > obj->size - a->offset) {
 		drm_gem_object_put(obj);
