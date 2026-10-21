@@ -38,14 +38,14 @@ gma500_gfx-y += \
 
 gma500_gfx-$(CONFIG_ACPI) +=  opregion.o
 gma500_gfx-y += sgxfive/sgx_fw.o sgxfive/sgx_seq.o sgxfive/sgx_xfer.o sgxfive/sgx_mmu.o \
-	sgxfive/sgx_tri.o \
+	sgxfive/sgx_tri.o sgxfive/sgx_render.o \
 	sgxfive/sgxfive.o sgxfive/sgxfive_drv.o sgxfive/sgxfive_vm.o sgxfive/sgxfive_cmd.o \
 	sgxfive/sgxfive_ctx.o sgxfive/sgxfive_fence.o \
 	sgxfive/sgxfive_sched.o sgxfive/sgxfive_submit.o sgxfive/sgxfive_coredump.o gma_sgx.o
 gma500_gfx-$(CONFIG_DRM_GMA500_KUNIT_TEST) += sgxfive/sgx_fw_test.o sgxfive/sgx_seq_test.o \
 	sgxfive/sgx_xfer_test.o sgxfive/sgx_mmu_test.o sgxfive/sgxfive_vm_test.o \
 	sgxfive/sgxfive_job_test.o sgxfive/sgxfive_coredump_test.o sgxfive/sgxfive_drv_test.o \
-	sgxfive/sgx_tri_test.o
+	sgxfive/sgx_tri_test.o sgxfive/sgx_render_test.o
 gma500_gfx-$(CONFIG_DRM_FBDEV_EMULATION) +=  fbdev.o
 
 obj-$(CONFIG_DRM_GMA500) += gma500_gfx.o
