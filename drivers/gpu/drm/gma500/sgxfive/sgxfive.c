@@ -91,7 +91,8 @@ enum {
 };
 
 enum {
-	HC_INIT_STATUS = 0, HC_POWER_STATUS = 1, HC_HWR_SAMPLE_RATE = 5,
+	HC_INIT_STATUS = 0, HC_POWER_STATUS = 1, HC_CLEANUP_STATUS = 2,
+	HC_HWR_SAMPLE_RATE = 5,
 	HC_UKERNEL_TIMER_CLOCK = 6, HC_APM_SAMPLE_RATE = 7, HC_HOST_CLOCK = 13,
 	HC_ASSERT_FAIL = 14, HC_DWORDS = 17,
 };
@@ -108,6 +109,11 @@ static_assert(TA3D_CTL_DWORDS == SGXFIVE_TA3D_CTL_DWORDS);
 #define SGX_CMD_TA		0
 #define SGX_CMD_TRANSFER	1
 #define SGX_CMD_POWER		3
+#define SGX_CMD_CLEANUP		5
+#define CLEANUP_RT		1	/* PVRSRV_CLEANUPCMD_*: an RT data set */
+#define CLEANUP_RC		2	/* a HW render context */
+#define CLEANUP_PB		5	/* a PB descriptor */
+#define CLEANUP_COMPLETE	BIT(0)	/* in HostCtl.ui32CleanupStatus */
 #define SGX_CMD_PROCESS_QUEUES	7
 #define SGX_CMD_GETMISCINFO	6
 #define POWERCMD_POWEROFF	1
@@ -699,6 +705,10 @@ static int sgxfive_reset(struct sgxfive *sgx, u64 suspect, enum sgxfive_hang why
 	sgx->xfer_runs = 0;
 	spin_lock_irq(&sgx->ctx_lock);
 	list_for_each_entry(ctx, &sgx->ctx_list, link) {
+		if (ctx->type == DRM_SGXFIVE_CTX_TYPE_RENDER) {
+			ctx->replay = sgxfive_render_reset(ctx);
+			continue;
+		}
 		sgx_xfer_ctx_init(sgxfive_ctx_cpu(ctx, SGXFIVE_CTX_HW_OFF),
 				  sgxfive_vm_pd_phys(ctx->vm),
 				  ctx->mem.addr + SGXFIVE_CTX_CCB_OFF,
@@ -714,6 +724,8 @@ static int sgxfive_reset(struct sgxfive *sgx, u64 suspect, enum sgxfive_hang why
 		if (ret) {
 			WRITE_ONCE(ctx->lost, true);	/* nothing runs any more */
 			sgxfive_fence_fail_all(ctx, -EIO);
+		} else if (ctx->replay && ctx->type == DRM_SGXFIVE_CTX_TYPE_RENDER) {
+			sgxfive_kick_render(sgx, ctx->mem.addr + SGXFIVE_CTX_HW_OFF);
 		} else if (ctx->replay) {
 			sgxfive_kick_transfer(sgx, ctx->mem.addr + SGXFIVE_CTX_HW_OFF);
 		}
@@ -796,6 +808,93 @@ int sgxfive_kick_transfer(struct sgxfive *sgx, u32 hw_ctx_addr)
 	lockdep_assert_held(&sgx->lock);
 	sgx->cache_control |= SGX_CC_INVAL_DATA;
 	return sgxfive_command(sgx, SGX_CMD_TRANSFER, data, ARRAY_SIZE(data));
+}
+
+/* Queue the firmware's TA work for one render context (§11.6). */
+int sgxfive_kick_render(struct sgxfive *sgx, u32 hw_ctx_addr)
+{
+	const u32 data[] = { 0, hw_ctx_addr };
+
+	lockdep_assert_held(&sgx->lock);
+	sgx->cache_control |= SGX_CC_INVAL_DATA;
+	return sgxfive_command(sgx, SGX_CMD_TA, data, ARRAY_SIZE(data));
+}
+
+/* SGXCleanupRequest: one CLEANUP command, acknowledged in HostCtl. */
+static int sgxfive_cleanup(struct sgxfive *sgx, u32 type, u32 addr)
+{
+	u32 *hc = sgxfive_words(sgx, BUF_HOST_CTL);
+	const u32 data[] = { type, addr };
+	int ret;
+
+	WRITE_ONCE(hc[HC_CLEANUP_STATUS],
+		   READ_ONCE(hc[HC_CLEANUP_STATUS]) & ~CLEANUP_COMPLETE);
+	ret = sgxfive_command(sgx, SGX_CMD_CLEANUP, data, ARRAY_SIZE(data));
+	if (!ret)
+		ret = sgxfive_wait_mem(&hc[HC_CLEANUP_STATUS], CLEANUP_COMPLETE,
+				       CLEANUP_COMPLETE);
+	WRITE_ONCE(hc[HC_CLEANUP_STATUS],
+		   READ_ONCE(hc[HC_CLEANUP_STATUS]) & ~CLEANUP_COMPLETE);
+	sgx->cache_control |= SGX_CC_INVAL_DATA;
+	return ret;
+}
+
+/*
+ * A render context goes: make the firmware drop what it keeps of it (its RT
+ * data set, the context, the PB descriptor it may still have loaded,
+ * design/sgx545_render_uapi.md §11.7). Nothing to do with the firmware off.
+ */
+int sgxfive_render_cleanup(struct sgxfive *sgx, u32 rtds, u32 ctx, u32 pbdesc)
+{
+	ktime_t start = ktime_get();
+	int ret = 0;
+
+	mutex_lock(&sgx->lock);
+	if (sgx->live) {
+		ret = sgxfive_cleanup(sgx, CLEANUP_RT, rtds);
+		if (!ret)
+			ret = sgxfive_cleanup(sgx, CLEANUP_RC, ctx);
+		if (!ret)
+			ret = sgxfive_cleanup(sgx, CLEANUP_PB, pbdesc);
+		drm_dbg(sgx->dev, "sgxfive: render context cleanup %d after %lld us\n",
+			ret, ktime_us_delta(ktime_get(), start));
+	}
+	mutex_unlock(&sgx->lock);
+	return ret;
+}
+
+/*
+ * Map (or unmap) every firmware buffer into a render VM's page directory at
+ * its own address: the EDM runs through the context's directory while it
+ * loads a parameter buffer (§11.3). Read-only, except the TA/3D control
+ * block, which the EDM writes in that window (TA3DCtl[46] and [47], the
+ * loaded PB): read-only, the write faults and the render stalls (seen on
+ * hardware, probe R4; debugfs alias_ta3d_ro reproduces it).
+ */
+int sgxfive_alias_firmware(struct sgxfive *sgx, struct sgx_mmu_pd *pd, bool map)
+{
+	unsigned int id;
+	int ret = 0;
+
+	mutex_lock(&sgx->lock);
+	for (id = 0; id < SGX_FW_MAX_BUFFERS && !ret; id++) {
+		const struct sgxfive_buf *b = &sgx->buf[id];
+		u32 flags = id == BUF_TA3D_CTL && !sgx->alias_ta3d_ro ? 0 : SGX_MMU_RO;
+
+		if (!b->pd)
+			continue;
+		if (map)
+			ret = sgx_mmu_map(pd, b->addr, b->pages, b->npages, flags);
+		else
+			sgx_mmu_unmap(pd, b->addr, b->npages);
+	}
+	if (ret)
+		for (id = 0; id < SGX_FW_MAX_BUFFERS; id++)
+			if (sgx->buf[id].pd)
+				sgx_mmu_unmap(pd, sgx->buf[id].addr, sgx->buf[id].npages);
+	sgx->cache_control |= SGX_CC_INVAL_BIF;
+	mutex_unlock(&sgx->lock);
+	return ret;
 }
 
 #define SGXFIVE_REAP_MS	10
@@ -2302,6 +2401,7 @@ void sgxfive_debugfs_init(struct sgxfive *sgx, struct dentry *root)
 	debugfs_create_file("xfer_iso", 0400, dir, sgx, &sgxfive_xfer_iso_fops);
 	debugfs_create_bool("alias_ro", 0600, dir, &sgx->alias_ro);
 	debugfs_create_bool("no_alias", 0600, dir, &sgx->no_alias);
+	debugfs_create_bool("alias_ta3d_ro", 0600, dir, &sgx->alias_ta3d_ro);
 	debugfs_create_file("xfer_ro", 0400, dir, sgx, &sgxfive_xfer_ro_fops);
 	debugfs_create_file("tri", 0400, dir, sgx, &sgxfive_tri_fops);
 	debugfs_create_file("tri2", 0400, dir, sgx, &sgxfive_tri2_fops);

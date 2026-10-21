@@ -38,7 +38,7 @@ gma500_gfx-y += \
 
 gma500_gfx-$(CONFIG_ACPI) +=  opregion.o
 gma500_gfx-y += sgxfive/sgx_fw.o sgxfive/sgx_seq.o sgxfive/sgx_xfer.o sgxfive/sgx_mmu.o \
-	sgxfive/sgx_tri.o sgxfive/sgx_render.o \
+	sgxfive/sgx_tri.o sgxfive/sgx_render.o sgxfive/sgxfive_render.o \
 	sgxfive/sgxfive.o sgxfive/sgxfive_drv.o sgxfive/sgxfive_vm.o sgxfive/sgxfive_cmd.o \
 	sgxfive/sgxfive_ctx.o sgxfive/sgxfive_fence.o \
 	sgxfive/sgxfive_sched.o sgxfive/sgxfive_submit.o sgxfive/sgxfive_coredump.o gma_sgx.o
