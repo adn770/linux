@@ -38,7 +38,7 @@
 #include "psb_reg.h"
 #include "gma_sgx.h"
 
-static const struct drm_driver driver;
+static struct drm_driver driver;
 static int psb_pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent);
 
 /*
@@ -501,7 +501,8 @@ static const struct file_operations psb_gem_fops = {
 	.fop_flags = FOP_UNSIGNED_OFFSET,
 };
 
-static const struct drm_driver driver = {
+/* Not const: psb_init() drops DRIVER_RENDER unless sgx_render is set. */
+static struct drm_driver driver = {
 	.driver_features = DRIVER_MODESET | DRIVER_GEM | DRIVER_RENDER |
 			   DRIVER_SYNCOBJ | DRIVER_SYNCOBJ_TIMELINE,
 
@@ -536,6 +537,13 @@ static int __init psb_init(void)
 {
 	if (drm_firmware_drivers_only())
 		return -ENODEV;
+
+	/*
+	 * The render node is opt-in: drm_dev_init() allocates its minor from the
+	 * driver's features, so it must be dropped here, before any device.
+	 */
+	if (!gma_sgx_render_enabled())
+		driver.driver_features &= ~DRIVER_RENDER;
 
 	return pci_register_driver(&psb_pci_driver);
 }
