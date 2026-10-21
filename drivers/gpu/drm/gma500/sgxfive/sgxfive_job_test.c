@@ -101,6 +101,9 @@ static void sgxfive_job_test_check(struct kunit *test)
 
 	c.pds_exec_base = 0x30000000;		/* the reserved firmware code */
 	KUNIT_EXPECT_EQ(test, sgxfive_job_check(&c), -EINVAL);
+	/* Render jobs rely on PDS_EXEC_BASE = the PDS_PIXEL heap base. */
+	c.pds_exec_base = 0x2e001000;
+	KUNIT_EXPECT_EQ(test, sgxfive_job_check(&c), -EINVAL);
 	fill_regs(&c);
 	c.event_pixel_pds_exec = 0x32000000;	/* the reserved firmware data */
 	KUNIT_EXPECT_EQ(test, sgxfive_job_check(&c), -EINVAL);

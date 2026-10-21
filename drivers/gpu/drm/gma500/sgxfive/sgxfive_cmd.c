@@ -72,7 +72,9 @@ static bool in_user_heap(u32 addr)
 /*
  * The checks on a job's register block: the addresses the pixel pipe
  * fetches from or runs code at must be in the client's heaps, and fields
- * this kernel does not support must be clear.
+ * this kernel does not support must be clear. PDS_EXEC_BASE must be the
+ * PDS_PIXEL heap base: the 3D pipe never sets it, and every render's pixel
+ * programs are relative to it (design/sgx545_render_uapi.md §11.5).
  */
 int sgxfive_job_check(const struct drm_sgxfive_transfer_cmd *regs)
 {
@@ -81,7 +83,7 @@ int sgxfive_job_check(const struct drm_sgxfive_transfer_cmd *regs)
 		return -EINVAL;
 	if (regs->bif_3d_req_base & (SZ_1M - 1) ||
 	    !in_user_heap(regs->bif_3d_req_base) ||
-	    !in_user_heap(regs->pds_exec_base) ||
+	    regs->pds_exec_base != sgxfive_rev1_heaps[DRM_SGXFIVE_HEAP_PDS_PIXEL].base ||
 	    !in_user_heap(regs->event_pixel_pds_exec))
 		return -EINVAL;
 	if (regs->isp_rgn_base && !in_user_heap(regs->isp_rgn_base))

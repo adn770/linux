@@ -619,8 +619,9 @@ enum drm_sgxfive_job_type {
  * firmware command from it and fills in what it owns (size, flags, fence
  * status, pixel partitions, fence id, updates). It checks that the addresses
  * that make the pixel pipe fetch or execute (@event_pixel_pds_exec,
- * @pds_exec_base, @bif_3d_req_base, a non-zero @isp_rgn_base) lie in a user
- * heap, and masks the fields with global side effects.
+ * @bif_3d_req_base, a non-zero @isp_rgn_base) lie in a user heap, that
+ * @pds_exec_base is the PDS_PIXEL heap base, and masks the fields with global
+ * side effects.
  *
  * Version 1 is 0xa8 bytes; a later, longer version keeps this prefix, and a
  * kernel accepts a longer struct than it knows only if the tail is zero.
@@ -656,7 +657,10 @@ struct drm_sgxfive_transfer_cmd {
 	__u32 isp_render_box2;
 	/** @pixelbe: PIXELBE. */
 	__u32 pixelbe;
-	/** @pds_exec_base: PDS_EXEC_BASE. */
+	/**
+	 * @pds_exec_base: PDS_EXEC_BASE: must be the base of the PDS_PIXEL
+	 * heap, the value render jobs rely on (the 3D pipe never sets it).
+	 */
 	__u32 pds_exec_base;
 	/** @double_pixel_partitions: DOUBLE_PIXEL_PARTITIONS; must be 0 for now. */
 	__u32 double_pixel_partitions;
