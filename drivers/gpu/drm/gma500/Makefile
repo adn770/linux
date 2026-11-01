@@ -42,6 +42,7 @@ gma500_gfx-$(CONFIG_ACPI) +=  opregion.o
 gma500_gfx-y += gma_sgx.o
 gma500_gfx-y += sgxfive/sgx_fw.o
 gma500_gfx-y += sgxfive/sgx_mmu.o
+gma500_gfx-y += sgxfive/sgx_render.o
 gma500_gfx-y += sgxfive/sgx_seq.o
 gma500_gfx-y += sgxfive/sgx_xfer.o
 gma500_gfx-y += sgxfive/sgxfive.o
@@ -58,6 +59,7 @@ gma500_gfx-$(CONFIG_DRM_GMA500_SGXFIVE_DEBUG) += sgxfive/sgxfive_debug.o
 
 gma500_gfx-$(CONFIG_DRM_GMA500_KUNIT_TEST) += sgxfive/sgx_fw_test.o
 gma500_gfx-$(CONFIG_DRM_GMA500_KUNIT_TEST) += sgxfive/sgx_mmu_test.o
+gma500_gfx-$(CONFIG_DRM_GMA500_KUNIT_TEST) += sgxfive/sgx_render_test.o
 gma500_gfx-$(CONFIG_DRM_GMA500_KUNIT_TEST) += sgxfive/sgx_seq_test.o
 gma500_gfx-$(CONFIG_DRM_GMA500_KUNIT_TEST) += sgxfive/sgx_xfer_test.o
 gma500_gfx-$(CONFIG_DRM_GMA500_KUNIT_TEST) += sgxfive/sgxfive_test.o
