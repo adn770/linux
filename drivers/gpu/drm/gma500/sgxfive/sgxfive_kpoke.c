@@ -482,3 +482,35 @@ bool sgxfive_tdfill_take(struct sgxfive *sgx, struct sgxfive_tdfill *f)
 	spin_unlock(&sgx->kpoke_lock);
 	return armed;
 }
+
+void sgxfive_keep_init(struct sgxfive_keep *k)
+{
+	spin_lock_init(&k->lock);
+	INIT_LIST_HEAD(&k->list);
+	k->n = 0;
+}
+
+void sgxfive_keep_park(struct sgxfive_keep *k, struct sgxfive_kept *kept)
+{
+	spin_lock(&k->lock);
+	list_add_tail(&kept->link, &k->list);
+	k->n++;
+	spin_unlock(&k->lock);
+}
+
+unsigned int sgxfive_keep_drain(struct sgxfive_keep *k,
+				void (*fn)(struct sgxfive_kept *kept, void *arg), void *arg)
+{
+	struct sgxfive_kept *kept, *next;
+	LIST_HEAD(taken);
+	unsigned int n;
+
+	spin_lock(&k->lock);
+	list_splice_init(&k->list, &taken);
+	n = k->n;
+	k->n = 0;
+	spin_unlock(&k->lock);
+	list_for_each_entry_safe(kept, next, &taken, link)
+		fn(kept, arg);
+	return n;
+}

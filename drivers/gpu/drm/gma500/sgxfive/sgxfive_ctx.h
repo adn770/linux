@@ -191,6 +191,11 @@ struct sgxfive_ctx *sgxfive_render_donor(struct sgxfive_ctx *ctx);
 size_t sgxfive_render_dump(struct sgxfive_ctx *ctx, bool tadata, void *dst, size_t len,
 			   loff_t off);
 void sgxfive_render_words(struct sgxfive_ctx *ctx, struct drm_printer *p);
+void sgxfive_render_keep_release(struct sgxfive *sgx);
+#else
+static inline void sgxfive_render_keep_release(struct sgxfive *sgx)
+{
+}
 #endif
 
 #endif

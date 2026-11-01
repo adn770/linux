@@ -88,6 +88,7 @@ void sgxfive_debug_disarm(struct sgxfive *sgx)
 	sgxfive_hostirq_reset(&sgx->hostirq);
 	WRITE_ONCE(sgx->alias_ctx_rw, false);
 	WRITE_ONCE(sgx->render_share_pb, false);
+	WRITE_ONCE(sgx->render_keep, false);
 	spin_lock(&sgx->kpoke_lock);
 	sgx->tdfill.armed = false;
 	sgx->kpokes.n = 0;
@@ -922,6 +923,7 @@ static ssize_t sgxfive_reset_write(struct file *f, const char __user *ubuf,
 	struct sgxfive *sgx = file_inode(f)->i_private;
 	int ret;
 
+	sgxfive_render_keep_release(sgx);	/* render_keep's contexts go with a manual reset */
 	ret = sgxfive_recover(sgx, U64_MAX, SGXFIVE_HANG_MANUAL);
 	return ret ? ret : len;
 }
@@ -1786,6 +1788,7 @@ void sgxfive_debug_init(struct sgxfive *sgx, struct dentry *dir)
 	debugfs_create_file_unsafe("alias_skip", 0600, dir, sgx, &sgxfive_alias_skip_fops);
 	debugfs_create_bool("alias_ctx_rw", 0600, dir, &sgx->alias_ctx_rw);
 	debugfs_create_bool("render_share_pb", 0600, dir, &sgx->render_share_pb);
+	debugfs_create_bool("render_keep", 0600, dir, &sgx->render_keep);
 	spin_lock_init(&sgx->kpoke_lock);
 	sgxfive_hostirq_init(&sgx->hostirq);
 	debugfs_create_file("kpoke", 0600, dir, sgx, &sgxfive_kpoke_fops);

@@ -1384,6 +1384,9 @@ struct sgxfive *sgxfive_create(const struct sgxfive_host *host)
 	drm_mm_init(&sgx->kmem, KMEM_START, KMEM_END - KMEM_START);
 	spin_lock_init(&sgx->ctx_lock);
 	INIT_LIST_HEAD(&sgx->ctx_list);
+#if IS_ENABLED(CONFIG_DRM_GMA500_SGXFIVE_DEBUG)
+	sgxfive_keep_init(&sgx->kept);
+#endif
 	INIT_DELAYED_WORK(&sgx->watchdog, sgxfive_watchdog);
 	sgx->fault_suspect = U64_MAX;
 	sgx->hang_oldest = U64_MAX;
@@ -1421,6 +1424,7 @@ void sgxfive_destroy(struct sgxfive *sgx)
 	if (!sgx)
 		return;
 	cancel_delayed_work_sync(&sgx->watchdog);
+	sgxfive_render_keep_release(sgx);
 	sgxfive_coredump_fini(sgx);
 	mutex_lock(&sgx->lock);
 	sgxfive_unload(sgx);

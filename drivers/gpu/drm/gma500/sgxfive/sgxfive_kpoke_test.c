@@ -945,6 +945,7 @@ static void sgxfive_kpoke_test_reset_disarms(struct kunit *test)
 	sgx->alias_ctx_rw = true;
 	sgx->tdfill.armed = true;
 	sgx->render_share_pb = true;
+	sgx->render_keep = true;
 	KUNIT_ASSERT_EQ(test, sgxfive_kpoke_parse("th:2=5", &p[0]), 0);
 	KUNIT_ASSERT_EQ(test, sgxfive_kpoke_parse("ta:1^=3", &p[1]), 0);
 	KUNIT_ASSERT_EQ(test, sgxfive_kpoke_arm(&sgx->kpokes, p, 2), 0);
@@ -953,10 +954,79 @@ static void sgxfive_kpoke_test_reset_disarms(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, sgx->kpokes.n, 0u);
 	KUNIT_EXPECT_FALSE(test, sgx->tdfill.armed);
 	KUNIT_EXPECT_FALSE(test, sgx->render_share_pb);
+	KUNIT_EXPECT_FALSE(test, sgx->render_keep);
 	KUNIT_EXPECT_FALSE(test, sgx->hostirq.armed);
 	KUNIT_EXPECT_FALSE(test, sgx->alias_ctx_rw);
 	KUNIT_EXPECT_EQ(test, atomic_read(&sgx->hostirq.irqs), 0);
 	KUNIT_EXPECT_EQ(test, atomic_read(&sgx->hostirq.extra), 0);
+}
+
+/* What the drain's callback saw: the nodes in order, and whether the lock was free. */
+struct keep_seen {
+	struct sgxfive_keep *k;
+	struct sgxfive_kept *node[4];
+	unsigned int n;
+	bool lock_free;
+};
+
+static void keep_seen_fn(struct sgxfive_kept *node, void *arg)
+{
+	struct keep_seen *s = arg;
+
+	if (s->n == 0)
+		s->lock_free = spin_trylock(&s->k->lock);
+	if (s->lock_free && s->n == 0)
+		spin_unlock(&s->k->lock);
+	if (s->n < ARRAY_SIZE(s->node))
+		s->node[s->n] = node;
+	s->n++;
+}
+
+/*
+ * debugfs render_keep: contexts parked in the order they were closed, drained
+ * oldest first with no lock held, each once, and the list is usable again.
+ */
+static void sgxfive_kpoke_test_keep(struct kunit *test)
+{
+	struct sgxfive_keep *k = kunit_kzalloc(test, sizeof(*k), GFP_KERNEL);
+	struct sgxfive_kept node[3];
+	struct keep_seen s = { .k = k };
+
+	KUNIT_ASSERT_NOT_NULL(test, k);
+	sgxfive_keep_init(k);
+	KUNIT_EXPECT_EQ(test, sgxfive_keep_drain(k, keep_seen_fn, &s), 0u);
+	KUNIT_EXPECT_EQ(test, s.n, 0u);
+	sgxfive_keep_park(k, &node[0]);
+	sgxfive_keep_park(k, &node[1]);
+	sgxfive_keep_park(k, &node[2]);
+	KUNIT_EXPECT_EQ(test, k->n, 3u);
+	KUNIT_EXPECT_EQ(test, sgxfive_keep_drain(k, keep_seen_fn, &s), 3u);
+	KUNIT_EXPECT_EQ(test, s.n, 3u);
+	KUNIT_EXPECT_PTR_EQ(test, s.node[0], &node[0]);
+	KUNIT_EXPECT_PTR_EQ(test, s.node[1], &node[1]);
+	KUNIT_EXPECT_PTR_EQ(test, s.node[2], &node[2]);
+	KUNIT_EXPECT_TRUE(test, s.lock_free);
+	KUNIT_EXPECT_EQ(test, k->n, 0u);
+	KUNIT_EXPECT_TRUE(test, list_empty(&k->list));
+	/* Each node once, and the list takes new ones. */
+	KUNIT_EXPECT_EQ(test, sgxfive_keep_drain(k, keep_seen_fn, &s), 0u);
+	sgxfive_keep_park(k, &node[1]);
+	KUNIT_EXPECT_EQ(test, k->n, 1u);
+	KUNIT_EXPECT_EQ(test, sgxfive_keep_drain(k, keep_seen_fn, &s), 1u);
+	KUNIT_EXPECT_PTR_EQ(test, s.node[3], &node[1]);
+}
+
+/* The switch is taken once, by the first render context closed, and reset drops it. */
+static void sgxfive_kpoke_test_keep_switch(struct kunit *test)
+{
+	struct sgxfive *sgx = kunit_kzalloc(test, sizeof(*sgx), GFP_KERNEL);
+
+	KUNIT_ASSERT_NOT_NULL(test, sgx);
+	KUNIT_EXPECT_FALSE(test, sgxfive_take_render_keep(sgx));
+	sgx->render_keep = true;
+	KUNIT_EXPECT_TRUE(test, sgxfive_take_render_keep(sgx));
+	KUNIT_EXPECT_FALSE(test, sgxfive_take_render_keep(sgx));
+	KUNIT_EXPECT_FALSE(test, sgx->render_keep);
 }
 
 /*
@@ -1018,6 +1088,8 @@ static struct kunit_case sgxfive_kpoke_test_cases[] = {
 	KUNIT_CASE(sgxfive_kpoke_test_debug_irq),
 	KUNIT_CASE(sgxfive_kpoke_test_reset_disarms),
 	KUNIT_CASE(sgxfive_kpoke_test_oneshot),
+	KUNIT_CASE(sgxfive_kpoke_test_keep),
+	KUNIT_CASE(sgxfive_kpoke_test_keep_switch),
 	KUNIT_CASE(sgxfive_kpoke_test_tdfill),
 	KUNIT_CASE(sgxfive_kpoke_test_tdfill_take),
 	KUNIT_CASE(sgxfive_kpoke_test_tdfill_place),

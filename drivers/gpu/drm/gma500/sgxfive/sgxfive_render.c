@@ -48,6 +48,9 @@ struct sgxfive_render {
 	bool pb_shared;			/* it runs on a sibling's PB (debug option) */
 	struct sgxfive_ctx *donor;	/* that PB's context, referenced until this is freed */
 	struct sgxfive_deferred release;
+#if IS_ENABLED(CONFIG_DRM_GMA500_SGXFIVE_DEBUG)
+	struct sgxfive_kept kept;	/* parked here when closed with debugfs render_keep */
+#endif
 };
 
 static u32 *rctx(struct sgxfive_ctx *ctx, u32 off)
@@ -290,6 +293,53 @@ bool sgxfive_cleanup_reset(struct sgxfive *sgx)
 	return !dropped;
 }
 
+/* Its mappings and slot given back, its memory freed once no stale translation can reach it. */
+static void sgxfive_render_drop(struct sgxfive_render *r)
+{
+	struct sgxfive_ctx *ctx = r->ctx;
+
+	sgxfive_render_unmap(r);
+	sgxfive_vm_render_detach(ctx->vm, r->slot);
+	r->release.free = sgxfive_render_release;
+	sgxfive_defer(ctx->sgx, &r->release);
+}
+
+#if IS_ENABLED(CONFIG_DRM_GMA500_SGXFIVE_DEBUG)
+/*
+ * With debugfs render_keep armed, the context closed next is not dropped: the
+ * firmware has had its CLEANUP, but its pages stay mapped in its VM, its slot
+ * stays taken and its memory stays, parked until debugfs reset or the device's
+ * destruction (sgxfive_render_keep_release). The switch is taken before the
+ * CLEANUP (sgxfive_render_fini), because a CLEANUP the firmware does not
+ * answer runs a recovery, which drops a switch still set.
+ */
+static void sgxfive_render_park(struct sgxfive_ctx *ctx, struct sgxfive_render *r)
+{
+	sgxfive_keep_park(&ctx->sgx->kept, &r->kept);
+	drm_info(ctx->sgx->dev,
+		 "sgxfive: render context %#x closed and kept: slot %u, TA data %#x\n",
+		 r->a.ctx, r->slot, r->a.tadata);
+}
+
+static void sgxfive_render_keep_one(struct sgxfive_kept *kept, void *arg)
+{
+	sgxfive_render_drop(container_of(kept, struct sgxfive_render, kept));
+}
+
+/* Let the kept contexts go the usual way (debugfs reset, the device's destruction). */
+void sgxfive_render_keep_release(struct sgxfive *sgx)
+{
+	unsigned int n = sgxfive_keep_drain(&sgx->kept, sgxfive_render_keep_one, NULL);
+
+	if (n)
+		drm_info(sgx->dev, "sgxfive: %u kept render context(s) released\n", n);
+}
+#else
+static void sgxfive_render_park(struct sgxfive_ctx *ctx, struct sgxfive_render *r)
+{
+}
+#endif
+
 /*
  * The last reference to a render context is gone and it is off the device's
  * list: the firmware drops its state (CLEANUP; a blame-free reset if it does
@@ -304,14 +354,15 @@ void sgxfive_render_fini(struct sgxfive_ctx *ctx)
 {
 	struct sgxfive_render *r = ctx->render;
 	struct sgxfive *sgx = ctx->sgx;
+	bool keep = sgxfive_take_render_keep(sgx);	/* before a CLEANUP reset can drop it */
 
 	if (sgxfive_render_cleanup(sgx, r->a.rtds, r->a.ctx, r->pb_shared ? 0 : r->a.pbdesc,
 				   *rctx(ctx, SGXFIVE_CTX_HW_OFF)))
 		sgxfive_cleanup_reset(sgx);
-	sgxfive_render_unmap(r);
-	sgxfive_vm_render_detach(ctx->vm, r->slot);
-	r->release.free = sgxfive_render_release;
-	sgxfive_defer(sgx, &r->release);
+	if (keep)
+		sgxfive_render_park(ctx, r);
+	else
+		sgxfive_render_drop(r);
 }
 
 #if IS_ENABLED(CONFIG_DRM_GMA500_SGXFIVE_DEBUG)

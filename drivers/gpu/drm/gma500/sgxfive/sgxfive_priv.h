@@ -151,6 +151,8 @@ struct sgxfive {
 	bool rtds_keep;			/* renders: no RT data set rewrite */
 	bool render_share_pb;		/* the next render context shares a PB, once */
 	bool alias_ctx_rw;		/* the next render context's page writable, once */
+	bool render_keep;		/* the next render context closed is kept, once */
+	struct sgxfive_keep kept;	/* the kept ones (debugfs render_keep) */
 	struct sgxfive_tdfill tdfill;	/* the next render's TA data page fill */
 	struct sgxfive_hostirq hostirq;	/* host interrupts, kregnow's enables */
 	struct sgxfive_own own;		/* our own firmware task: blob and arming */
@@ -409,6 +411,12 @@ static inline bool sgxfive_take_ctx_rw(struct sgxfive *sgx)
 	return sgxfive_oneshot_take(&sgx->alias_ctx_rw);
 }
 
+/* Whether the render context closed next is kept: taken once (debugfs render_keep). */
+static inline bool sgxfive_take_render_keep(struct sgxfive *sgx)
+{
+	return sgxfive_oneshot_take(&sgx->render_keep);
+}
+
 /* Whether the next render context runs on a sibling's PB: taken once (debugfs render_share_pb). */
 static inline bool sgxfive_take_share_pb(struct sgxfive *sgx)
 {
@@ -526,6 +534,11 @@ static inline u32 sgxfive_render_pb_pages(struct sgxfive *sgx)
 }
 
 static inline bool sgxfive_take_ctx_rw(struct sgxfive *sgx)
+{
+	return false;
+}
+
+static inline bool sgxfive_take_render_keep(struct sgxfive *sgx)
 {
 	return false;
 }

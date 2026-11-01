@@ -43,6 +43,7 @@
 #define _SGXFIVE_KPOKE_H_
 
 #include <linux/atomic.h>
+#include <linux/list.h>
 #include <linux/spinlock.h>
 #include <linux/types.h>
 
@@ -208,6 +209,39 @@ bool sgxfive_tdfill_take(struct sgxfive *sgx, struct sgxfive_tdfill *f);
  * nothing written, for a page past the context's own.
  */
 bool sgxfive_tdfill_place(const struct sgxfive_tdfill *f, u8 *td, unsigned int td_pages);
+
+/*
+ * debugfs render_keep: the next render context that is closed keeps what its
+ * close would give back, once (the switch clears itself): the firmware still
+ * gets its CLEANUP, but the context's pages stay mapped in its VM, its render
+ * slot stays taken and its memory is not freed, so that a later context of the
+ * VM can touch them (a render following a closed DPM owner, Q045). The kept
+ * contexts are parked here, oldest first, until debugfs reset or the device's
+ * destruction lets them go the usual way. lock guards the list and n.
+ *
+ * The switch is taken when the close starts, before the CLEANUP: a CLEANUP the
+ * firmware does not answer runs a recovery reset, which would drop a switch
+ * still set and so silently cancel the keep; taken first, the context is kept
+ * even when its CLEANUP timed out.
+ */
+struct sgxfive_kept {
+	struct list_head link;
+};
+
+struct sgxfive_keep {
+	spinlock_t lock;
+	struct list_head list;
+	unsigned int n;
+};
+
+void sgxfive_keep_init(struct sgxfive_keep *k);
+void sgxfive_keep_park(struct sgxfive_keep *k, struct sgxfive_kept *kept);
+/*
+ * Take every parked context, oldest first, off the list and call fn(kept, arg)
+ * on each with no lock held (fn may free it); returns how many.
+ */
+unsigned int sgxfive_keep_drain(struct sgxfive_keep *k,
+				void (*fn)(struct sgxfive_kept *kept, void *arg), void *arg);
 
 /*
  * Switches a tester arms from debugfs for the next thing that reads them
