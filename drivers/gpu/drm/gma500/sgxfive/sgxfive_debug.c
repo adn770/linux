@@ -922,9 +922,9 @@ bool sgxfive_recovery_hold(struct sgxfive *sgx, u64 *suspect, enum sgxfive_hang 
 	bool unfinished;
 
 	if (*why == SGXFIVE_HANG_CLEANUP)
-		return sgx->recovery_held;
+		return sgxfive_recovery_held(sgx);
 	if (*why == SGXFIVE_HANG_MANUAL) {
-		if (!sgx->recovery_held || *suspect != U64_MAX)
+		if (!sgxfive_recovery_held(sgx) || *suspect != U64_MAX)
 			return false;
 		spin_lock_irq(&sgx->ctx_lock);
 		unfinished = sgxfive_ctx_of_job(&sgx->ctx_list, sgx->held_suspect);
@@ -937,7 +937,7 @@ bool sgxfive_recovery_hold(struct sgxfive *sgx, u64 *suspect, enum sgxfive_hang 
 	}
 	if (!READ_ONCE(sgx->hold_recovery))
 		return false;
-	if (!sgx->recovery_held) {
+	if (!sgxfive_recovery_held(sgx)) {
 		drm_warn(sgx->dev,
 			 "sgxfive: job %llu hung, recovery held (debugfs hold_recovery)\n",
 			 *suspect);
