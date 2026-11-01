@@ -3,7 +3,9 @@
  * Builders for the SGX545 transfer queue (resgx545's doc/specs/transfer.md).
  * A dummy transfer runs the EDM's whole queue path except the render: the
  * sync test, the switch to the context's page directory, the memory updates,
- * the status writes, the SW_EVENT interrupt and the client CCB advance.
+ * the status writes, the SW_EVENT interrupt and the client CCB advance. A
+ * fill adds a render: a background object whose PDS programs come from the
+ * firmware file's templates, and the command's register block.
  */
 #include "sgx_xfer.h"
 
@@ -57,4 +59,98 @@ void sgx_xfer_ctx_init(u8 *ctx, u32 pd_phys, u32 ccb, u32 ccb_ctl)
 	put32(ctx, SGX_XFER_CTX_PD, pd_phys);
 	put32(ctx, SGX_XFER_CTX_CCB, ccb);
 	put32(ctx, SGX_XFER_CTX_CCB_CTL, ccb_ctl);
+}
+
+/* Vertex coordinates: 24-bit fixed point, 8 fraction bits, offset 4096. */
+static u32 vtx(u32 c)
+{
+	return ((c + 0x1000) << 8) & 0xffffff;
+}
+
+/*
+ * The three vertices (top-left, top-right, bottom-left) in 8 dwords, 80 bits
+ * each: Y, then X, then 32 bits of zero (Z = 0). So the second vertex starts
+ * in the high half of v[2].
+ */
+static void put_vertices(u32 v[8], const struct sgx_xfer_rect *r)
+{
+	u32 x0 = vtx(r->x0), y0 = vtx(r->y0), x1 = vtx(r->x1), y1 = vtx(r->y1);
+
+	v[0] = y0 | (x0 & 0xff) << 24;
+	v[1] = x0 >> 8;
+	v[2] = (y0 & 0xffff) << 16;
+	v[3] = (y0 >> 16) | x1 << 8;
+	v[4] = 0;
+	v[5] = y1 | (x0 & 0xff) << 24;
+	v[6] = x0 >> 8;
+	v[7] = 0;
+}
+
+/*
+ * The PDS state words: the secondary program's offset from the PDS code base
+ * and its data size, the primary's attribute count, then the primary's
+ * offset and data size. Offsets and sizes are in 16-byte units.
+ */
+static void put_pds_state(u32 bg[3], u32 pds_base, u32 pri, u32 pri_data,
+			  u32 sec, u32 sec_data, u32 pri_attrs)
+{
+	bg[0] = ((sec - pds_base) >> 4) | (sec_data >> 4) << 26;
+	bg[1] = (pri_attrs + 3) >> 2 | 3 << 16;
+	bg[2] = ((pri - pds_base) >> 4) | (pri_data >> 4) << 26;
+}
+
+/*
+ * The background object of a fast-scale render with no texture layer: the
+ * PDS state for the secondary and primary programs, then the rectangle's
+ * vertices. pri_data and sec_data are the programs' data sizes in bytes.
+ */
+void sgx_xfer_bgobj(u32 bg[SGX_XFER_BGOBJ_DWORDS], u32 pds_base, u32 pri,
+		    u32 pri_data, u32 sec, u32 sec_data,
+		    const struct sgx_xfer_rect *r)
+{
+	unsigned int i;
+
+	for (i = 0; i < SGX_XFER_BGOBJ_DWORDS; i++)
+		bg[i] = 0;
+	put_pds_state(bg, pds_base, pri, pri_data, sec, sec_data, 0);
+	put_vertices(&bg[9], r);
+}
+
+/*
+ * A fill's command: the register block, the size, one status write (the
+ * fence) and the fence count. The fixed words are those the firmware file's
+ * TQ_CMD list holds for a fill; the debug check compares them. Returns the
+ * command's size in the CCB.
+ */
+u32 sgx_xfer_fill_cmd(u8 *cmd, const struct sgx_xfer_fill *f)
+{
+	const struct sgx_xfer_rect *r = &f->rect;
+	const u32 size = 0x1c0;
+	unsigned int i;
+
+	for (i = 0; i < SGX_XFER_CMD_SIZE; i++)
+		cmd[i] = 0;
+	put32(cmd, SGX_XFER_BG_TAG, (f->bg - f->req_base) >> 4);
+	put32(cmd, SGX_XFER_BG_OBJ, 0x200);		/* background enabled */
+	put32(cmd, SGX_XFER_BG_DEPTH, 0x3f800000);	/* 1.0f */
+	put32(cmd, SGX_XFER_RENDER, 3);			/* fast scale */
+	put32(cmd, SGX_XFER_IPF_MISC, 0x100);		/* process empty tiles */
+	put32(cmd, SGX_XFER_REQ_BASE, f->req_base);
+	put32(cmd, SGX_XFER_REG_01C, 0x80000000);
+	put32(cmd, SGX_XFER_MULTISAMP, 0x88);
+	put32(cmd, SGX_XFER_PIXEV_CODE, f->pixev_exec & ~0xfu);
+	put32(cmd, SGX_XFER_PIXEV_DATA, 5);		/* 0x50 bytes */
+	put32(cmd, SGX_XFER_PIXEV_INFO, 1);
+	put32(cmd, SGX_XFER_BOX_MIN, (r->y0 >> 4) | (r->x0 >> 5) << 16);
+	put32(cmd, SGX_XFER_BOX_MAX, (((r->y1 + 15) >> 4) - 1) |
+				     (((r->x1 + 31) >> 5) - 1) << 16);
+	put32(cmd, SGX_XFER_REG_038, 0x80);
+	put32(cmd, SGX_XFER_PDS_EXEC_BASE, f->pds_exec_base);
+	put32(cmd, SGX_XFER_SIZE, size);
+	put32(cmd, SGX_XFER_NUM_STATUS, 1);
+	put32(cmd, SGX_XFER_STATUS, f->status_addr);
+	put32(cmd, SGX_XFER_STATUS + 4, f->fence_id + 1);
+	put32(cmd, SGX_XFER_PIXEL_PARTITIONS, 0x07c00000);
+	put32(cmd, SGX_XFER_FENCE, f->fence_id);
+	return size;
 }

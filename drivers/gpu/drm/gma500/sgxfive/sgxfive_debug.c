@@ -29,10 +29,16 @@
  * own page directory maps it: a 64 KiB client CCB (plus room for a command
  * at its end), its control block, one HW transfer context and a scratch
  * page: U (update target), F (status target) and, from SCR_SYNC_READ, the
- * read- and write-complete counters of a destination sync.
+ * read- and write-complete counters of a destination sync. For a render
+ * there are also a page of PDS code at the PDS heap base, a page of USE code
+ * at the pixel-shader code base, the background object, and a destination
+ * of two pages plus a guard page.
  */
 enum { SCR_U = 0, SCR_F = 1, SCR_SYNC_READ = 8, SCR_SYNC_WRITE = 9 };
-enum { XB_CCB, XB_CCB_CTL, XB_CTX, XB_SCRATCH, XB_COUNT };
+enum {
+	XB_CCB, XB_CCB_CTL, XB_CTX, XB_SCRATCH, XB_PDS, XB_USE, XB_BG, XB_DST,
+	XB_COUNT
+};
 
 /* By heap and offset, so the area follows the layout. */
 static const struct {
@@ -44,6 +50,10 @@ static const struct {
 	[XB_CCB_CTL] = { HEAP_KERNEL_DATA, 0x120000, 8 },
 	[XB_CTX] = { HEAP_KERNEL_DATA, 0x121000, SGX_XFER_CTX_SIZE },
 	[XB_SCRATCH] = { HEAP_KERNEL_DATA, 0x122000, 0x40 },
+	[XB_PDS] = { HEAP_PDSPIXEL, 0, 0x1000 },	/* the PDS code base */
+	[XB_USE] = { HEAP_PIXELSHADER, 0, 0x1000 },	/* the USE code base */
+	[XB_BG] = { HEAP_KERNEL_DATA, 0x130000, 4 * SGX_XFER_BGOBJ_DWORDS },
+	[XB_DST] = { HEAP_KERNEL_DATA, 0x200000, 0x3000 },
 };
 
 static_assert(XB_COUNT <= SGXFIVE_XBUFS);
@@ -333,6 +343,241 @@ static int sgxfive_xfer_sync(struct sgxfive *sgx, struct drm_printer *p)
 	return bad ? -EIO : 0;
 }
 
+/*
+ * Where the transfer programs go: PDS code at the PDS heap base, USE code at
+ * the pixel-shader code base, each inside the one page mapped there. The
+ * programs come from the firmware file's templates; each operation places
+ * only its own, and one transfer is in flight at a time.
+ */
+struct sgxfive_tq_slot {
+	u8 area;		/* XB_PDS or XB_USE; 0 = not used */
+	u16 off;
+};
+
+static const struct sgxfive_tq_slot sgxfive_fill_place[SGX_FW_TQ_MAX] = {
+	[SGX_FW_TQ_PDS_PRIM] = { XB_PDS, 0x00 },
+	[SGX_FW_TQ_PDS_SEC] = { XB_PDS, 0x20 },
+	[SGX_FW_TQ_PDS_PIXEVENT] = { XB_PDS, 0x40 },
+	[SGX_FW_TQ_USE_FILL] = { XB_USE, 0x00 },
+	[SGX_FW_TQ_USE_SEC] = { XB_USE, 0x10 },
+	[SGX_FW_TQ_USE_EOT] = { XB_USE, 0x20 },
+	[SGX_FW_TQ_USE_EOR] = { XB_USE, 0x60 },
+};
+
+/* Place one operation's templates; progs[] gets their CPU addresses. */
+static int sgxfive_tq_place(struct sgxfive *sgx,
+			    const struct sgxfive_tq_slot *place, u32 set,
+			    u8 *progs[SGX_FW_TQ_MAX])
+{
+	struct sgx_fw_layout *l = &sgx->layout;
+	unsigned int i;
+
+	l->tq_set = 0;
+	for (i = 0; i < SGX_FW_TQ_MAX; i++) {
+		progs[i] = NULL;
+		if (!(set & 1u << i) || !sgx_fw_tq(&sgx->fw, i) || !place[i].area)
+			continue;
+		l->tq_addr[i] = xb_addr(sgx, place[i].area) + place[i].off;
+		l->tq_set |= 1u << i;
+		progs[i] = (u8 *)xb_va(sgx, place[i].area) + place[i].off;
+	}
+	return sgx_fw_tq_need(&sgx->fw, l, set);
+}
+
+#define FILL_SENTINEL	0xdeadbeef
+
+/*
+ * Fill cases: a rectangle of a surface at the start of the destination area,
+ * whose stride may be padded. Every dword of the three destination pages is
+ * checked: the colour inside the rectangle, the sentinel everywhere else.
+ */
+static const struct sgxfive_fill_case {
+	const char *name;
+	u32 x, y, w, h, stride, colour;
+} sgxfive_fill_cases[] = {
+	{ "whole 64x32", 0, 0, 64, 32, 256, 0xff336699 },
+	{ "32x16 at (8,4), stride 320", 8, 4, 32, 16, 320, 0xff00ff00 },
+	{ "33x16 at (20,10), across tiles", 20, 10, 33, 16, 256, 0x80112233 },
+	{ "one pixel at (63,31)", 63, 31, 1, 1, 256, 0x12345678 },
+};
+
+/* Where a transfer writes: the destination's CPU and device addresses. */
+struct sgxfive_fill_target {
+	u32 *cpu;
+	u32 addr;
+};
+
+/*
+ * Queue one transfer whose programs and background object are in place and
+ * wait for it: build the command with sgx_xfer_fill_cmd(), check it word for
+ * word against the firmware file's TQ_CMD list, kick, sleep until SW_EVENT,
+ * then check the fence, the CCB, the context count and the event count.
+ */
+static int sgxfive_tq_run(struct sgxfive *sgx, struct drm_printer *p,
+			  struct sgx_xfer_fill *f,
+			  const u32 params[SGX_FW_TQ_NUM_PARAMS],
+			  const struct sgxfive_fill_target *t, int *bad)
+{
+	struct sgx_fw_layout *l = &sgx->layout;
+	u32 *ctl = xb_va(sgx, XB_CCB_CTL), *scr = xb_va(sgx, XB_SCRATCH);
+	u32 *ctx = xb_va(sgx, XB_CTX);
+	u8 *cmd = (u8 *)xb_va(sgx, XB_CCB) + sgx->xt.woff;
+	const u32 data[] = { 0, xb_addr(sgx, XB_CTX) };
+	struct sgx_fw_write cw[16];
+	u32 size, done;
+	int i, n, ret, sw0, wrong = 0;
+
+	f->bg = xb_addr(sgx, XB_BG);
+	f->req_base = xb_addr(sgx, XB_BG) & 0xfff00000;
+	f->pds_exec_base = xb_addr(sgx, XB_PDS);
+	f->pixev_exec = l->tq_addr[SGX_FW_TQ_PDS_PIXEVENT];
+	f->status_addr = xb_addr(sgx, XB_SCRATCH) + 4 * SCR_F;
+	f->fence_id = sgx->xt.runs;
+	if (!sgx->xt.runs)
+		sgx_xfer_ctx_init((u8 *)ctx, l->pd_phys, xb_addr(sgx, XB_CCB),
+				  xb_addr(sgx, XB_CCB_CTL));
+	WRITE_ONCE(scr[SCR_F], 0);
+
+	size = sgx_xfer_fill_cmd(cmd, f);
+	n = sgx_fw_tq_cmd(&sgx->fw, l, params, cw, ARRAY_SIZE(cw));
+	if (n < 0)
+		return n;
+	for (i = 0; i < n; i++) {
+		u32 *w = (u32 *)(cmd + cw[i].reg);
+
+		if (*w != cw[i].val) {
+			drm_printf(p, "command word %#x: built %#x, TQ_CMD %#x\n",
+				   cw[i].reg, *w, cw[i].val);
+			wrong++;
+		}
+	}
+	if (wrong)
+		return -EINVAL;
+	drm_printf(p, "command matches the %d TQ_CMD words\n", n);
+
+	done = (sgx->xt.woff + size) & (SGX_XFER_CCB_SIZE - 1);
+	WRITE_ONCE(ctl[0], done);
+	sw0 = atomic_read(&sgx->sw_events);
+	/* New pages were mapped: the BIF must refetch PD and PT entries. */
+	sgx->cache_control |= SGX_CC_INVAL_BIF | SGX_CC_INVAL_DATA;
+	wmb(); /* programs, object, command and sentinels before the kick */
+	ret = sgxfive_command(sgx, SGX_CMD_TRANSFER, data, ARRAY_SIZE(data));
+	if (ret) {
+		WRITE_ONCE(ctl[0], sgx->xt.woff);	/* not announced: withdraw */
+		return ret;
+	}
+	sgx->xt.woff = done;
+	sgx->xt.runs++;
+	if (sgxfive_wait_event(sgx, p, sw0, &scr[SCR_F], f->fence_id + 1))
+		(*bad)++;
+
+	sgxfive_check(p, "status F", READ_ONCE(scr[SCR_F]), f->fence_id + 1, bad);
+	sgxfive_check(p, "ccb read off", READ_ONCE(ctl[1]), done, bad);
+	sgxfive_check(p, "ctx count", READ_ONCE(ctx[SGX_XFER_CTX_COUNT / 4]), 0,
+		      bad);
+	sgxfive_check(p, "sw events", atomic_read(&sgx->sw_events) - sw0, 1, bad);
+	sgxfive_check(p, "bif faults", atomic_read(&sgx->bif_faults), 0, bad);
+	return 0;
+}
+
+/*
+ * Check every dword of the destination area (three pages): the colour
+ * inside the rectangle, the sentinel outside it.
+ */
+static void sgxfive_check_dst(struct drm_printer *p, const u32 *dst, u32 stride,
+			      const struct sgx_xfer_rect *r, u32 colour,
+			      int *bad)
+{
+	unsigned int i, wrong = 0, first_bad = ~0u;
+
+	for (i = 0; i < 3 * PAGE_SIZE / 4; i++) {
+		u32 x = i % (stride / 4), y = i / (stride / 4), want = FILL_SENTINEL;
+
+		if (x >= r->x0 && x < r->x1 && y >= r->y0 && y < r->y1)
+			want = colour;
+		if (READ_ONCE(dst[i]) != want) {
+			wrong++;
+			if (first_bad == ~0u)
+				first_bad = i;
+		}
+	}
+	if (first_bad != ~0u)
+		drm_printf(p, "first wrong dword %u (x %u, y %u) = %#x\n", first_bad,
+			   first_bad % (stride / 4), first_bad / (stride / 4),
+			   READ_ONCE(dst[first_bad]));
+	sgxfive_check(p, "wrong dwords", wrong, 0, bad);
+}
+
+/* A solid fill of one case. */
+static int sgxfive_xfer_fill(struct sgxfive *sgx, struct drm_printer *p,
+			     const struct sgxfive_fill_case *fc,
+			     const struct sgxfive_fill_target *t)
+{
+	struct sgx_fw_layout *l = &sgx->layout;
+	const struct sgx_fw_tq_fill tf = {
+		.dest = t->addr, .width = fc->w, .height = fc->h,
+		.stride = fc->stride, .colour = fc->colour, .x = fc->x, .y = fc->y,
+	};
+	const struct sgx_fw_tq *pri = sgx_fw_tq(&sgx->fw, SGX_FW_TQ_PDS_PRIM);
+	const struct sgx_fw_tq *sec = sgx_fw_tq(&sgx->fw, SGX_FW_TQ_PDS_SEC);
+	struct sgx_xfer_fill f = {
+		.rect = { fc->x, fc->y, fc->x + fc->w, fc->y + fc->h },
+	};
+	u32 params[SGX_FW_TQ_NUM_PARAMS];
+	u8 *progs[SGX_FW_TQ_MAX];
+	unsigned int i;
+	int ret, bad = 0;
+
+	if (!sgx->live)
+		return -ENODEV;
+	if (!pri || !sec) {
+		drm_printf(p, "the firmware file has no fill templates (v1)\n");
+		return -ENOENT;
+	}
+	ret = sgxfive_tq_place(sgx, sgxfive_fill_place, SGX_FW_TQ_FILL_SET, progs);
+	if (!ret)
+		ret = sgx_fw_tq_fill_params(&tf, params);
+	if (!ret)
+		ret = sgx_fw_tq_build(&sgx->fw, l, params, progs);
+	if (ret) {
+		drm_printf(p, "building the fill programs failed: %d\n", ret);
+		return ret;
+	}
+	sgx_xfer_bgobj(xb_va(sgx, XB_BG), xb_addr(sgx, XB_PDS),
+		       l->tq_addr[SGX_FW_TQ_PDS_PRIM], pri->pds_data,
+		       l->tq_addr[SGX_FW_TQ_PDS_SEC], sec->pds_data, &f.rect);
+	for (i = 0; i < 3 * PAGE_SIZE / 4; i++)
+		WRITE_ONCE(t->cpu[i], FILL_SENTINEL);
+
+	drm_printf(p, "fill %s: ", fc->name);
+	ret = sgxfive_tq_run(sgx, p, &f, params, t, &bad);
+	if (ret)
+		return ret;
+	rmb(); /* fresh reads of what the GPU wrote */
+	sgxfive_check_dst(p, t->cpu, fc->stride, &f.rect, fc->colour, &bad);
+	drm_printf(p, "%s\n", bad ? "MISMATCHES" : "solid fill correct");
+	return bad ? -EIO : 0;
+}
+
+/* Every fill case on the destination area; a queue failure stops the run. */
+static int sgxfive_xfer_fills(struct sgxfive *sgx, struct drm_printer *p)
+{
+	const struct sgxfive_fill_target t = {
+		.cpu = xb_va(sgx, XB_DST), .addr = xb_addr(sgx, XB_DST),
+	};
+	unsigned int i;
+	int ret = 0, r;
+
+	for (i = 0; i < ARRAY_SIZE(sgxfive_fill_cases); i++) {
+		r = sgxfive_xfer_fill(sgx, p, &sgxfive_fill_cases[i], &t);
+		if (r && !ret)
+			ret = r;
+		if (r && r != -EIO)
+			break;
+	}
+	return ret;
+}
+
 /* Run one check under the device lock; a mismatch still reads as text. */
 static int sgxfive_run(struct seq_file *m,
 		       int (*fn)(struct sgxfive *sgx, struct drm_printer *p))
@@ -361,6 +606,12 @@ static int sgxfive_xfer_sync_show(struct seq_file *m, void *unused)
 }
 DEFINE_SHOW_ATTRIBUTE(sgxfive_xfer_sync);
 
+static int sgxfive_xfer_fill_show(struct seq_file *m, void *unused)
+{
+	return sgxfive_run(m, sgxfive_xfer_fills);
+}
+DEFINE_SHOW_ATTRIBUTE(sgxfive_xfer_fill);
+
 void sgxfive_debug_init(struct sgxfive *sgx, struct dentry *dir)
 {
 	debugfs_create_file("miscinfo", 0400, dir, sgx, &sgxfive_miscinfo_fops);
@@ -368,4 +619,5 @@ void sgxfive_debug_init(struct sgxfive *sgx, struct dentry *dir)
 	debugfs_create_file("xfer_dummy", 0400, dir, sgx,
 			    &sgxfive_xfer_dummy_fops);
 	debugfs_create_file("xfer_sync", 0400, dir, sgx, &sgxfive_xfer_sync_fops);
+	debugfs_create_file("xfer_fill", 0400, dir, sgx, &sgxfive_xfer_fill_fops);
 }

@@ -112,6 +112,7 @@ enum {
 #define SGX_CMD_PROCESS_QUEUES	7
 
 /* Cache control bits a command carries: SGXMKIF_CC_INVAL_*. */
+#define SGX_CC_INVAL_BIF	0x3		/* page tables and directory */
 #define SGX_CC_INVAL_DATA	0x8
 
 /* The POWER command's request and the HostCtl power status bit it sets. */

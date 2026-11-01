@@ -33,6 +33,28 @@
 #define SGX_XFER_NUM_UPDATES	0x19c
 #define SGX_XFER_UPDATES	0x1a0				/* {addr, val}[101] */
 #define SGX_XFER_FLAG_DUMMY	0x20		/* no render, only the queue work */
+#define SGX_XFER_PIXEL_PARTITIONS 0x194
+#define SGX_XFER_FENCE		0x198		/* the context's fence count */
+
+/*
+ * The register block at the start of the command: words the EDM loads into
+ * the 3D pipe's registers before it starts the render.
+ */
+#define SGX_XFER_BG_TAG		0x000	/* background object: address, layers */
+#define SGX_XFER_BG_OBJ		0x004
+#define SGX_XFER_BG_DEPTH	0x008
+#define SGX_XFER_RENDER		0x00c	/* render mode */
+#define SGX_XFER_IPF_MISC	0x014
+#define SGX_XFER_REQ_BASE	0x018	/* the 3D requester's 1 MiB window */
+#define SGX_XFER_REG_01C	0x01c
+#define SGX_XFER_MULTISAMP	0x020
+#define SGX_XFER_PIXEV_CODE	0x024	/* the end-of-tile PDS program */
+#define SGX_XFER_PIXEV_DATA	0x028	/* ...its data size, 16-byte units */
+#define SGX_XFER_PIXEV_INFO	0x02c	/* ...its attribute count */
+#define SGX_XFER_BOX_MIN	0x030	/* render box in 32 x 16 tiles: y | x << 16 */
+#define SGX_XFER_BOX_MAX	0x034	/* ...inclusive */
+#define SGX_XFER_REG_038	0x038
+#define SGX_XFER_PDS_EXEC_BASE	0x03c
 
 /*
  * A device sync object: the pending values a command waits for and the
@@ -42,6 +64,29 @@ struct sgx_xfer_sync {
 	u32 read_pending, read_complete;
 	u32 write_pending, write_complete;
 };
+
+/* A transfer rectangle in pixels; x1 and y1 are exclusive. */
+struct sgx_xfer_rect {
+	u32 x0, y0, x1, y1;
+};
+
+#define SGX_XFER_BGOBJ_DWORDS	17	/* the background object, no layers */
+
+/* What a fill's command needs besides its programs. */
+struct sgx_xfer_fill {
+	struct sgx_xfer_rect rect;
+	u32 bg;			/* background object address */
+	u32 req_base;		/* the 1 MiB window holding bg */
+	u32 pixev_exec;		/* the end-of-tile PDS program */
+	u32 pds_exec_base;	/* the PDS code base */
+	u32 status_addr;	/* the fence word */
+	u32 fence_id;		/* written there as fence_id + 1 */
+};
+
+void sgx_xfer_bgobj(u32 bg[SGX_XFER_BGOBJ_DWORDS], u32 pds_base, u32 pri,
+		    u32 pri_data, u32 sec, u32 sec_data,
+		    const struct sgx_xfer_rect *r);
+u32 sgx_xfer_fill_cmd(u8 *cmd, const struct sgx_xfer_fill *f);
 
 u32 sgx_xfer_dummy(u8 *cmd, u32 status_addr, u32 status_val, u32 update_addr,
 		   u32 update_val, const struct sgx_xfer_sync *dst);
