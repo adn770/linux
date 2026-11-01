@@ -78,6 +78,14 @@ struct sgxfive_cleanup_trace {
 	u32 slots[SGXFIVE_CLEANUP_STEPS][2];
 };
 
+/* Which detector found a hang. */
+enum sgxfive_hang {
+	SGXFIVE_HANG_MANUAL,		/* a reset asked for (debugfs reset) */
+	SGXFIVE_HANG_CLEANUP,		/* a render context cleanup unanswered */
+	SGXFIVE_HANG_FAULT,		/* the BIF fault watchdog */
+	SGXFIVE_HANG_TIMEOUT,		/* the drm_sched job timeout */
+};
+
 struct sgxfive {
 	struct drm_device *dev;		/* for messages and debugfs */
 	void __iomem *regs;		/* the SGX register block */
@@ -134,6 +142,8 @@ struct sgxfive {
 	u32 timer_clock;		/* HostCtl's timer clock at boot, 0: default */
 	bool hold_recovery;		/* detectors report hangs, do not reset */
 	bool recovery_held;		/* one is held, under lock (logged once) */
+	u64 held_suspect;		/* its job, which the next reset blames */
+	enum sgxfive_hang held_why;	/* and the detector that found it */
 	bool rtds_keep;			/* renders: no RT data set rewrite */
 #endif
 };
@@ -276,13 +286,6 @@ int sgxfive_kick_transfer(struct sgxfive *sgx, u32 hw_ctx_addr);
 int sgxfive_sched_init(struct sgxfive *sgx);
 void sgxfive_sched_fini(struct sgxfive *sgx);
 
-/* Which detector found a hang. */
-enum sgxfive_hang {
-	SGXFIVE_HANG_MANUAL,		/* a reset asked for */
-	SGXFIVE_HANG_FAULT,		/* the BIF fault watchdog */
-	SGXFIVE_HANG_TIMEOUT,		/* the drm_sched job timeout */
-};
-
 u64 sgxfive_oldest(struct sgxfive *sgx);
 int sgxfive_recover(struct sgxfive *sgx, u64 suspect, enum sgxfive_hang why);
 int sgxfive_hang_error(enum sgxfive_hang why);
@@ -382,7 +385,13 @@ static inline u32 sgxfive_timer_clock(struct sgxfive *sgx, u32 dflt)
 	return v ? v : dflt;
 }
 
-bool sgxfive_recovery_hold(struct sgxfive *sgx, u64 suspect, enum sgxfive_hang why);
+bool sgxfive_recovery_hold(struct sgxfive *sgx, u64 *suspect, enum sgxfive_hang *why);
+
+/* Whether a recovery is held: the detectors have reported its hang already. */
+static inline bool sgxfive_recovery_held(struct sgxfive *sgx)
+{
+	return READ_ONCE(sgx->recovery_held);
+}
 
 /* Whether a render leaves its RT data set as it is (debugfs rtds_keep). */
 static inline bool sgxfive_rtds_keep(struct sgxfive *sgx)
@@ -449,8 +458,13 @@ static inline u32 sgxfive_timer_clock(struct sgxfive *sgx, u32 dflt)
 	return dflt;
 }
 
-static inline bool sgxfive_recovery_hold(struct sgxfive *sgx, u64 suspect,
-					 enum sgxfive_hang why)
+static inline bool sgxfive_recovery_hold(struct sgxfive *sgx, u64 *suspect,
+					 enum sgxfive_hang *why)
+{
+	return false;
+}
+
+static inline bool sgxfive_recovery_held(struct sgxfive *sgx)
 {
 	return false;
 }

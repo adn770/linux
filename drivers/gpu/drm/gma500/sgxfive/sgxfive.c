@@ -681,7 +681,9 @@ static int sgxfive_reset(struct sgxfive *sgx, u64 suspect, enum sgxfive_hang why
 
 /*
  * Reset the firmware and recover the render node's contexts (see above); why
- * says which detector found the hang, for the error.
+ * says which detector found the hang, for the error. With the debug option a
+ * recovery may be held: a debugfs reset written while one is held recovers
+ * its job, a failed cleanup's reset is dropped (sgxfive_recovery_hold).
  */
 int sgxfive_recover(struct sgxfive *sgx, u64 suspect, enum sgxfive_hang why)
 {
@@ -689,7 +691,7 @@ int sgxfive_recover(struct sgxfive *sgx, u64 suspect, enum sgxfive_hang why)
 	int ret;
 
 	mutex_lock(&sgx->lock);
-	if (sgxfive_recovery_hold(sgx, suspect, why)) {
+	if (sgxfive_recovery_hold(sgx, &suspect, &why)) {
 		mutex_unlock(&sgx->lock);
 		return 0;
 	}
@@ -929,7 +931,8 @@ static void sgxfive_reaper(struct work_struct *work)
  * cache requestors fault at page 0 during dummy transfers and the firmware
  * carries on. So recover only when that job is still the same, unfinished, a
  * poll after the fault was seen. The directory is read when a new BIF_FAULT
- * value is first seen.
+ * value is first seen. While a recovery is held (debug option) the hang has
+ * been reported: the polls go on without a word until the reset.
  */
 static void sgxfive_watchdog(struct work_struct *work)
 {
@@ -954,12 +957,15 @@ static void sgxfive_watchdog(struct work_struct *work)
 	suspect = sgxfive_suspect(sgx, sgx->fault_pd);
 	if (suspect != sgx->fault_suspect) {
 		sgx->fault_suspect = suspect;	/* look again next time */
-	} else {
-		drm_err(sgx->dev, "sgxfive: BIF fault %#x at %#x (PD %#x) stalls job %llu, recovering\n",
-			stat, fault, sgx->fault_pd, suspect);
-		sgxfive_recover(sgx, suspect, SGXFIVE_HANG_FAULT);
-		sgx->fault_suspect = U64_MAX;
+		sgxfive_watchdog_arm(sgx);
+		return;
 	}
+	if (!sgxfive_recovery_held(sgx))
+		drm_err(sgx->dev,
+			"sgxfive: BIF fault %#x at %#x (PD %#x) stalls job %llu, recovering\n",
+			stat, fault, sgx->fault_pd, suspect);
+	sgxfive_recover(sgx, suspect, SGXFIVE_HANG_FAULT);
+	sgx->fault_suspect = U64_MAX;
 	sgxfive_watchdog_arm(sgx);
 }
 

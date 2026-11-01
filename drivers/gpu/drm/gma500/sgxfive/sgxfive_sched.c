@@ -100,7 +100,9 @@ static struct dma_fence *sgxfive_prepare_job(struct drm_sched_job *sched_job,
  * recovery reset fails that job's context and re-runs every other context's
  * unfinished jobs. Either way the job stays with the scheduler, which frees it
  * once its fence signals (failed, if it was guilty), so this always reports
- * NO_HANG: the reset is done here, without stopping the scheduler.
+ * NO_HANG: the reset is done here, without stopping the scheduler. While a
+ * recovery is held (debug option) the hang has been reported: the timeouts go
+ * on without a word until the reset.
  */
 static enum drm_gpu_sched_stat sgxfive_timedout_job(struct drm_sched_job *sched_job)
 {
@@ -111,7 +113,8 @@ static enum drm_gpu_sched_stat sgxfive_timedout_job(struct drm_sched_job *sched_
 		sgx->hang_oldest = oldest;	/* progress since the last look */
 		return DRM_GPU_SCHED_STAT_NO_HANG;
 	}
-	drm_err(sgx->dev, "sgxfive: job %llu hung, recovering\n", oldest);
+	if (!sgxfive_recovery_held(sgx))
+		drm_err(sgx->dev, "sgxfive: job %llu hung, recovering\n", oldest);
 	sgxfive_recover(sgx, oldest, SGXFIVE_HANG_TIMEOUT);
 	sgx->hang_oldest = U64_MAX;
 	return DRM_GPU_SCHED_STAT_NO_HANG;

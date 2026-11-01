@@ -7,7 +7,8 @@
  * The first MiB VM_MAP may take.
  * The extra flags of new render contexts and the trace of their cleanup.
  * The timer clock the boot writes into HostCtl.
- * Recoveries held, and renders that keep their RT data set.
+ * Recoveries held, the reset that ends a hold, and renders that keep their
+ * RT data set. A render's run and the words render_words shows.
  */
 #include <kunit/test.h>
 #include <linux/module.h>
@@ -19,6 +20,7 @@
 
 #include "sgx_render.h"
 #include "sgxfive_ctx.h"
+#include "sgxfive_kpoke.h"
 #include "sgxfive_priv.h"
 
 static const struct sgx_render_addrs addrs = {
@@ -235,30 +237,270 @@ static void sgxfive_debug_test_timer_clock(struct kunit *test)
 
 /*
  * debugfs hold_recovery: the detectors' recoveries are held while it is set,
- * a reset asked for never is; the next reset ends the hold. rtds_keep reads
- * through.
+ * a reset asked for never is; the first held one is reported and remembered,
+ * and the detectors keep quiet until the next reset ends the hold. rtds_keep
+ * reads through.
  */
 static void sgxfive_debug_test_hold_recovery(struct kunit *test)
 {
 	struct sgxfive *sgx = kunit_kzalloc(test, sizeof(*sgx), GFP_KERNEL);
+	enum sgxfive_hang why;
+	u64 s;
 
 	KUNIT_ASSERT_NOT_NULL(test, sgx);
-	KUNIT_EXPECT_FALSE(test, sgxfive_recovery_hold(sgx, 3, SGXFIVE_HANG_FAULT));
-	KUNIT_EXPECT_FALSE(test, sgxfive_recovery_hold(sgx, 3, SGXFIVE_HANG_TIMEOUT));
-	KUNIT_EXPECT_FALSE(test, sgx->recovery_held);
+	spin_lock_init(&sgx->ctx_lock);
+	INIT_LIST_HEAD(&sgx->ctx_list);
+	s = 3;
+	why = SGXFIVE_HANG_FAULT;
+	KUNIT_EXPECT_FALSE(test, sgxfive_recovery_hold(sgx, &s, &why));
+	why = SGXFIVE_HANG_TIMEOUT;
+	KUNIT_EXPECT_FALSE(test, sgxfive_recovery_hold(sgx, &s, &why));
+	KUNIT_EXPECT_FALSE(test, sgxfive_recovery_held(sgx));
 
 	sgx->hold_recovery = true;
-	KUNIT_EXPECT_FALSE(test, sgxfive_recovery_hold(sgx, 3, SGXFIVE_HANG_MANUAL));
-	KUNIT_EXPECT_FALSE(test, sgx->recovery_held);
-	KUNIT_EXPECT_TRUE(test, sgxfive_recovery_hold(sgx, 3, SGXFIVE_HANG_FAULT));
-	KUNIT_EXPECT_TRUE(test, sgx->recovery_held);
-	KUNIT_EXPECT_TRUE(test, sgxfive_recovery_hold(sgx, 3, SGXFIVE_HANG_TIMEOUT));
+	s = U64_MAX;
+	why = SGXFIVE_HANG_MANUAL;
+	KUNIT_EXPECT_FALSE(test, sgxfive_recovery_hold(sgx, &s, &why));
+	KUNIT_EXPECT_FALSE(test, sgxfive_recovery_held(sgx));
+	KUNIT_EXPECT_EQ(test, s, U64_MAX);
+	KUNIT_EXPECT_EQ(test, why, SGXFIVE_HANG_MANUAL);
+	s = 3;
+	why = SGXFIVE_HANG_FAULT;
+	KUNIT_EXPECT_TRUE(test, sgxfive_recovery_hold(sgx, &s, &why));
+	KUNIT_EXPECT_TRUE(test, sgxfive_recovery_held(sgx));
+	KUNIT_EXPECT_EQ(test, sgx->held_suspect, 3ull);
+	KUNIT_EXPECT_EQ(test, sgx->held_why, SGXFIVE_HANG_FAULT);
+	/* Later rounds, of either detector, change nothing. */
+	s = 4;
+	why = SGXFIVE_HANG_TIMEOUT;
+	KUNIT_EXPECT_TRUE(test, sgxfive_recovery_hold(sgx, &s, &why));
+	KUNIT_EXPECT_EQ(test, sgx->held_suspect, 3ull);
+	KUNIT_EXPECT_EQ(test, sgx->held_why, SGXFIVE_HANG_FAULT);
 	sgxfive_debug_reset(sgx);
-	KUNIT_EXPECT_FALSE(test, sgx->recovery_held);
+	KUNIT_EXPECT_FALSE(test, sgxfive_recovery_held(sgx));
 
 	KUNIT_EXPECT_FALSE(test, sgxfive_rtds_keep(sgx));
 	sgx->rtds_keep = true;
 	KUNIT_EXPECT_TRUE(test, sgxfive_rtds_keep(sgx));
+}
+
+/* A job of order on ctx, unfinished, its fence returned. */
+static struct dma_fence *fake_job(struct kunit *test, struct sgxfive_ctx *ctx, u32 seqno,
+				  u64 order)
+{
+	struct sgxfive_fence *hw = sgxfive_fence_alloc();
+
+	KUNIT_ASSERT_NOT_NULL(test, hw);
+	return sgxfive_fence_init(hw, ctx, seqno, order, SGX_XFER_CMD_SIZE);
+}
+
+/*
+ * A reset asked for while a recovery is held is that recovery: it blames the
+ * held job with its detector's error, so the job fails once instead of
+ * running again and hanging again. Not once the job has finished, nor a
+ * reset that names its own suspect, nor one without a hold. A failed render
+ * context cleanup's reset is dropped while a recovery is held, blaming no one.
+ */
+static void sgxfive_debug_test_held_reset(struct kunit *test)
+{
+	struct sgxfive *sgx = kunit_kzalloc(test, sizeof(*sgx), GFP_KERNEL);
+	struct sgxfive_ctx *ctx = fake_ctx(test);
+	struct dma_fence *f[2];
+	enum sgxfive_hang why;
+	u64 s;
+
+	KUNIT_ASSERT_NOT_NULL(test, sgx);
+	spin_lock_init(&sgx->ctx_lock);
+	INIT_LIST_HEAD(&sgx->ctx_list);
+	list_add_tail(&ctx->link, &sgx->ctx_list);
+	f[0] = fake_job(test, ctx, 1, 10);
+	f[1] = fake_job(test, ctx, 2, 11);
+
+	/* No hold: the reset blames no one, nor a failed cleanup's. */
+	s = U64_MAX;
+	why = SGXFIVE_HANG_MANUAL;
+	KUNIT_EXPECT_FALSE(test, sgxfive_recovery_hold(sgx, &s, &why));
+	KUNIT_EXPECT_EQ(test, s, U64_MAX);
+	KUNIT_EXPECT_EQ(test, why, SGXFIVE_HANG_MANUAL);
+	why = SGXFIVE_HANG_CLEANUP;
+	KUNIT_EXPECT_FALSE(test, sgxfive_recovery_hold(sgx, &s, &why));
+	KUNIT_EXPECT_EQ(test, s, U64_MAX);
+
+	sgx->hold_recovery = true;
+	s = 10;
+	why = SGXFIVE_HANG_TIMEOUT;
+	KUNIT_EXPECT_TRUE(test, sgxfive_recovery_hold(sgx, &s, &why));
+	s = U64_MAX;
+	why = SGXFIVE_HANG_MANUAL;
+	KUNIT_EXPECT_FALSE(test, sgxfive_recovery_hold(sgx, &s, &why));
+	KUNIT_EXPECT_EQ(test, s, 10ull);
+	KUNIT_EXPECT_EQ(test, why, SGXFIVE_HANG_TIMEOUT);
+	/* A reset with its own suspect keeps it. */
+	s = 11;
+	why = SGXFIVE_HANG_MANUAL;
+	KUNIT_EXPECT_FALSE(test, sgxfive_recovery_hold(sgx, &s, &why));
+	KUNIT_EXPECT_EQ(test, s, 11ull);
+	KUNIT_EXPECT_EQ(test, why, SGXFIVE_HANG_MANUAL);
+	/* A failed cleanup's reset is dropped: the hold stays, no one is blamed. */
+	s = U64_MAX;
+	why = SGXFIVE_HANG_CLEANUP;
+	KUNIT_EXPECT_TRUE(test, sgxfive_recovery_hold(sgx, &s, &why));
+	KUNIT_EXPECT_EQ(test, s, U64_MAX);
+	KUNIT_EXPECT_EQ(test, why, SGXFIVE_HANG_CLEANUP);
+	KUNIT_EXPECT_TRUE(test, sgxfive_recovery_held(sgx));
+	KUNIT_EXPECT_EQ(test, sgx->held_suspect, 10ull);
+	KUNIT_EXPECT_EQ(test, sgx->held_why, SGXFIVE_HANG_TIMEOUT);
+	sgxfive_debug_reset(sgx);
+
+	/* Held on a fault; the job then finishes: the reset blames no one. */
+	s = 10;
+	why = SGXFIVE_HANG_FAULT;
+	KUNIT_EXPECT_TRUE(test, sgxfive_recovery_hold(sgx, &s, &why));
+	*(u32 *)sgxfive_ctx_cpu(ctx, SGXFIVE_CTX_FENCE_OFF) = 1;
+	sgxfive_fence_signal(ctx);
+	s = U64_MAX;
+	why = SGXFIVE_HANG_MANUAL;
+	KUNIT_EXPECT_FALSE(test, sgxfive_recovery_hold(sgx, &s, &why));
+	KUNIT_EXPECT_EQ(test, s, U64_MAX);
+	KUNIT_EXPECT_EQ(test, why, SGXFIVE_HANG_MANUAL);
+
+	sgxfive_fence_fail_all(ctx, -EIO);
+	dma_fence_put(f[0]);
+	dma_fence_put(f[1]);
+}
+
+/*
+ * A render's run, before its kick: the kernel's words (render details,
+ * background object, the RT data set's size words and cleared counters, the
+ * pending count, the TA command, the CCB's write offset), then the armed pokes
+ * of the context's structures, once, on top of them. With rtds_keep the RT
+ * data set stays as the previous job left it, the pending count still counts.
+ */
+static void sgxfive_debug_test_render_run(struct kunit *test)
+{
+	static const char *const lines[] = { "kw:1=0x55", "rtds:2=0x77", "rtds:3=0x9" };
+	struct sgxfive *sgx = kunit_kzalloc(test, sizeof(*sgx), GFP_KERNEL);
+	struct sgxfive_ctx *ctx = fake_ctx(test);
+	u32 *bg = kunit_kzalloc(test, PAGE_SIZE, GFP_KERNEL);
+	u8 *img = kunit_kzalloc(test, SGX_XFER_CMD_SIZE, GFP_KERNEL);
+	u32 *rtds = sgxfive_ctx_cpu(ctx, SGXFIVE_RCTX_RTDS_OFF);
+	u32 *pending = sgxfive_ctx_cpu(ctx, SGXFIVE_RCTX_PENDING_OFF);
+	u32 *ctl = sgxfive_ctx_cpu(ctx, SGXFIVE_CTX_CTL_OFF);
+	u32 want[SGX_RENDER_RTDS_SIZE / 4], kept[SGX_RENDER_RTDS_SIZE / 4];
+	struct sgxfive_kpoke p[ARRAY_SIZE(lines)];
+	struct drm_sgxfive_render_cmd c = { };
+	struct sgx_render_tadata td;
+	struct sgx_render_addrs a;
+	unsigned int i;
+	u32 size;
+
+	KUNIT_ASSERT_NOT_NULL(test, sgx);
+	KUNIT_ASSERT_NOT_NULL(test, bg);
+	KUNIT_ASSERT_NOT_NULL(test, img);
+	spin_lock_init(&sgx->kpoke_lock);
+	ctx->sgx = sgx;
+	ctx->type = DRM_SGXFIVE_CTX_TYPE_RENDER;
+	c.mte_screen = (200 - 1) << 16 | (300 - 1);
+	c.bgobj_words[0] = 0x101;
+	c.bgobj_words[1] = 0x102;
+	c.bgobj_words[2] = 0x103;
+	KUNIT_ASSERT_EQ(test, sgx_render_tadata_layout(&td, 300, 200), 0);
+	sgxfive_render_addrs(&a, 0x32500000, 0x01234000, 0, &td);
+	size = sgxfive_render_build(img, &a, &c, 1, true, true);
+	sgx_render_rtds(rtds, &a, 0);		/* as at creation */
+	memcpy(want, rtds, sizeof(want));
+	sgx_render_rtds_resize(want, c.mte_screen);
+	sgx_render_rtds_job(want);
+	for (i = 0; i < ARRAY_SIZE(lines); i++)
+		KUNIT_ASSERT_EQ(test, sgxfive_kpoke_parse(lines[i], &p[i]), 0);
+	KUNIT_ASSERT_EQ(test, sgxfive_kpoke_arm(&sgx->kpokes, p, ARRAY_SIZE(p)), 0);
+
+	sgxfive_render_write(ctx, bg, &c, img, size);
+	KUNIT_EXPECT_EQ(test, memcmp(sgxfive_ctx_cpu(ctx, SGXFIVE_RCTX_RD_OFF),
+				     img + SGXFIVE_RENDER_IMG_RD, SGX_RENDER_RD_SIZE), 0);
+	KUNIT_EXPECT_EQ(test, bg[2], 0x103u);
+	KUNIT_EXPECT_EQ(test, *(u32 *)sgxfive_ctx_cpu(ctx, SGXFIVE_RCTX_BGPRI_OFF), 0x103u);
+	KUNIT_EXPECT_EQ(test, memcmp(sgxfive_ctx_cpu(ctx, SGXFIVE_CTX_CCB_OFF), img,
+				     SGX_RENDER_CMD_STRIDE), 0);
+	KUNIT_EXPECT_EQ(test, ctx->woff, size);
+	KUNIT_EXPECT_EQ(test, ctl[0], size);
+	/* The pokes land on what the kernel wrote: its count of 1, its size, its 0. */
+	KUNIT_EXPECT_EQ(test, *pending, 0x55u);
+	KUNIT_EXPECT_EQ(test, rtds[2], 0x77u);
+	KUNIT_EXPECT_EQ(test, rtds[3], 0x9u);
+	KUNIT_EXPECT_EQ(test, sgx->kpokes.n, 0u);
+	KUNIT_EXPECT_EQ(test, memcmp(&rtds[4], &want[4], sizeof(want) - 16), 0);
+
+	/* Once: the next run has the kernel's words alone. */
+	sgxfive_render_write(ctx, bg, &c, img, size);
+	KUNIT_EXPECT_EQ(test, *pending, 0x56u);
+	KUNIT_EXPECT_EQ(test, memcmp(rtds, want, sizeof(want)), 0);
+	KUNIT_EXPECT_EQ(test, ctx->woff, 2 * size);
+	KUNIT_EXPECT_EQ(test, ctl[0], 2 * size);
+
+	/* rtds_keep: the size words and the counters as the last job left them. */
+	rtds[2] = 0x123;
+	rtds[3] = 4;
+	rtds[4] = 5;
+	memcpy(kept, rtds, sizeof(kept));
+	sgx->rtds_keep = true;
+	sgxfive_render_write(ctx, bg, &c, img, size);
+	KUNIT_EXPECT_EQ(test, memcmp(rtds, kept, sizeof(kept)), 0);
+	KUNIT_EXPECT_EQ(test, *pending, 0x57u);
+	sgx->rtds_keep = false;
+	sgxfive_render_write(ctx, bg, &c, img, size);
+	KUNIT_EXPECT_EQ(test, memcmp(rtds, want, sizeof(want)), 0);
+}
+
+/*
+ * debugfs render_words: every word of the context's HW context, RT data set,
+ * PB descriptor, kernel words and render details, in that order, a line each,
+ * spelt as the kpoke that would set it.
+ */
+static void sgxfive_debug_test_render_words(struct kunit *test)
+{
+	static const u32 spaces[] = {
+		SGXFIVE_KPOKE_CTX, SGXFIVE_KPOKE_RTDS, SGXFIVE_KPOKE_PB, SGXFIVE_KPOKE_KW,
+		SGXFIVE_KPOKE_RD,
+	};
+	static const char *const first[] = {
+		"ctx:0=0x00000011\n", "\nrtds:0=0x00000000\n", "\npb:0=0x00000000\n",
+		"\nkw:0=0x00000000\n", "\nrd:0=0x00000000\n",
+	};
+	struct sgxfive_ctx *ctx = fake_ctx(test);
+	char *buf = kunit_kzalloc(test, SZ_8K, GFP_KERNEL);
+	struct drm_print_iterator it = { .data = buf, .remain = SZ_8K - 1 };
+	struct drm_printer p = drm_coredump_printer(&it);
+	unsigned int i, lines = 0, want = 0;
+	const char *at, *prev = buf;
+	u32 last = SGX_RENDER_RD_SIZE / 4 - 1;
+	char tail[32];
+
+	KUNIT_ASSERT_NOT_NULL(test, buf);
+	*(u32 *)sgxfive_ctx_cpu(ctx, SGXFIVE_CTX_HW_OFF) = 0x11;
+	((u32 *)sgxfive_ctx_cpu(ctx, SGXFIVE_RCTX_RTDS_OFF))[1] = 0x22;
+	((u32 *)sgxfive_ctx_cpu(ctx, SGXFIVE_RCTX_PBDESC_OFF))[14] = 0x33;
+	*(u32 *)sgxfive_ctx_cpu(ctx, SGXFIVE_RCTX_PENDING_OFF) = 3;
+	((u32 *)sgxfive_ctx_cpu(ctx, SGXFIVE_RCTX_RD_OFF))[last] = 0x44;
+
+	sgxfive_render_words(ctx, &p);
+	for (i = 0; i < ARRAY_SIZE(spaces); i++)
+		want += sgxfive_kpoke_words(spaces[i]);
+	for (at = buf; *at; at++)
+		lines += *at == '\n';
+	KUNIT_EXPECT_EQ(test, lines, want);
+	KUNIT_EXPECT_EQ(test, strncmp(buf, first[0], strlen(first[0])), 0);
+	for (i = 1; i < ARRAY_SIZE(first); i++) {
+		at = strstr(buf, first[i]);
+		KUNIT_EXPECT_TRUE_MSG(test, at && at > prev, "%s", first[i] + 1);
+		if (at)
+			prev = at;
+	}
+	KUNIT_EXPECT_NOT_NULL(test, strstr(buf, "\nrtds:1=0x00000022\n"));
+	KUNIT_EXPECT_NOT_NULL(test, strstr(buf, "\npb:14=0x00000033\n"));
+	KUNIT_EXPECT_NOT_NULL(test, strstr(buf, "\nkw:1=0x00000003\n"));
+	snprintf(tail, sizeof(tail), "\nrd:%u=0x00000044\n", last);
+	KUNIT_EXPECT_EQ(test, strcmp(buf + strlen(buf) - strlen(tail), tail), 0);
 }
 
 static struct kunit_case sgxfive_debug_test_cases[] = {
@@ -271,6 +513,9 @@ static struct kunit_case sgxfive_debug_test_cases[] = {
 	KUNIT_CASE(sgxfive_debug_test_cleanup),
 	KUNIT_CASE(sgxfive_debug_test_timer_clock),
 	KUNIT_CASE(sgxfive_debug_test_hold_recovery),
+	KUNIT_CASE(sgxfive_debug_test_held_reset),
+	KUNIT_CASE(sgxfive_debug_test_render_run),
+	KUNIT_CASE(sgxfive_debug_test_render_words),
 	{}
 };
 

@@ -902,9 +902,10 @@ static int sgxfive_xfer_ro_show(struct seq_file *m, void *unused)
 DEFINE_SHOW_ATTRIBUTE(sgxfive_xfer_ro);
 
 /*
- * Writing to reset resets the firmware in place without blaming a job: the
- * recovery of a hang, on demand. Contexts with unfinished jobs run them
- * again.
+ * Writing to reset resets the firmware in place: the recovery of a hang, on
+ * demand. It blames no job, and contexts with unfinished jobs run them again,
+ * unless a recovery is held: then it is that recovery, which blames the held
+ * job (sgxfive_recovery_hold).
  */
 static ssize_t sgxfive_reset_write(struct file *f, const char __user *ubuf,
 				   size_t len, loff_t *ppos)
@@ -924,20 +925,47 @@ static const struct file_operations sgxfive_reset_fops = {
 /*
  * Under the device lock, a recovery about to start: whether to hold it.
  * While debugfs hold_recovery is set, the hang and fault detectors only
- * report (once, until the next reset): the hung job stays in the firmware,
- * its context's memory as the GPU left it, until reset is written. A reset
- * asked for (reset, a failed render-context cleanup, whose memory must not
- * be freed under the firmware) is never held.
+ * report, once until the next reset (sgxfive_recovery_held): the hung job
+ * stays in the firmware, its context's memory as the GPU left it, until reset
+ * is written. A reset written to reset is never held; while one is held it
+ * becomes the held recovery, its job (*suspect) blamed with the error of the
+ * detector that found it (*why), so the job fails once instead of running
+ * again to hang again. It stays blame-free if that job is no longer its
+ * context's oldest unfinished one. The reset of a failed render-context
+ * cleanup resets blame-free when nothing is held; while a recovery is held
+ * it is dropped and the hold stays, its job blamed by no one: the held job's
+ * own cleanup is expected to fail, and the context's memory is not freed
+ * under the firmware, as its release waits for the firmware to read a later
+ * command, which it does only after the reset that ends the hold.
  */
-bool sgxfive_recovery_hold(struct sgxfive *sgx, u64 suspect, enum sgxfive_hang why)
+bool sgxfive_recovery_hold(struct sgxfive *sgx, u64 *suspect, enum sgxfive_hang *why)
 {
-	if (why == SGXFIVE_HANG_MANUAL || !READ_ONCE(sgx->hold_recovery))
+	bool unfinished;
+
+	if (*why == SGXFIVE_HANG_CLEANUP)
+		return sgx->recovery_held;
+	if (*why == SGXFIVE_HANG_MANUAL) {
+		if (!sgx->recovery_held || *suspect != U64_MAX)
+			return false;
+		spin_lock_irq(&sgx->ctx_lock);
+		unfinished = sgxfive_ctx_of_job(&sgx->ctx_list, sgx->held_suspect);
+		spin_unlock_irq(&sgx->ctx_lock);
+		if (unfinished) {
+			*suspect = sgx->held_suspect;
+			*why = sgx->held_why;
+		}
 		return false;
-	if (!sgx->recovery_held)
+	}
+	if (!READ_ONCE(sgx->hold_recovery))
+		return false;
+	if (!sgx->recovery_held) {
 		drm_warn(sgx->dev,
 			 "sgxfive: job %llu hung, recovery held (debugfs hold_recovery)\n",
-			 suspect);
-	sgx->recovery_held = true;
+			 *suspect);
+		sgx->held_suspect = *suspect;
+		sgx->held_why = *why;
+	}
+	WRITE_ONCE(sgx->recovery_held, true);
 	return true;
 }
 
@@ -946,7 +974,7 @@ void sgxfive_debug_reset(struct sgxfive *sgx)
 {
 	unsigned int i;
 
-	sgx->recovery_held = false;
+	WRITE_ONCE(sgx->recovery_held, false);
 	for (i = 0; i < XB_COUNT; i++)
 		if (sgx->xt.buf[i].va)
 			memset(sgx->xt.buf[i].va, 0, sgxfive_xbuf[i].size);

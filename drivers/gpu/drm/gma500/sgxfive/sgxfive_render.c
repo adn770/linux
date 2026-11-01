@@ -258,7 +258,10 @@ static void sgxfive_render_release(struct sgxfive_deferred *d)
  * The last reference to a render context is gone and it is off the device's
  * list: the firmware drops its state (CLEANUP; a blame-free reset if it does
  * not answer), the VM its mappings, and the memory goes once no stale
- * translation can reach it. The slot is free at once: a stale translation
+ * translation can reach it. While a recovery is held (debug option) the
+ * cleanup's reset is not done: the hold stays, the reset that ends it resets
+ * for both, and the memory waits on the deferred list, which the stopped
+ * firmware does not advance, until then. The slot is free at once: a stale translation
  * still lands on the pinned pages. Frees ctx.
  */
 void sgxfive_render_fini(struct sgxfive_ctx *ctx)
@@ -269,7 +272,7 @@ void sgxfive_render_fini(struct sgxfive_ctx *ctx)
 	if (sgxfive_render_cleanup(sgx, r->a.rtds, r->a.ctx, r->a.pbdesc,
 				   *rctx(ctx, SGXFIVE_CTX_HW_OFF))) {
 		drm_warn(sgx->dev, "sgxfive: render context cleanup failed, resetting\n");
-		sgxfive_recover(sgx, U64_MAX, SGXFIVE_HANG_MANUAL);
+		sgxfive_recover(sgx, U64_MAX, SGXFIVE_HANG_CLEANUP);
 	}
 	sgxfive_render_unmap(r);
 	sgxfive_vm_render_detach(ctx->vm, r->slot);
@@ -398,37 +401,46 @@ void sgxfive_render_job_build(struct sgxfive_ctx *ctx, struct sgxfive_job *job)
 }
 
 /*
- * Under the device lock, with the context's previous render finished: the
- * job's render details and background object in place, the RT data's size
- * words for its target (its TE words were checked against the same layout),
- * its out-of-memory counters cleared (sgx_render_rtds_job; neither with the
- * debug option's rtds_keep), its TA command at the TA
- * CCB's write offset, the kick in the RT data set's pending count (the EDM
- * counts every kick of a scene as it finishes, the geometry kicks at the TA's
- * end and the last at its render's, and cleans the set up only when the two
- * counts agree), the armed pokes of its structures (debug option), then the
- * kick.
+ * Under the device lock, with the context's previous render finished, the
+ * words a render job's run writes before its kick, in order: its render
+ * details (from its image cmd) and its background object (at bg) in place,
+ * the RT data's size words for its target (its TE words were checked against
+ * the same layout), its out-of-memory counters cleared (sgx_render_rtds_job;
+ * neither with the debug option's rtds_keep), the kick in the RT data set's
+ * pending count (the EDM counts every kick of a scene as it finishes, the
+ * geometry kicks at the TA's end and the last at its render's, and cleans the
+ * set up only when the two counts agree), its TA command at the TA CCB's
+ * write offset, the armed pokes of its structures (debug option), so they
+ * land on the kernel's words, and last the CCB's host write offset.
  */
+void sgxfive_render_write(struct sgxfive_ctx *ctx, u32 *bg,
+			  const struct drm_sgxfive_render_cmd *rc, const u8 *cmd, u32 size)
+{
+	u32 *ctl = rctx(ctx, SGXFIVE_CTX_CTL_OFF);
+
+	memcpy(rctx(ctx, SGXFIVE_RCTX_RD_OFF), cmd + SGXFIVE_RENDER_IMG_RD,
+	       SGX_RENDER_RD_SIZE);
+	sgx_render_bgobj(bg, rc);
+	*rctx(ctx, SGXFIVE_RCTX_BGPRI_OFF) = rc->bgobj_words[2];
+	if (!sgxfive_rtds_keep(ctx->sgx)) {
+		sgx_render_rtds_resize(rctx(ctx, SGXFIVE_RCTX_RTDS_OFF), rc->mte_screen);
+		sgx_render_rtds_job(rctx(ctx, SGXFIVE_RCTX_RTDS_OFF));
+	}
+	*rctx(ctx, SGXFIVE_RCTX_PENDING_OFF) += sgx_render_executed(cmd);
+	memcpy(sgxfive_ctx_cpu(ctx, SGXFIVE_CTX_CCB_OFF + ctx->woff), cmd,
+	       SGX_RENDER_CMD_STRIDE);
+	ctx->woff = (ctx->woff + size) & (SGX_RENDER_CCB_SIZE - 1);
+	sgxfive_render_poke(ctx);
+	WRITE_ONCE(ctl[0], ctx->woff);		/* host write offset */
+}
+
+/* Under the device lock, with the context's previous render finished: run the job. */
 int sgxfive_render_run(struct sgxfive_ctx *ctx, struct sgxfive_job *job,
 		       const struct sgxfive_fence *hw)
 {
 	struct sgxfive_render *r = ctx->render;
-	u32 *ctl = rctx(ctx, SGXFIVE_CTX_CTL_OFF);
 
-	memcpy(rctx(ctx, SGXFIVE_RCTX_RD_OFF), hw->cmd + SGXFIVE_RENDER_IMG_RD,
-	       SGX_RENDER_RD_SIZE);
-	sgx_render_bgobj(render_bg(r), &job->rc);
-	*rctx(ctx, SGXFIVE_RCTX_BGPRI_OFF) = job->rc.bgobj_words[2];
-	if (!sgxfive_rtds_keep(ctx->sgx)) {
-		sgx_render_rtds_resize(rctx(ctx, SGXFIVE_RCTX_RTDS_OFF), job->rc.mte_screen);
-		sgx_render_rtds_job(rctx(ctx, SGXFIVE_RCTX_RTDS_OFF));
-	}
-	*rctx(ctx, SGXFIVE_RCTX_PENDING_OFF) += sgx_render_executed(hw->cmd);
-	memcpy(sgxfive_ctx_cpu(ctx, SGXFIVE_CTX_CCB_OFF + ctx->woff), hw->cmd,
-	       SGX_RENDER_CMD_STRIDE);
-	ctx->woff = (ctx->woff + job->size) & (SGX_RENDER_CCB_SIZE - 1);
-	sgxfive_render_poke(ctx);
-	WRITE_ONCE(ctl[0], ctx->woff);		/* host write offset */
+	sgxfive_render_write(ctx, render_bg(r), &job->rc, hw->cmd, job->size);
 	return sgxfive_kick_render(ctx->sgx, r->a.ctx);
 }
 

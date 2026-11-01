@@ -172,6 +172,8 @@ int sgxfive_ioctl_destroy_ctx(struct sgxfive *sgx, void *data,
 /* Render contexts (sgxfive_render.c). */
 int sgxfive_render_init(struct sgxfive_ctx *ctx);
 void sgxfive_render_fini(struct sgxfive_ctx *ctx);
+void sgxfive_render_write(struct sgxfive_ctx *ctx, u32 *bg,
+			  const struct drm_sgxfive_render_cmd *rc, const u8 *cmd, u32 size);
 int sgxfive_render_run(struct sgxfive_ctx *ctx, struct sgxfive_job *job,
 		       const struct sgxfive_fence *hw);
 u32 sgxfive_render_replay_pending(struct sgxfive_ctx *ctx);
