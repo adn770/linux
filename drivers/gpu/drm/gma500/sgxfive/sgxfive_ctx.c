@@ -4,6 +4,9 @@
  * its own client CCB, in kernel memory the EDM reads through its own page
  * directory, bound for its lifetime to one client VM whose directory the
  * firmware gives the context's 3D work.
+ * A render context is a HW render context with its TA CCB and the rest of its
+ * firmware side in the same kind of memory, plus its parameter buffer and
+ * tiling data in the VM (sgxfive_render.c).
  */
 #include <linux/dma-fence.h>
 #include <linux/slab.h>
@@ -11,6 +14,7 @@
 
 #include <drm/drm_file.h>
 
+#include "sgx_render.h"
 #include "sgx_xfer.h"
 #include "sgxfive.h"
 #include "sgxfive_ctx.h"
@@ -53,7 +57,8 @@ bool sgxfive_client_fault(struct sgxfive_client *c, unsigned long now)
 
 /*
  * CREATE_CONTEXT's arguments: no flags, the one priority, zero padding.
- * A transfer context states no render target size: both fields stay zero.
+ * A render context states the largest target its jobs use, 1 to the
+ * device's each way; a transfer context has none, so both fields stay zero.
  */
 int sgxfive_ctx_check_args(const struct drm_sgxfive_create_context_args *a)
 {
@@ -62,6 +67,8 @@ int sgxfive_ctx_check_args(const struct drm_sgxfive_create_context_args *a)
 		return -EINVAL;
 	if (a->type == DRM_SGXFIVE_CTX_TYPE_TRANSFER)
 		return a->max_width || a->max_height ? -EINVAL : 0;
+	if (a->type == DRM_SGXFIVE_CTX_TYPE_RENDER)
+		return sgx_render_check_max(a->max_width, a->max_height);
 	return -EINVAL;
 }
 
@@ -75,6 +82,10 @@ static void sgxfive_ctx_release(struct kref *ref)
 	list_del(&ctx->link);
 	spin_unlock_irqrestore(&sgx->ctx_lock, flags);
 	sgxfive_fence_fail_all(ctx, -ECANCELED);	/* none should be left */
+	if (ctx->render) {
+		sgxfive_render_fini(ctx);		/* frees ctx */
+		return;
+	}
 	sgxfive_kmem_free(sgx, &ctx->node, &ctx->mem);
 	sgxfive_vm_put(ctx->vm);
 	sgxfive_client_put(ctx->client);
@@ -131,6 +142,17 @@ int sgxfive_ioctl_create_ctx(struct sgxfive *sgx, void *data,
 	ctx->sgx = sgx;
 	ctx->type = a->type;
 	ctx->pd_phys = sgxfive_vm_pd_phys(ctx->vm);
+	ctx->max_width = a->max_width;
+	ctx->max_height = a->max_height;
+	if (ctx->type == DRM_SGXFIVE_CTX_TYPE_RENDER) {
+		ret = sgxfive_render_init(ctx);
+		if (ret) {
+			sgxfive_kmem_free(sgx, &ctx->node, &ctx->mem);
+			sgxfive_vm_put(ctx->vm);
+			kfree(ctx);
+			return ret;
+		}
+	}
 	ctx->client = f->client;
 	kref_get(&ctx->client->ref);
 	kref_init(&ctx->ref);
@@ -139,9 +161,10 @@ int sgxfive_ioctl_create_ctx(struct sgxfive *sgx, void *data,
 	spin_lock_init(&ctx->fence_lock);
 	INIT_LIST_HEAD(&ctx->pending);
 	/* Priority 0, the client CCB and its control block, the client PD. */
-	sgx_xfer_ctx_init(sgxfive_ctx_cpu(ctx, SGXFIVE_CTX_HW_OFF), ctx->pd_phys,
-			  ctx->mem.addr + SGXFIVE_CTX_CCB_OFF,
-			  ctx->mem.addr + SGXFIVE_CTX_CTL_OFF);
+	if (ctx->type == DRM_SGXFIVE_CTX_TYPE_TRANSFER)
+		sgx_xfer_ctx_init(sgxfive_ctx_cpu(ctx, SGXFIVE_CTX_HW_OFF), ctx->pd_phys,
+				  ctx->mem.addr + SGXFIVE_CTX_CCB_OFF,
+				  ctx->mem.addr + SGXFIVE_CTX_CTL_OFF);
 	spin_lock_irq(&sgx->ctx_lock);
 	list_add_tail(&ctx->link, &sgx->ctx_list);
 	spin_unlock_irq(&sgx->ctx_lock);

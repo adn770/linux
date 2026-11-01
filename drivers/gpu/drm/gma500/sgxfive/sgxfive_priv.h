@@ -104,6 +104,7 @@ struct sgxfive {
 	unsigned long coredump;		/* an error state is pending (bit 0) */
 #if IS_ENABLED(CONFIG_DRM_GMA500_SGXFIVE_DEBUG)
 	struct sgxfive_xtest xt;
+	bool alias_ta3d_ro;		/* render VMs: TA3DCtl read-only */
 #endif
 };
 
@@ -146,14 +147,17 @@ enum {
 };
 
 enum {
-	HC_INIT_STATUS = 0, HC_POWER_STATUS = 1, HC_HWR_SAMPLE_RATE = 5,
+	HC_INIT_STATUS = 0, HC_POWER_STATUS = 1, HC_CLEANUP_STATUS = 2,
+	HC_HWR_SAMPLE_RATE = 5,
 	HC_UKERNEL_TIMER_CLOCK = 6, HC_APM_SAMPLE_RATE = 7, HC_HOST_CLOCK = 13,
 	HC_DWORDS = 17,
 };
 
 /* Kernel CCB commands: SGXMKIF_CMD_*, the index into the kick table. */
+#define SGX_CMD_TA		0
 #define SGX_CMD_TRANSFER	1
 #define SGX_CMD_POWER		3
+#define SGX_CMD_CLEANUP		5
 #define SGX_CMD_GETMISCINFO	6
 #define SGX_CMD_PROCESS_QUEUES	7
 
@@ -166,6 +170,12 @@ enum {
 #define POWERCMD_IDLE		2
 #define POWMAN_IDLE_COMPLETE	BIT(2)
 #define POWMAN_POWEROFF_COMPLETE BIT(3)
+
+/* The CLEANUP command's object types, and the HostCtl status bit it sets. */
+#define CLEANUP_RT		1	/* an RT data set */
+#define CLEANUP_RC		2	/* a HW render context */
+#define CLEANUP_PB		5	/* a PB descriptor */
+#define CLEANUP_COMPLETE	BIT(0)	/* in HostCtl's cleanup status */
 
 static inline u32 *sgxfive_words(struct sgxfive *sgx, unsigned int id)
 {
@@ -251,8 +261,28 @@ u32 sgxfive_job_build(u8 *cmd, const struct drm_sgxfive_transfer_cmd *regs,
 int sgxfive_job_check(const struct drm_sgxfive_transfer_cmd *regs);
 int sgxfive_ctx_check_args(const struct drm_sgxfive_create_context_args *a);
 
+struct sgx_mmu_pd;
+struct sgx_render_addrs;
+struct sgx_render_tadata;
+int sgxfive_render_check(const struct drm_sgxfive_render_cmd *c, u32 max_w,
+			 u32 max_h);
+void sgxfive_render_addrs(struct sgx_render_addrs *a, u32 mem, u32 pd_phys,
+			  unsigned int slot, const struct sgx_render_tadata *td);
+u32 sgxfive_render_build(u8 *img, const struct sgx_render_addrs *a,
+			 const struct drm_sgxfive_render_cmd *c, u32 seqno, bool first,
+			 bool last);
+int sgxfive_kick_render(struct sgxfive *sgx, u32 hw_ctx_addr);
+int sgxfive_render_cleanup(struct sgxfive *sgx, u32 rtds, u32 ctx, u32 pbdesc,
+			   u32 flags);
+int sgxfive_alias_firmware(struct sgxfive *sgx, struct sgx_mmu_pd *pd, bool map);
+
 int sgxfive_vm_check_range(const struct drm_sgxfive_heap *heaps, unsigned int n,
 			   u64 addr, u64 size);
+int sgxfive_vm_render_attach(struct sgxfive_vm *vm, unsigned int *slot);
+void sgxfive_vm_render_detach(struct sgxfive_vm *vm, unsigned int slot);
+int sgxfive_vm_map_pages(struct sgxfive_vm *vm, u32 addr, struct page **pages,
+			 unsigned int n, u32 flags);
+void sgxfive_vm_unmap_pages(struct sgxfive_vm *vm, u32 addr, unsigned int n);
 int sgxfive_ioctl_create_vm(struct sgxfive *sgx, void *data,
 			    struct drm_file *file);
 int sgxfive_ioctl_destroy_vm(struct sgxfive *sgx, void *data,
@@ -267,6 +297,11 @@ void sgxfive_debug_init(struct sgxfive *sgx, struct dentry *dir);
 int sgxfive_debug_load(struct sgxfive *sgx);
 void sgxfive_debug_unload(struct sgxfive *sgx);
 void sgxfive_debug_reset(struct sgxfive *sgx);
+
+static inline bool sgxfive_alias_ta3d_ro(struct sgxfive *sgx)
+{
+	return READ_ONCE(sgx->alias_ta3d_ro);
+}
 #else
 static inline int sgxfive_debug_load(struct sgxfive *sgx)
 {
@@ -279,6 +314,11 @@ static inline void sgxfive_debug_unload(struct sgxfive *sgx)
 
 static inline void sgxfive_debug_reset(struct sgxfive *sgx)
 {
+}
+
+static inline bool sgxfive_alias_ta3d_ro(struct sgxfive *sgx)
+{
+	return false;
 }
 #endif
 

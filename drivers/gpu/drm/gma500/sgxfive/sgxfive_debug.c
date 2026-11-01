@@ -941,4 +941,5 @@ void sgxfive_debug_init(struct sgxfive *sgx, struct dentry *dir)
 	debugfs_create_bool("no_alias", 0600, dir, &sgx->xt.no_alias);
 	debugfs_create_file("xfer_ro", 0400, dir, sgx, &sgxfive_xfer_ro_fops);
 	debugfs_create_file("reset", 0200, dir, sgx, &sgxfive_reset_fops);
+	debugfs_create_bool("alias_ta3d_ro", 0600, dir, &sgx->alias_ta3d_ro);
 }

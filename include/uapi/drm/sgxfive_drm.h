@@ -250,6 +250,13 @@ enum drm_sgxfive_heap_id {
 	DRM_SGXFIVE_HEAP_KERNEL_CODE,
 	/** @DRM_SGXFIVE_HEAP_KERNEL_DATA: Kernel alias of firmware data; reserved. */
 	DRM_SGXFIVE_HEAP_KERNEL_DATA,
+	/**
+	 * @DRM_SGXFIVE_HEAP_PARAMETERS: Render contexts' parameter buffers and
+	 * background objects, one slot per render context; reserved.
+	 */
+	DRM_SGXFIVE_HEAP_PARAMETERS,
+	/** @DRM_SGXFIVE_HEAP_TA_DATA: Render contexts' tiling data; reserved. */
+	DRM_SGXFIVE_HEAP_TA_DATA,
 	/** @DRM_SGXFIVE_HEAP_COUNT: Number of ids known to this header. */
 	DRM_SGXFIVE_HEAP_COUNT,
 	/* Add new heaps above DRM_SGXFIVE_HEAP_COUNT only. */
@@ -298,6 +305,7 @@ struct drm_sgxfive_dev_query_heap_info {
 
 /* Supported job types, as bits of &drm_sgxfive_dev_query_job_info.job_types. */
 #define DRM_SGXFIVE_JOB_TYPE_TRANSFER_BIT	(1ULL << 0)
+#define DRM_SGXFIVE_JOB_TYPE_RENDER_BIT		(1ULL << 1)
 
 /**
  * struct drm_sgxfive_dev_query_job_info - Limits of SUBMIT_JOBS.
@@ -320,6 +328,24 @@ struct drm_sgxfive_dev_query_job_info {
 	 * updates are not supported and any update list is rejected.
 	 */
 	__u32 max_updates;
+
+	/** @render_cmd_size: Largest &struct drm_sgxfive_render_cmd known. */
+	__u32 render_cmd_size;
+
+	/** @render_pb_pages: 4 KiB pages of each new render context's parameter buffer. */
+	__u32 render_pb_pages;
+
+	/**
+	 * @render_max_width: Widest render target (MTE_SCREEN) in pixels: the
+	 * largest &drm_sgxfive_create_context_args.max_width.
+	 */
+	__u32 render_max_width;
+
+	/**
+	 * @render_max_height: Tallest render target (MTE_SCREEN) in pixels: the
+	 * largest &drm_sgxfive_create_context_args.max_height.
+	 */
+	__u32 render_max_height;
 };
 
 /**
@@ -506,6 +532,15 @@ struct drm_sgxfive_vm_unmap_args {
  * CREATE_CONTEXT and SUBMIT_JOBS on it fail with -ECANCELED, while jobs it
  * already queued on contexts that are not lost still run. The budget and the
  * ban belong to the open file: a new open of the render node starts afresh.
+ *
+ * Render contexts are for trusted clients. The firmware loads a render
+ * context's parameter buffer through the context's own page directory, so
+ * a VM context with a render context maps the firmware's buffers at their
+ * kernel addresses: read-only, except the TA/3D control block that every
+ * render context of the device shares, which the firmware writes there and
+ * which is therefore writable. VM_MAP cannot reach those addresses, but the
+ * client's GPU programs can: they can read the firmware's state and corrupt
+ * the shared block, stalling or misdirecting other clients' renders.
  */
 
 /* Contexts one open file may hold at a time. */
@@ -517,7 +552,15 @@ struct drm_sgxfive_vm_unmap_args {
 enum drm_sgxfive_ctx_type {
 	/** @DRM_SGXFIVE_CTX_TYPE_TRANSFER: Transfer (blit, fill, copy) jobs. */
 	DRM_SGXFIVE_CTX_TYPE_TRANSFER = 0,
-	/* DRM_SGXFIVE_CTX_TYPE_RENDER (TA + 3D) later. */
+	/**
+	 * @DRM_SGXFIVE_CTX_TYPE_RENDER: Render (TA + 3D) jobs. The kernel gives
+	 * the context a parameter buffer and the tiling data of one render
+	 * target, sized for the largest target the context states at creation
+	 * (&drm_sgxfive_create_context_args.max_width and max_height), in
+	 * reserved heaps of the VM, and runs one of its jobs at a time. At most
+	 * 32 render contexts per VM context (-ENOSPC).
+	 */
+	DRM_SGXFIVE_CTX_TYPE_RENDER = 1,
 };
 
 /**
@@ -549,8 +592,12 @@ struct drm_sgxfive_create_context_args {
 	__u32 handle;
 
 	/**
-	 * @max_width: [IN] The widest render target of a render context's jobs.
-	 * Transfer contexts: zero.
+	 * @max_width: [IN] Render contexts: the widest render target (MTE_SCREEN
+	 * width) any of its jobs will use, 1 to
+	 * &drm_sgxfive_dev_query_job_info.render_max_width; the kernel sizes the
+	 * context's tiling data for @max_width x @max_height, and a job whose
+	 * target is wider fails with -EINVAL. 0 is rejected. Transfer contexts:
+	 * zero.
 	 */
 	__u32 max_width;
 
@@ -606,6 +653,12 @@ struct drm_sgxfive_destroy_context_args {
  *
  * Other contexts' unfinished jobs run again after the recovery and signal
  * without an error.
+ *
+ * A render job whose scene needs more than its context's parameter buffer
+ * (&drm_sgxfive_dev_query_job_info.render_pb_pages) completes, but the
+ * firmware had to run partial renders, which the kernel does not support yet:
+ * its fence signals -ENOSPC and its image is undefined. Nothing is reset and
+ * the context is not lost; later jobs of the context are unaffected.
  */
 
 /* Sync op encoding, as in pvr_drm.h. */
@@ -659,7 +712,11 @@ struct drm_sgxfive_mem_update {
 enum drm_sgxfive_job_type {
 	/** @DRM_SGXFIVE_JOB_TYPE_TRANSFER: A transfer; @cmd_stream is a transfer cmd. */
 	DRM_SGXFIVE_JOB_TYPE_TRANSFER = 0,
-	/* DRM_SGXFIVE_JOB_TYPE_RENDER (TA + 3D) later. */
+	/**
+	 * @DRM_SGXFIVE_JOB_TYPE_RENDER: One whole scene, tiled and rendered;
+	 * @cmd_stream is a &struct drm_sgxfive_render_cmd.
+	 */
+	DRM_SGXFIVE_JOB_TYPE_RENDER = 1,
 };
 
 /*
@@ -747,6 +804,17 @@ struct drm_sgxfive_transfer_cmd {
 };
 
 #define DRM_SGXFIVE_TRANSFER_CMD_SIZE_V1	0xa8
+
+/*
+ * DRM_SGXFIVE_SUBMIT_JOB_RENDER_GEOMETRY: the job tiles its geometry into the
+ * context's scene and leaves the scene open, without rendering it: the TA kick
+ * is not the scene's last, and the job is done when its TA is. The context's
+ * next render job adds to the same scene; the first job without the flag
+ * renders everything the scene holds and closes it. A job after a closed scene
+ * starts a new one.
+ */
+#define DRM_SGXFIVE_SUBMIT_JOB_RENDER_GEOMETRY		(1U << 0)
+#define DRM_SGXFIVE_SUBMIT_JOB_RENDER_FLAGS_MASK	DRM_SGXFIVE_SUBMIT_JOB_RENDER_GEOMETRY
 
 /**
  * struct drm_sgxfive_render_cmd - The register words of one scene.

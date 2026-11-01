@@ -649,6 +649,10 @@ static int sgxfive_reset(struct sgxfive *sgx, u64 suspect, enum sgxfive_hang why
 	sgxfive_debug_reset(sgx);
 	spin_lock_irq(&sgx->ctx_lock);
 	list_for_each_entry(ctx, &sgx->ctx_list, link) {
+		if (ctx->type == DRM_SGXFIVE_CTX_TYPE_RENDER) {
+			ctx->replay = sgxfive_render_reset(ctx);
+			continue;
+		}
 		sgx_xfer_ctx_init(sgxfive_ctx_cpu(ctx, SGXFIVE_CTX_HW_OFF),
 				  ctx->pd_phys,
 				  ctx->mem.addr + SGXFIVE_CTX_CCB_OFF,
@@ -664,6 +668,8 @@ static int sgxfive_reset(struct sgxfive *sgx, u64 suspect, enum sgxfive_hang why
 		if (ret) {
 			WRITE_ONCE(ctx->lost, true);	/* nothing runs any more */
 			sgxfive_fence_fail_all(ctx, -EIO);
+		} else if (ctx->replay && ctx->type == DRM_SGXFIVE_CTX_TYPE_RENDER) {
+			sgxfive_kick_render(sgx, ctx->mem.addr + SGXFIVE_CTX_HW_OFF);
 		} else if (ctx->replay) {
 			sgxfive_kick_transfer(sgx, ctx->mem.addr + SGXFIVE_CTX_HW_OFF);
 		}
@@ -743,6 +749,97 @@ int sgxfive_kick_transfer(struct sgxfive *sgx, u32 hw_ctx_addr)
 	lockdep_assert_held(&sgx->lock);
 	sgx->cache_control |= SGX_CC_INVAL_DATA;
 	return sgxfive_command(sgx, SGX_CMD_TRANSFER, data, ARRAY_SIZE(data));
+}
+
+/* Queue the firmware's TA work for one render context. */
+int sgxfive_kick_render(struct sgxfive *sgx, u32 hw_ctx_addr)
+{
+	const u32 data[] = { 0, hw_ctx_addr };
+
+	lockdep_assert_held(&sgx->lock);
+	sgx->cache_control |= SGX_CC_INVAL_DATA;
+	return sgxfive_command(sgx, SGX_CMD_TA, data, ARRAY_SIZE(data));
+}
+
+/* SGXCleanupRequest: one CLEANUP command, acknowledged in HostCtl. */
+static int sgxfive_cleanup(struct sgxfive *sgx, u32 type, u32 addr)
+{
+	u32 *hc = sgxfive_words(sgx, BUF_HOST_CTL);
+	const u32 data[] = { type, addr };
+	int ret;
+
+	WRITE_ONCE(hc[HC_CLEANUP_STATUS],
+		   READ_ONCE(hc[HC_CLEANUP_STATUS]) & ~CLEANUP_COMPLETE);
+	ret = sgxfive_command(sgx, SGX_CMD_CLEANUP, data, ARRAY_SIZE(data));
+	if (!ret)
+		ret = sgxfive_wait_mem(&hc[HC_CLEANUP_STATUS], CLEANUP_COMPLETE,
+				       CLEANUP_COMPLETE);
+	WRITE_ONCE(hc[HC_CLEANUP_STATUS],
+		   READ_ONCE(hc[HC_CLEANUP_STATUS]) & ~CLEANUP_COMPLETE);
+	sgx->cache_control |= SGX_CC_INVAL_DATA;
+	return ret;
+}
+
+/*
+ * A render context goes: make the firmware drop what it keeps of it, its RT
+ * data set, the context and the PB descriptor it may still have loaded.
+ * Nothing to do with the firmware off.
+ */
+int sgxfive_render_cleanup(struct sgxfive *sgx, u32 rtds, u32 ctx, u32 pbdesc,
+			   u32 flags)
+{
+	ktime_t start = ktime_get();
+	int ret = 0;
+
+	mutex_lock(&sgx->lock);
+	if (sgx->live) {
+		ret = sgxfive_cleanup(sgx, CLEANUP_RT, rtds);
+		if (!ret) {
+			ret = sgxfive_cleanup(sgx, CLEANUP_RC, ctx);
+		}
+		if (!ret) {
+			ret = sgxfive_cleanup(sgx, CLEANUP_PB, pbdesc);
+		}
+		drm_dbg(sgx->dev, "sgxfive: render context cleanup %d after %lld us\n",
+			ret, ktime_us_delta(ktime_get(), start));
+	}
+	mutex_unlock(&sgx->lock);
+	return ret;
+}
+
+/*
+ * Map (or unmap) every firmware buffer into a render VM's page directory at
+ * its own address: the EDM runs through the context's directory while it
+ * loads a parameter buffer. Read-only, except the TA/3D control block, which
+ * the EDM writes in that window (TA3DCtl dwords 46 and 47, the loaded PB):
+ * read-only, the write faults and the render stalls (debugfs alias_ta3d_ro
+ * reproduces it).
+ */
+int sgxfive_alias_firmware(struct sgxfive *sgx, struct sgx_mmu_pd *pd, bool map)
+{
+	const bool ta3d_ro = sgxfive_alias_ta3d_ro(sgx);
+	unsigned int id;
+	int ret = 0;
+
+	mutex_lock(&sgx->lock);
+	for (id = 0; id < SGX_FW_MAX_BUFFERS && !ret; id++) {
+		const struct sgxfive_buf *b = &sgx->buf[id];
+		u32 flags = id == BUF_TA3D_CTL && !ta3d_ro ? 0 : SGX_MMU_RO;
+
+		if (!b->pd)
+			continue;
+		if (map)
+			ret = sgx_mmu_map(pd, b->addr, b->pages, b->npages, flags);
+		else
+			sgx_mmu_unmap(pd, b->addr, b->npages);
+	}
+	if (ret)
+		for (id = 0; id < SGX_FW_MAX_BUFFERS; id++)
+			if (sgx->buf[id].pd)
+				sgx_mmu_unmap(pd, sgx->buf[id].addr, sgx->buf[id].npages);
+	sgx->cache_control |= SGX_CC_INVAL_BIF;
+	mutex_unlock(&sgx->lock);
+	return ret;
 }
 
 #define SGXFIVE_REAP_MS	10

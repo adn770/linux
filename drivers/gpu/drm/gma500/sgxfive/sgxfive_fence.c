@@ -67,20 +67,30 @@ struct dma_fence *sgxfive_fence_init(struct sgxfive_fence *f,
 /*
  * Signal the context's fences the firmware has reached; with error, fail all:
  * the first with error and the rest with rest (error again, or -ECANCELED).
+ * A render job the firmware finished may still have failed: its scene
+ * overflowed the parameter buffer (sgxfive_render_job_error); its context
+ * runs on. A geometry job is done with its TA (the TA word), which no render
+ * follows to write the fence word.
  */
 static void sgxfive_fence_retire(struct sgxfive_ctx *ctx, int error, int rest)
 {
 	u32 done = READ_ONCE(*(u32 *)sgxfive_ctx_cpu(ctx, SGXFIVE_CTX_FENCE_OFF));
+	u32 ta = READ_ONCE(*(u32 *)sgxfive_ctx_cpu(ctx, SGXFIVE_CTX_TA_OFF));
 	struct sgxfive_fence *f, *next;
 	unsigned long flags;
 
 	spin_lock_irqsave(&ctx->fence_lock, flags);
 	list_for_each_entry_safe(f, next, &ctx->pending, link) {
-		if (!error && !sgxfive_seqno_passed(done, f->base.seqno))
+		if (!error && !sgxfive_seqno_passed(f->ta_only ? ta : done, f->base.seqno))
 			break;		/* in order: the rest are later */
 		if (error) {
 			dma_fence_set_error(&f->base, error);
 			error = rest;
+		} else if (ctx->type == DRM_SGXFIVE_CTX_TYPE_RENDER) {
+			int ret = sgxfive_render_job_error(ctx);
+
+			if (ret)
+				dma_fence_set_error(&f->base, ret);
 		}
 		dma_fence_signal_locked(&f->base);
 		list_del(&f->link);

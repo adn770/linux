@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-only OR MIT */
 /*
- * sgxfive contexts (sgxfive_ctx.c): transfer contexts.
+ * sgxfive contexts (sgxfive_ctx.c): transfer contexts, and render contexts
+ * with their parameter buffer and tiling data (sgxfive_render.c).
  */
 #ifndef _SGXFIVE_CTX_H_
 #define _SGXFIVE_CTX_H_
@@ -10,6 +11,7 @@
 #include <linux/list.h>
 #include <linux/mutex.h>
 #include <linux/sched.h>
+#include <linux/sizes.h>
 #include <linux/spinlock.h>
 
 #include <drm/drm_mm.h>
@@ -36,20 +38,43 @@ struct sgxfive_client {
 };
 
 /*
- * A context's kernel memory: the client CCB, then one page of control data:
- * the HW transfer context and the CCB's control block.
+ * A context's kernel memory: the client CCB (a render context's TA CCB), then
+ * one page of control data. A render context keeps its whole firmware side in
+ * that page: the HW render context, the status words, the RT data set, the PB
+ * descriptor and block, the render details.
  */
 #define SGXFIVE_CTX_CCB_OFF	0
 #define SGXFIVE_CTX_PAGE_OFF	ALIGN(SGX_XFER_CCB_SIZE + SGX_XFER_CMD_SIZE, PAGE_SIZE)
 #define SGXFIVE_CTX_HW_OFF	(SGXFIVE_CTX_PAGE_OFF + 0x000)	/* HW context */
 #define SGXFIVE_CTX_CTL_OFF	(SGXFIVE_CTX_PAGE_OFF + 0x100)	/* CCB control */
 #define SGXFIVE_CTX_FENCE_OFF	(SGXFIVE_CTX_PAGE_OFF + 0x200)	/* last seqno */
+#define SGXFIVE_CTX_TA_OFF	(SGXFIVE_CTX_PAGE_OFF + 0x204)	/* render: TA done */
+#define SGXFIVE_RCTX_ACCESS_OFF	(SGXFIVE_CTX_PAGE_OFF + 0x208)
+#define SGXFIVE_RCTX_PENDING_OFF (SGXFIVE_CTX_PAGE_OFF + 0x20c)
+#define SGXFIVE_RCTX_RTSTATUS_OFF (SGXFIVE_CTX_PAGE_OFF + 0x210)
+#define SGXFIVE_RCTX_BGPRI_OFF	(SGXFIVE_CTX_PAGE_OFF + 0x214)
+#define SGXFIVE_RCTX_RTDS_OFF	(SGXFIVE_CTX_PAGE_OFF + 0x300)
+#define SGXFIVE_RCTX_PBDESC_OFF	(SGXFIVE_CTX_PAGE_OFF + 0x380)
+#define SGXFIVE_RCTX_PBBLOCK_OFF (SGXFIVE_CTX_PAGE_OFF + 0x3c0)
+#define SGXFIVE_RCTX_RD_OFF	(SGXFIVE_CTX_PAGE_OFF + 0x400)
 #define SGXFIVE_CTX_MEM_SIZE	(SGXFIVE_CTX_PAGE_OFF + PAGE_SIZE)
+
+/* A render job's image in its hardware fence: the TA command, then the details. */
+#define SGXFIVE_RENDER_IMG_RD	0x2c0
+
+/* The reserved heaps' slots of one render context. */
+#define SGXFIVE_RENDER_SLOTS		32
+#define SGXFIVE_RENDER_PARAM_SLOT	SZ_8M
+#define SGXFIVE_RENDER_TD_SLOT		SZ_2M	/* SGX_RENDER_TD_MAX_SIZE, rounded */
+
+struct sgxfive_render;
 
 struct sgxfive_ctx {
 	struct kref ref;
 	struct sgxfive *sgx;
 	u32 type;			/* enum drm_sgxfive_ctx_type */
+	struct sgxfive_render *render;	/* render contexts only */
+	u32 max_width, max_height;	/* render: the largest target it takes */
 	struct sgxfive_vm *vm;		/* holds a reference */
 	u32 pd_phys;			/* the VM's page directory */
 	struct sgxfive_client *client;	/* holds a reference */
@@ -69,6 +94,7 @@ struct sgxfive_ctx {
 	u32 seqno;			/* last job number handed out */
 	bool lost;			/* a job of it hung: no more jobs */
 	bool closed;			/* destroyed: under submit_lock */
+	bool scene_open;		/* render: a geometry job left its scene open */
 	u32 replay;			/* jobs to re-run after a reset */
 };
 
@@ -82,6 +108,7 @@ struct sgxfive_fence {
 	struct list_head link;		/* in the context's pending list */
 	u64 order;			/* when the firmware got it, device-wide */
 	u32 size;			/* in the client CCB */
+	bool ta_only;			/* a geometry job's: done with its TA */
 	u8 cmd[SGX_XFER_CMD_SIZE];
 };
 
@@ -95,6 +122,8 @@ struct sgxfive_job {
 	struct sgxfive_fence *hw;	/* until the job runs */
 	u32 seqno;
 	u32 size;			/* in the client CCB */
+	struct drm_sgxfive_render_cmd rc;	/* a render job's registers */
+	bool first, last;		/* a render job's kick of its scene */
 };
 
 static inline void *sgxfive_ctx_cpu(struct sgxfive_ctx *ctx, u32 off)
@@ -138,5 +167,15 @@ int sgxfive_ioctl_create_ctx(struct sgxfive *sgx, void *data,
 			     struct drm_file *file);
 int sgxfive_ioctl_destroy_ctx(struct sgxfive *sgx, void *data,
 			      struct drm_file *file);
+
+/* Render contexts (sgxfive_render.c). */
+int sgxfive_render_init(struct sgxfive_ctx *ctx);
+void sgxfive_render_fini(struct sgxfive_ctx *ctx);
+int sgxfive_render_run(struct sgxfive_ctx *ctx, struct sgxfive_job *job,
+		       const struct sgxfive_fence *hw);
+u32 sgxfive_render_reset(struct sgxfive_ctx *ctx);
+int sgxfive_render_job_error(struct sgxfive_ctx *ctx);
+void sgxfive_render_job_scene(struct sgxfive_ctx *ctx, struct sgxfive_job *job, bool geometry);
+void sgxfive_render_job_build(struct sgxfive_ctx *ctx, struct sgxfive_job *job);
 
 #endif

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only OR MIT
 /*
- * SUBMIT_JOBS for sgxfive transfer contexts.
+ * SUBMIT_JOBS for sgxfive contexts: transfers and renders.
  * A call is validated as a whole before anything is queued, its waits
  * included: a wait takes the fence its syncobj holds then, unless an earlier
  * job of the call signals that syncobj; it then waits for that job, whose
@@ -21,6 +21,7 @@
 struct sgxfive_submit {
 	struct drm_sgxfive_job desc;
 	struct drm_sgxfive_transfer_cmd regs;
+	struct drm_sgxfive_render_cmd rc;
 	struct drm_sgxfive_sync_op ops[SGXFIVE_MAX_SYNC_OPS];
 	struct sgxfive_job *job;
 	struct dma_fence_chain *chains[SGXFIVE_MAX_SYNC_OPS];
@@ -95,15 +96,33 @@ bool sgxfive_sync_signals(const struct drm_sgxfive_sync_op *ops, u32 n,
 	return false;
 }
 
+/* A render job: its command, checked, its target within the context's maximum. */
+static int sgxfive_submit_check_render(struct sgxfive_submit *s,
+				       const struct sgxfive_ctx *ctx)
+{
+	const struct drm_sgxfive_job *d = &s->desc;
+	u32 len = d->cmd_stream_len;
+	int ret;
+
+	if (len < sizeof(s->rc) || len > PAGE_SIZE || d->cmd_stream % 8)
+		return -EINVAL;
+	ret = copy_elem(&s->rc, sizeof(s->rc), u64_to_user_ptr(d->cmd_stream), len);
+	return ret ? ret : sgxfive_render_check(&s->rc, ctx->max_width,
+						ctx->max_height);
+}
+
 static int sgxfive_submit_check(struct sgxfive_submit *s, struct sgxfive_ctx *ctx)
 {
 	const struct drm_sgxfive_job *d = &s->desc;
 	bool dummy = d->flags & DRM_SGXFIVE_SUBMIT_JOB_TRANSFER_DUMMY;
 	u32 len = d->cmd_stream_len, i;
 	int ret;
+	u32 mask = d->type == DRM_SGXFIVE_JOB_TYPE_RENDER ?
+		   DRM_SGXFIVE_SUBMIT_JOB_RENDER_FLAGS_MASK :
+		   DRM_SGXFIVE_SUBMIT_JOB_TRANSFER_FLAGS_MASK;
 
-	if (d->type != DRM_SGXFIVE_JOB_TYPE_TRANSFER ||
-	    (d->flags & ~DRM_SGXFIVE_SUBMIT_JOB_TRANSFER_FLAGS_MASK) ||
+	if ((d->type != DRM_SGXFIVE_JOB_TYPE_TRANSFER &&
+	     d->type != DRM_SGXFIVE_JOB_TYPE_RENDER) || (d->flags & ~mask) ||
 	    d->updates.count || d->updates.stride || d->updates.array)
 		return -EINVAL;
 	/* Job and context types match (they share their values). */
@@ -111,7 +130,11 @@ static int sgxfive_submit_check(struct sgxfive_submit *s, struct sgxfive_ctx *ct
 		return -EINVAL;
 	if (READ_ONCE(ctx->lost) || READ_ONCE(ctx->client->banned))
 		return -ECANCELED;
-	if (dummy) {
+	if (d->type == DRM_SGXFIVE_JOB_TYPE_RENDER) {
+		ret = sgxfive_submit_check_render(s, ctx);
+		if (ret)
+			return ret;
+	} else if (dummy) {
 		if (len || d->cmd_stream)
 			return -EINVAL;
 	} else {
@@ -182,12 +205,19 @@ static int sgxfive_submit_queue(struct sgxfive_submit *s, struct sgxfive_ctx *ct
 	drm_sched_job_arm(&job->base);
 	job->ctx = ctx;
 	job->seqno = ++ctx->seqno;
-	job->size = sgxfive_job_build(job->hw->cmd,
-				      (d->flags & DRM_SGXFIVE_SUBMIT_JOB_TRANSFER_DUMMY) ?
-				      NULL : &s->regs,
-				      d->flags & DRM_SGXFIVE_SUBMIT_JOB_TRANSFER_DUMMY,
-				      ctx->mem.addr + SGXFIVE_CTX_FENCE_OFF,
-				      job->seqno);
+	if (ctx->type == DRM_SGXFIVE_CTX_TYPE_RENDER) {
+		job->rc = s->rc;
+		sgxfive_render_job_scene(ctx, job,
+					 d->flags & DRM_SGXFIVE_SUBMIT_JOB_RENDER_GEOMETRY);
+		sgxfive_render_job_build(ctx, job);
+	} else {
+		job->size = sgxfive_job_build(job->hw->cmd,
+					      (d->flags & DRM_SGXFIVE_SUBMIT_JOB_TRANSFER_DUMMY) ?
+					      NULL : &s->regs,
+					      d->flags & DRM_SGXFIVE_SUBMIT_JOB_TRANSFER_DUMMY,
+					      ctx->mem.addr + SGXFIVE_CTX_FENCE_OFF,
+					      job->seqno);
+	}
 	done = &job->base.s_fence->finished;
 	for (i = 0; i < d->sync_ops.count; i++) {
 		struct drm_syncobj *obj;

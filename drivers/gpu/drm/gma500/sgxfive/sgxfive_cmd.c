@@ -2,12 +2,15 @@
 /*
  * The firmware form of sgxfive jobs: the UAPI transfer register block (struct
  * drm_sgxfive_transfer_cmd) becomes a firmware transfer command (sgx_xfer.h)
+ * and a render command (struct drm_sgxfive_render_cmd) a TA command and
+ * render details (sgx_render.h),
  * with the fields the kernel owns filled in; and the checks on them.
  */
 #include <linux/sizes.h>
 #include <linux/stddef.h>
 #include <linux/string.h>
 
+#include "sgx_render.h"
 #include "sgx_xfer.h"
 #include "sgxfive_ctx.h"
 #include "sgxfive_priv.h"
@@ -111,4 +114,67 @@ int sgxfive_job_check(const struct drm_sgxfive_transfer_cmd *regs)
 	if (regs->isp_rgn_base && !in_user_heap(regs->isp_rgn_base))
 		return -EINVAL;
 	return 0;
+}
+
+/*
+ * The checks on a render command: the VDM stream and the pixel-event program
+ * in the client's heaps, aligned (a render VM aliases the firmware, so a
+ * pointer into the kernel heaps would reach it), the render target within the
+ * context's maximum, max_w x max_h, for which its tiling buffers are sized.
+ */
+int sgxfive_render_check(const struct drm_sgxfive_render_cmd *c, u32 max_w,
+			 u32 max_h)
+{
+	if (c->vdm_ctrl_stream_base & 3 || !in_user_heap(c->vdm_ctrl_stream_base) ||
+	    c->event_pixel_pds_exec & 0xf || !in_user_heap(c->event_pixel_pds_exec))
+		return -EINVAL;
+	return sgx_render_check_size(c, max_w, max_h);
+}
+
+/*
+ * Where a render context's firmware structures are: in its kernel memory at
+ * mem (the layout of sgxfive_ctx.h), and its slots in the reserved heaps,
+ * the TA-data slot holding the buffers of td.
+ */
+void sgxfive_render_addrs(struct sgx_render_addrs *a, u32 mem, u32 pd_phys,
+			  unsigned int slot, const struct sgx_render_tadata *td)
+{
+	*a = (struct sgx_render_addrs) {
+		.pd_phys = pd_phys,
+		.param_base = sgxfive_rev1_heaps[DRM_SGXFIVE_HEAP_PARAMETERS].base +
+			      slot * SGXFIVE_RENDER_PARAM_SLOT,
+		.tadata = sgxfive_rev1_heaps[DRM_SGXFIVE_HEAP_TA_DATA].base +
+			  slot * SGXFIVE_RENDER_TD_SLOT,
+		.td = *td,
+		.ctx = mem + SGXFIVE_CTX_HW_OFF, .ccb = mem + SGXFIVE_CTX_CCB_OFF,
+		.ccb_ctl = mem + SGXFIVE_CTX_CTL_OFF, .rtds = mem + SGXFIVE_RCTX_RTDS_OFF,
+		.pbdesc = mem + SGXFIVE_RCTX_PBDESC_OFF,
+		.pbblock = mem + SGXFIVE_RCTX_PBBLOCK_OFF, .rd = mem + SGXFIVE_RCTX_RD_OFF,
+		.ta_status = mem + SGXFIVE_CTX_TA_OFF, .td_status = mem + SGXFIVE_CTX_FENCE_OFF,
+		.access = mem + SGXFIVE_RCTX_ACCESS_OFF,
+		.pending = mem + SGXFIVE_RCTX_PENDING_OFF,
+		.rt_status = mem + SGXFIVE_RCTX_RTSTATUS_OFF,
+		.bgpri = mem + SGXFIVE_RCTX_BGPRI_OFF,
+	};
+}
+
+/*
+ * A render job's firmware image (SGX_XFER_CMD_SIZE bytes, its hardware
+ * fence's copy): the TA command of one kick of a scene (the whole scene with
+ * first and last) with seqno as its frame and status values, then at
+ * SGXFIVE_RENDER_IMG_RD its render details. Returns the TA command's size in
+ * the TA CCB.
+ */
+u32 sgxfive_render_build(u8 *img, const struct sgx_render_addrs *a,
+			 const struct drm_sgxfive_render_cmd *c, u32 seqno, bool first,
+			 bool last)
+{
+	struct sgx_render_kick k;
+	u32 size;
+
+	memset(img, 0, SGX_XFER_CMD_SIZE);
+	sgx_render_scene_kick(&k, seqno, seqno, first, last);
+	size = sgx_render_cmd(img, a, c, &k);
+	sgx_render_rd((u32 *)(img + SGXFIVE_RENDER_IMG_RD), a, c);
+	return size;
 }

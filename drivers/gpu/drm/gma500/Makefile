@@ -51,6 +51,7 @@ gma500_gfx-y += sgxfive/sgxfive_coredump.o
 gma500_gfx-y += sgxfive/sgxfive_ctx.o
 gma500_gfx-y += sgxfive/sgxfive_drv.o
 gma500_gfx-y += sgxfive/sgxfive_fence.o
+gma500_gfx-y += sgxfive/sgxfive_render.o
 gma500_gfx-y += sgxfive/sgxfive_sched.o
 gma500_gfx-y += sgxfive/sgxfive_submit.o
 gma500_gfx-y += sgxfive/sgxfive_vm.o
