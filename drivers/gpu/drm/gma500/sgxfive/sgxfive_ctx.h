@@ -177,5 +177,12 @@ u32 sgxfive_render_reset(struct sgxfive_ctx *ctx);
 int sgxfive_render_job_error(struct sgxfive_ctx *ctx);
 void sgxfive_render_job_scene(struct sgxfive_ctx *ctx, struct sgxfive_job *job, bool geometry);
 void sgxfive_render_job_build(struct sgxfive_ctx *ctx, struct sgxfive_job *job);
+#if IS_ENABLED(CONFIG_DRM_GMA500_SGXFIVE_DEBUG)
+size_t sgxfive_pages_copy(struct page **pages, unsigned int n, void *dst, size_t len,
+			  loff_t off);
+struct sgxfive_ctx *sgxfive_render_newest(struct sgxfive *sgx);
+size_t sgxfive_render_dump(struct sgxfive_ctx *ctx, bool tadata, void *dst, size_t len,
+			   loff_t off);
+#endif
 
 #endif

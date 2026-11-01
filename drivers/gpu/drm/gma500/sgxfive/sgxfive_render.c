@@ -259,6 +259,63 @@ void sgxfive_render_fini(struct sgxfive_ctx *ctx)
 	sgxfive_defer(sgx, &r->release);
 }
 
+#if IS_ENABLED(CONFIG_DRM_GMA500_SGXFIVE_DEBUG)
+/*
+ * Copy len bytes from off in the n pages to dst, for the debugfs dumps;
+ * returns how many, fewer at the end of the pages and none past it. The
+ * pages are lowmem: their direct map is the view the GPU's writes reach
+ * (write-combined for a render context's).
+ */
+size_t sgxfive_pages_copy(struct page **pages, unsigned int n, void *dst, size_t len,
+			  loff_t off)
+{
+	size_t done = 0;
+
+	while (done < len && off >= 0 && off < (loff_t)n << PAGE_SHIFT) {
+		size_t in = off & ~PAGE_MASK;
+		size_t c = min_t(size_t, len - done, PAGE_SIZE - in);
+
+		memcpy(dst + done, page_address(pages[off >> PAGE_SHIFT]) + in, c);
+		done += c;
+		off += c;
+	}
+	return done;
+}
+
+/* The newest render context still alive, with a reference (debugfs dumps). */
+struct sgxfive_ctx *sgxfive_render_newest(struct sgxfive *sgx)
+{
+	struct sgxfive_ctx *ctx, *found = NULL;
+
+	spin_lock_irq(&sgx->ctx_lock);
+	list_for_each_entry_reverse(ctx, &sgx->ctx_list, link) {
+		if (ctx->type == DRM_SGXFIVE_CTX_TYPE_RENDER && kref_get_unless_zero(&ctx->ref)) {
+			found = ctx;
+			break;
+		}
+	}
+	spin_unlock_irq(&sgx->ctx_lock);
+	return found;
+}
+
+/*
+ * Copy from a render context's parameter slot, from its PB on (the PB pages,
+ * their page table, the scratch primitive block, the background object), or
+ * from its TA data buffers, as sgxfive_pages_copy(); none before its pages are.
+ */
+size_t sgxfive_render_dump(struct sgxfive_ctx *ctx, bool tadata, void *dst, size_t len,
+			   loff_t off)
+{
+	struct sgxfive_render *r = READ_ONCE(ctx->render);
+
+	if (!r)
+		return 0;
+	if (tadata)
+		return sgxfive_pages_copy(r->td, r->td_pages, dst, len, off);
+	return sgxfive_pages_copy(r->param, PARAM_PAGES, dst, len, off);
+}
+#endif
+
 /*
  * At submission, in the context's job order: which kick of its scene the job
  * is. A geometry job leaves the scene open for the next; the first job after a

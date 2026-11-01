@@ -24,6 +24,7 @@
 
 #include <drm/drm_print.h>
 
+#include "sgxfive_ctx.h"
 #include "sgxfive_priv.h"
 #include "sgx_mmu.h"
 #include "sgx_render.h"
@@ -1068,6 +1069,63 @@ static const struct file_operations sgxfive_kreg_fops = {
 	.write = sgxfive_kreg_fwrite, .llseek = seq_lseek, .release = single_release,
 };
 
+/*
+ * debugfs render_param and render_tadata: the newest render context's
+ * parameter slot from its PB on, and its TA data buffers, as the GPU left
+ * them, to read what the TA wrote (sgxfive_render_dump). Read them while the
+ * context lives and has no job in the firmware. Root only.
+ */
+static ssize_t sgxfive_render_dump_read(struct file *f, char __user *ubuf, size_t len,
+					loff_t *ppos, bool tadata)
+{
+	struct sgxfive *sgx = file_inode(f)->i_private;
+	struct sgxfive_ctx *ctx;
+	ssize_t ret;
+	size_t n;
+	void *buf;
+
+	len = min_t(size_t, len, SZ_64K);
+	buf = kvmalloc(len, GFP_KERNEL);
+	if (!buf)
+		return -ENOMEM;
+	ctx = sgxfive_render_newest(sgx);
+	if (!ctx) {
+		kvfree(buf);
+		return -ENODEV;
+	}
+	n = sgxfive_render_dump(ctx, tadata, buf, len, *ppos);
+	sgxfive_ctx_put(ctx);
+	ret = n;
+	if (n && copy_to_user(ubuf, buf, n))
+		ret = -EFAULT;
+	else
+		*ppos += n;
+	kvfree(buf);
+	return ret;
+}
+
+static ssize_t sgxfive_render_param_read(struct file *f, char __user *ubuf, size_t len,
+					 loff_t *ppos)
+{
+	return sgxfive_render_dump_read(f, ubuf, len, ppos, false);
+}
+
+static ssize_t sgxfive_render_tadata_read(struct file *f, char __user *ubuf, size_t len,
+					  loff_t *ppos)
+{
+	return sgxfive_render_dump_read(f, ubuf, len, ppos, true);
+}
+
+static const struct file_operations sgxfive_render_param_fops = {
+	.owner = THIS_MODULE, .open = simple_open, .read = sgxfive_render_param_read,
+	.llseek = default_llseek,
+};
+
+static const struct file_operations sgxfive_render_tadata_fops = {
+	.owner = THIS_MODULE, .open = simple_open, .read = sgxfive_render_tadata_read,
+	.llseek = default_llseek,
+};
+
 void sgxfive_debug_init(struct sgxfive *sgx, struct dentry *dir)
 {
 	debugfs_create_file("miscinfo", 0400, dir, sgx, &sgxfive_miscinfo_fops);
@@ -1089,4 +1147,6 @@ void sgxfive_debug_init(struct sgxfive *sgx, struct dentry *dir)
 	/* Pages of the PB of render contexts created from now on. */
 	sgx->render_pb_pages = SGX_RENDER_PB_PAGES;
 	debugfs_create_x32("render_pb_pages", 0600, dir, &sgx->render_pb_pages);
+	debugfs_create_file("render_param", 0400, dir, sgx, &sgxfive_render_param_fops);
+	debugfs_create_file("render_tadata", 0400, dir, sgx, &sgxfive_render_tadata_fops);
 }
