@@ -316,6 +316,8 @@ void sgxfive_sched_fini(struct sgxfive *sgx);
 
 u64 sgxfive_oldest(struct sgxfive *sgx);
 int sgxfive_recover(struct sgxfive *sgx, u64 suspect, enum sgxfive_hang why);
+int __sgxfive_recover(struct sgxfive *sgx, u64 suspect, enum sgxfive_hang why,
+		      bool *dropped);
 int sgxfive_hang_error(enum sgxfive_hang why);
 void sgxfive_watchdog_arm(struct sgxfive *sgx);
 

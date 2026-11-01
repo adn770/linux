@@ -688,14 +688,25 @@ static int sgxfive_reset(struct sgxfive *sgx, u64 suspect, enum sgxfive_hang why
  * says which detector found the hang, for the error. With the debug option a
  * recovery may be held: a debugfs reset written while one is held recovers
  * its job, a failed cleanup's reset is dropped (sgxfive_recovery_hold).
+ * *dropped, if given, says whether a held recovery dropped the reset; it is
+ * decided under the device lock, with the reset, so it is what happened. A
+ * failed cleanup is logged here for the same reason, with that outcome.
  */
-int sgxfive_recover(struct sgxfive *sgx, u64 suspect, enum sgxfive_hang why)
+int __sgxfive_recover(struct sgxfive *sgx, u64 suspect, enum sgxfive_hang why,
+		      bool *dropped)
 {
 	struct sgxfive_coredump *cd;
+	bool held;
 	int ret;
 
 	mutex_lock(&sgx->lock);
-	if (sgxfive_recovery_hold(sgx, &suspect, &why)) {
+	held = sgxfive_recovery_hold(sgx, &suspect, &why);
+	if (why == SGXFIVE_HANG_CLEANUP)
+		drm_warn(sgx->dev, "sgxfive: render context cleanup failed, %s\n",
+			 held ? "no reset while recovery is held" : "resetting");
+	if (dropped)
+		*dropped = held;
+	if (held) {
 		mutex_unlock(&sgx->lock);
 		return 0;
 	}
@@ -708,6 +719,11 @@ int sgxfive_recover(struct sgxfive *sgx, u64 suspect, enum sgxfive_hang why)
 	if (ret)
 		drm_err(sgx->dev, "SGX recovery failed: %d\n", ret);
 	return ret;
+}
+
+int sgxfive_recover(struct sgxfive *sgx, u64 suspect, enum sgxfive_hang why)
+{
+	return __sgxfive_recover(sgx, suspect, why, NULL);
 }
 
 /*

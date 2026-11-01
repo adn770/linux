@@ -284,6 +284,47 @@ static void sgxfive_debug_test_hold_recovery(struct kunit *test)
 	KUNIT_EXPECT_TRUE(test, sgxfive_rtds_keep(sgx));
 }
 
+/*
+ * The reset a render context's failed cleanup asks for, as sgxfive_recover
+ * decides it under the device lock and reports it: reached, blame-free, when
+ * nothing is held (the device here has no firmware, so the reset ends in
+ * -ENODEV); dropped while a recovery is held, which stays as it was, the held
+ * job unblamed, and ends with the reset that ends the hold. The warning it
+ * logs is not captured: KUnit has no log to read it from.
+ */
+static void sgxfive_debug_test_cleanup_reset(struct kunit *test)
+{
+	struct sgxfive *sgx = kunit_kzalloc(test, sizeof(*sgx), GFP_KERNEL);
+	enum sgxfive_hang why = SGXFIVE_HANG_TIMEOUT;
+	bool dropped = true;
+	u64 s = 10;
+
+	KUNIT_ASSERT_NOT_NULL(test, sgx);
+	mutex_init(&sgx->lock);
+	spin_lock_init(&sgx->ctx_lock);
+	INIT_LIST_HEAD(&sgx->ctx_list);
+	KUNIT_EXPECT_EQ(test, __sgxfive_recover(sgx, U64_MAX, SGXFIVE_HANG_CLEANUP, &dropped),
+			-ENODEV);
+	KUNIT_EXPECT_FALSE(test, dropped);
+	KUNIT_EXPECT_TRUE(test, sgxfive_cleanup_reset(sgx));
+	KUNIT_EXPECT_FALSE(test, sgxfive_recovery_held(sgx));
+
+	sgx->hold_recovery = true;
+	KUNIT_EXPECT_TRUE(test, sgxfive_recovery_hold(sgx, &s, &why));
+	KUNIT_EXPECT_EQ(test, __sgxfive_recover(sgx, U64_MAX, SGXFIVE_HANG_CLEANUP, &dropped), 0);
+	KUNIT_EXPECT_TRUE(test, dropped);
+	KUNIT_EXPECT_FALSE(test, sgxfive_cleanup_reset(sgx));
+	KUNIT_EXPECT_FALSE(test, sgxfive_cleanup_reset(sgx));
+	KUNIT_EXPECT_TRUE(test, sgxfive_recovery_held(sgx));
+	KUNIT_EXPECT_EQ(test, sgx->held_suspect, 10ull);
+	KUNIT_EXPECT_EQ(test, sgx->held_why, SGXFIVE_HANG_TIMEOUT);
+
+	sgxfive_debug_reset(sgx);
+	KUNIT_EXPECT_TRUE(test, sgxfive_cleanup_reset(sgx));
+	/* Without a caller that wants to know, the same. */
+	KUNIT_EXPECT_EQ(test, sgxfive_recover(sgx, U64_MAX, SGXFIVE_HANG_CLEANUP), -ENODEV);
+}
+
 /* A job of order on ctx, unfinished, its fence returned. */
 static struct dma_fence *fake_job(struct kunit *test, struct sgxfive_ctx *ctx, u32 seqno,
 				  u64 order)
@@ -514,6 +555,7 @@ static struct kunit_case sgxfive_debug_test_cases[] = {
 	KUNIT_CASE(sgxfive_debug_test_timer_clock),
 	KUNIT_CASE(sgxfive_debug_test_hold_recovery),
 	KUNIT_CASE(sgxfive_debug_test_held_reset),
+	KUNIT_CASE(sgxfive_debug_test_cleanup_reset),
 	KUNIT_CASE(sgxfive_debug_test_render_run),
 	KUNIT_CASE(sgxfive_debug_test_render_words),
 	{}

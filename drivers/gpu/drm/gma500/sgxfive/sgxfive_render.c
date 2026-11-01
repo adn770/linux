@@ -255,14 +255,29 @@ static void sgxfive_render_release(struct sgxfive_deferred *d)
 }
 
 /*
+ * A render context's CLEANUP got no answer: ask the blame-free reset. While a
+ * recovery is held (debug option) that reset is dropped, the hold stays and
+ * the reset that ends it resets for both (sgxfive_recovery_hold). The reset
+ * says which, under the device lock, and logs it. Returns whether a reset was
+ * asked for and not dropped.
+ */
+bool sgxfive_cleanup_reset(struct sgxfive *sgx)
+{
+	bool dropped;
+
+	__sgxfive_recover(sgx, U64_MAX, SGXFIVE_HANG_CLEANUP, &dropped);
+	return !dropped;
+}
+
+/*
  * The last reference to a render context is gone and it is off the device's
  * list: the firmware drops its state (CLEANUP; a blame-free reset if it does
- * not answer), the VM its mappings, and the memory goes once no stale
- * translation can reach it. While a recovery is held (debug option) the
- * cleanup's reset is not done: the hold stays, the reset that ends it resets
- * for both, and the memory waits on the deferred list, which the stopped
- * firmware does not advance, until then. The slot is free at once: a stale translation
- * still lands on the pinned pages. Frees ctx.
+ * not answer, sgxfive_cleanup_reset), the VM its mappings, and the memory goes
+ * once no stale translation can reach it. While a recovery is held (debug
+ * option) there is no such reset: the memory waits on the deferred list,
+ * which the stopped firmware does not advance, for the reset that ends the
+ * hold. The slot is free at once: a stale translation still lands on the
+ * pinned pages. Frees ctx.
  */
 void sgxfive_render_fini(struct sgxfive_ctx *ctx)
 {
@@ -270,10 +285,8 @@ void sgxfive_render_fini(struct sgxfive_ctx *ctx)
 	struct sgxfive *sgx = ctx->sgx;
 
 	if (sgxfive_render_cleanup(sgx, r->a.rtds, r->a.ctx, r->a.pbdesc,
-				   *rctx(ctx, SGXFIVE_CTX_HW_OFF))) {
-		drm_warn(sgx->dev, "sgxfive: render context cleanup failed, resetting\n");
-		sgxfive_recover(sgx, U64_MAX, SGXFIVE_HANG_CLEANUP);
-	}
+				   *rctx(ctx, SGXFIVE_CTX_HW_OFF)))
+		sgxfive_cleanup_reset(sgx);
 	sgxfive_render_unmap(r);
 	sgxfive_vm_render_detach(ctx->vm, r->slot);
 	r->release.free = sgxfive_render_release;
