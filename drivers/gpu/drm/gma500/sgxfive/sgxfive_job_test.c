@@ -877,6 +877,57 @@ static void sgxfive_job_test_geometry_fence(struct kunit *test)
 	dma_fence_put(f[1]);
 }
 
+/*
+ * A recovery reset starts the RT data set over with the pending count the
+ * jobs it runs again add to the executed count, kick by kick: a geometry kick
+ * one, a render with render flag 0x400 one, a render without it (a debug poke
+ * cleared it) none. One per job would leave the cleanup waiting for a count
+ * the firmware never reaches.
+ */
+static void sgxfive_job_test_render_replay(struct kunit *test)
+{
+	static const struct { bool first, last, scene; } kicks[] = {
+		{ true, false, true }, { false, true, true }, { true, true, false },
+	};
+	struct sgxfive_ctx *ctx = fake_ctx(test);
+	struct drm_sgxfive_render_cmd c;
+	struct sgx_render_addrs a;
+	struct sgx_render_tadata td;
+	struct dma_fence *f[ARRAY_SIZE(kicks)];
+	unsigned int i;
+
+	ctx->type = DRM_SGXFIVE_CTX_TYPE_RENDER;
+	test_cmd(&c);
+	KUNIT_ASSERT_EQ(test, sgx_render_tadata_layout(&td, 64, 64), 0);
+	sgxfive_render_addrs(&a, 0x32500000, 0x01234000, 0, &td);
+	KUNIT_EXPECT_EQ(test, sgxfive_render_replay_pending(ctx), 0u);
+	for (i = 0; i < ARRAY_SIZE(kicks); i++) {
+		struct sgxfive_fence *hw = sgxfive_fence_alloc();
+		u32 rflags;
+
+		KUNIT_ASSERT_NOT_NULL(test, hw);
+		sgxfive_render_build(hw->cmd, &a, &c, i + 1, kicks[i].first, kicks[i].last);
+		rflags = dw(hw->cmd, SGX_RENDER_CMD_RFLAGS);
+		if (!kicks[i].scene)
+			rflags &= ~SGX_RENDER_SCENE;
+		memcpy(hw->cmd + SGX_RENDER_CMD_RFLAGS, &rflags, 4);
+		f[i] = sgxfive_fence_init(hw, ctx, i + 1, 10 + i, SGX_RENDER_CMD_STRIDE);
+	}
+	/* Three jobs run again: the geometry kick and the closing render add one each. */
+	KUNIT_EXPECT_EQ(test, sgxfive_render_replay_pending(ctx), 2u);
+
+	/* The scene's two jobs done, the render without 0x400 alone runs again. */
+	*(u32 *)sgxfive_ctx_cpu(ctx, SGXFIVE_CTX_FENCE_OFF) = 2;
+	sgxfive_fence_signal(ctx);
+	KUNIT_EXPECT_EQ(test, sgxfive_ctx_rewind(ctx), 1u);
+	KUNIT_EXPECT_EQ(test, sgxfive_render_replay_pending(ctx), 0u);
+
+	sgxfive_fence_fail_all(ctx, -EIO);
+	KUNIT_EXPECT_EQ(test, sgxfive_render_replay_pending(ctx), 0u);
+	for (i = 0; i < ARRAY_SIZE(kicks); i++)
+		dma_fence_put(f[i]);
+}
+
 static struct kunit_case sgxfive_job_test_cases[] = {
 	KUNIT_CASE(sgxfive_job_test_build),
 	KUNIT_CASE(sgxfive_job_test_dummy),
@@ -893,6 +944,7 @@ static struct kunit_case sgxfive_job_test_cases[] = {
 	KUNIT_CASE(sgxfive_job_test_sync_op),
 	KUNIT_CASE(sgxfive_job_test_sync_signals),
 	KUNIT_CASE(sgxfive_job_test_rewind),
+	KUNIT_CASE(sgxfive_job_test_render_replay),
 	KUNIT_CASE(sgxfive_job_test_suspect),
 	KUNIT_CASE(sgxfive_job_test_hang_error),
 	KUNIT_CASE(sgxfive_job_test_guilty),

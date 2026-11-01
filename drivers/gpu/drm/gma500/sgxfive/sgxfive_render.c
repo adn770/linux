@@ -442,11 +442,30 @@ int sgxfive_render_job_error(struct sgxfive_ctx *ctx)
 }
 
 /*
+ * What the context's unfinished jobs add to its RT data set's executed count
+ * when they run again, kick by kick (sgx_render_executed): a recovery reset's
+ * pending count for the set it starts over.
+ */
+u32 sgxfive_render_replay_pending(struct sgxfive_ctx *ctx)
+{
+	struct sgxfive_fence *f;
+	unsigned long flags;
+	u32 n = 0;
+
+	spin_lock_irqsave(&ctx->fence_lock, flags);
+	list_for_each_entry(f, &ctx->pending, link)
+		n += sgx_render_executed(f->cmd);
+	spin_unlock_irqrestore(&ctx->fence_lock, flags);
+	return n;
+}
+
+/*
  * With the firmware stopped (recovery reset), under the context list's lock:
- * the structures start over and the unfinished job, if any, is written back
- * (its TA command into the TA CCB from offset 0, its render details, background
- * object and RT data size words from the copy in its fence). Returns how many
- * jobs to re-run.
+ * the structures start over, the RT data set's pending count is what the jobs
+ * run again add (sgxfive_render_replay_pending), and the unfinished job, if
+ * any, is written back (its TA command into the TA CCB from offset 0, its
+ * render details, background object and RT data size words from the copy in
+ * its fence). Returns how many jobs to re-run.
  */
 u32 sgxfive_render_reset(struct sgxfive_ctx *ctx)
 {
@@ -458,7 +477,7 @@ u32 sgxfive_render_reset(struct sgxfive_ctx *ctx)
 
 	sgxfive_render_init_mem(r);
 	n = sgxfive_ctx_rewind(ctx);
-	*rctx(ctx, SGXFIVE_RCTX_PENDING_OFF) = n;	/* the RT data set starts over */
+	*rctx(ctx, SGXFIVE_RCTX_PENDING_OFF) = sgxfive_render_replay_pending(ctx);
 	spin_lock_irqsave(&ctx->fence_lock, flags);
 	f = list_first_entry_or_null(&ctx->pending, struct sgxfive_fence, link);
 	if (f) {

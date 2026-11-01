@@ -174,6 +174,7 @@ int sgxfive_render_init(struct sgxfive_ctx *ctx);
 void sgxfive_render_fini(struct sgxfive_ctx *ctx);
 int sgxfive_render_run(struct sgxfive_ctx *ctx, struct sgxfive_job *job,
 		       const struct sgxfive_fence *hw);
+u32 sgxfive_render_replay_pending(struct sgxfive_ctx *ctx);
 u32 sgxfive_render_reset(struct sgxfive_ctx *ctx);
 int sgxfive_render_job_error(struct sgxfive_ctx *ctx);
 void sgxfive_render_job_scene(struct sgxfive_ctx *ctx, struct sgxfive_job *job, bool geometry);
