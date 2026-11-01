@@ -81,20 +81,6 @@ static void sgx_wr(struct sgxfive *sgx, u32 reg, u32 val)
 	iowrite32(val, sgx->regs + reg);
 }
 
-/*
- * Buffer ids and HostCtl dwords, as resgx545's doc/specs/fw_format.md and
- * doc/specs/hw_spec.md give them.
- */
-enum {
-	BUF_CCB_CTL = 7, BUF_KICKER = 8, BUF_TA3D_CTL = 9, BUF_HOST_CTL = 10,
-};
-
-enum {
-	HC_INIT_STATUS = 0, HC_POWER_STATUS = 1, HC_HWR_SAMPLE_RATE = 5,
-	HC_UKERNEL_TIMER_CLOCK = 6, HC_APM_SAMPLE_RATE = 7, HC_HOST_CLOCK = 13,
-	HC_DWORDS = 17,
-};
-
 #define TA3D_CTL_DWORDS		(0xec / 4)
 static_assert(HC_DWORDS == SGXFIVE_HC_DWORDS);
 static_assert(TA3D_CTL_DWORDS == SGXFIVE_TA3D_CTL_DWORDS);
@@ -296,11 +282,6 @@ static int sgxfive_layout_show(struct seq_file *m, void *unused)
 }
 DEFINE_SHOW_ATTRIBUTE(sgxfive_layout);
 
-static u32 *sgxfive_words(struct sgxfive *sgx, unsigned int id)
-{
-	return sgx->buf[id].va;
-}
-
 static u32 seq_rd(void *ctx, u32 reg)
 {
 	return sgx_rd(ctx, reg);
@@ -317,6 +298,11 @@ static void seq_udelay(void *ctx, unsigned int us)
 	udelay(us);
 }
 
+static void seq_wmb(void *ctx)
+{
+	wmb(); /* the command and the offsets before the kick */
+}
+
 /* C7, C9-C11: the kicker word, the host clock, InitStatus, then a barrier. */
 static void seq_pre_kick(void *ctx)
 {
@@ -330,7 +316,7 @@ static void seq_pre_kick(void *ctx)
 }
 
 /* Poll a dword the EDM writes until (v & mask) == want, for up to 500 ms. */
-static int sgxfive_wait_mem(const u32 *w, u32 mask, u32 want)
+int sgxfive_wait_mem(const u32 *w, u32 mask, u32 want)
 {
 	ktime_t start = ktime_get();
 
@@ -384,7 +370,7 @@ static void sgxfive_print_words(struct drm_printer *p, const char *name,
 			   (int)(min(8u, n - i) * 4), &w[i]);
 }
 
-static void sgxfive_dump(struct sgxfive *sgx, struct drm_printer *p)
+void sgxfive_dump(struct sgxfive *sgx, struct drm_printer *p)
 {
 	struct sgxfive_devstate d;
 	unsigned int i;
@@ -498,8 +484,37 @@ static int sgxfive_boot(struct sgxfive *sgx)
 	}
 	drm_info(sgx->dev, "SGX boot: EDM up after %lld us\n",
 		 ktime_us_delta(ktime_get(), start));
+	/* The first command carries the init info's cache control. */
+	sgx->cache_control = sgx->fw.meta[SGX_FW_META_CACHE_CONTROL];
 	sgxfive_dump(sgx, &p);
 	return 0;
+}
+
+/*
+ * Submit one kernel CCB command (SGXScheduleCCBCommand): cmd is its index in
+ * the firmware file's kick table, data its words. The cache control bits
+ * gathered since the last command go with it.
+ */
+int sgxfive_command(struct sgxfive *sgx, unsigned int cmd, const u32 *data,
+		    unsigned int ndata)
+{
+	struct sgx_seq s = {
+		.wr = seq_wr, .wmb = seq_wmb, .ctx = sgx,
+	};
+	int ret;
+
+	if (!sgx->live)
+		return -ENODEV;
+	if (cmd >= SGX_FW_META_STRUCT_SIZES - SGX_FW_META_KICK)
+		return -EINVAL;
+	ret = sgx_ccb_submit(&s, sgxfive_words(sgx, BUF_CCB),
+			     sgxfive_words(sgx, BUF_CCB_CTL),
+			     sgxfive_words(sgx, BUF_KICKER),
+			     sgx->fw.meta[SGX_FW_META_KICK + cmd],
+			     sgx->cache_control, data, ndata);
+	if (!ret)
+		sgx->cache_control = 0;
+	return ret;
 }
 
 /* From the host's SGX interrupt; true when the event belongs to the EDM. */
@@ -605,6 +620,7 @@ DEFINE_SHOW_ATTRIBUTE(sgxfive_regs);
 static void sgxfive_debugfs_debug(struct sgxfive *sgx, struct dentry *dir)
 {
 	debugfs_create_file("regs", 0400, dir, sgx, &sgxfive_regs_fops);
+	sgxfive_debug_init(sgx, dir);
 }
 #else
 static void sgxfive_debugfs_debug(struct sgxfive *sgx, struct dentry *dir)

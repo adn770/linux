@@ -1,7 +1,8 @@
 /* SPDX-License-Identifier: GPL-2.0-only OR MIT */
 /*
- * The SGX545 boot register sequence, from clock gating to the EDM kick.
- * Register access goes through callbacks so the order can be unit tested.
+ * The SGX545 boot register sequence, from clock gating to the EDM kick, and
+ * the submission of a command to the EDM's kernel CCB. Register access goes
+ * through callbacks so the order can be unit tested.
  */
 #ifndef _GMA500_SGX_SEQ_H_
 #define _GMA500_SGX_SEQ_H_
@@ -20,6 +21,7 @@
 #define SGX_EVENT_STATUS	0x12c
 #define SGX_EVENT_HOST_ENABLE	0x130
 #define SGX_EVENT_HOST_CLEAR	0x134
+#define SGX_EVENT_KICK		0xac8
 #define SGX_EVENT_KICK2		0xae8
 #define SGX_USE0_SERV_EVENT	0xb14
 #define SGX_USE1_SERV_EVENT	0xb20
@@ -44,6 +46,7 @@ struct sgx_seq {
 	void (*wr)(void *ctx, u32 reg, u32 val);
 	void (*udelay)(void *ctx, unsigned int us);
 	void (*pre_kick)(void *ctx);	/* memory writes before the kick */
+	void (*wmb)(void *ctx);		/* order memory writes before a kick */
 	void *ctx;
 
 	u32 clkgatectl, clkgatectl2;
@@ -54,5 +57,18 @@ struct sgx_seq {
 };
 
 int sgx_seq_boot(const struct sgx_seq *s);
+
+/*
+ * The kernel CCB: 256 commands of eight dwords each, {service, cache
+ * control, data[6]}, with a control block of two dwords, the host's write
+ * offset and the EDM's read offset.
+ */
+#define SGX_CCB_ENTRIES		256
+#define SGX_CCB_CMD_DWORDS	8
+#define SGX_CCB_DATA_DWORDS	6
+
+int sgx_ccb_submit(const struct sgx_seq *s, u32 *ccb, u32 ctl[2], u32 *kicker,
+		   u32 service, u32 cache_control, const u32 *data,
+		   unsigned int ndata);
 
 #endif
