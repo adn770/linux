@@ -7,6 +7,7 @@
  * The first MiB VM_MAP may take.
  * The extra flags of new render contexts and the trace of their cleanup.
  * The timer clock the boot writes into HostCtl.
+ * Recoveries held, and renders that keep their RT data set.
  */
 #include <kunit/test.h>
 #include <linux/module.h>
@@ -232,6 +233,34 @@ static void sgxfive_debug_test_timer_clock(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, sgxfive_timer_clock(sgx, 400000), 400000u);
 }
 
+/*
+ * debugfs hold_recovery: the detectors' recoveries are held while it is set,
+ * a reset asked for never is; the next reset ends the hold. rtds_keep reads
+ * through.
+ */
+static void sgxfive_debug_test_hold_recovery(struct kunit *test)
+{
+	struct sgxfive *sgx = kunit_kzalloc(test, sizeof(*sgx), GFP_KERNEL);
+
+	KUNIT_ASSERT_NOT_NULL(test, sgx);
+	KUNIT_EXPECT_FALSE(test, sgxfive_recovery_hold(sgx, 3, SGXFIVE_HANG_FAULT));
+	KUNIT_EXPECT_FALSE(test, sgxfive_recovery_hold(sgx, 3, SGXFIVE_HANG_TIMEOUT));
+	KUNIT_EXPECT_FALSE(test, sgx->recovery_held);
+
+	sgx->hold_recovery = true;
+	KUNIT_EXPECT_FALSE(test, sgxfive_recovery_hold(sgx, 3, SGXFIVE_HANG_MANUAL));
+	KUNIT_EXPECT_FALSE(test, sgx->recovery_held);
+	KUNIT_EXPECT_TRUE(test, sgxfive_recovery_hold(sgx, 3, SGXFIVE_HANG_FAULT));
+	KUNIT_EXPECT_TRUE(test, sgx->recovery_held);
+	KUNIT_EXPECT_TRUE(test, sgxfive_recovery_hold(sgx, 3, SGXFIVE_HANG_TIMEOUT));
+	sgxfive_debug_reset(sgx);
+	KUNIT_EXPECT_FALSE(test, sgx->recovery_held);
+
+	KUNIT_EXPECT_FALSE(test, sgxfive_rtds_keep(sgx));
+	sgx->rtds_keep = true;
+	KUNIT_EXPECT_TRUE(test, sgxfive_rtds_keep(sgx));
+}
+
 static struct kunit_case sgxfive_debug_test_cases[] = {
 	KUNIT_CASE(sgxfive_debug_test_pb_small),
 	KUNIT_CASE(sgxfive_debug_test_pb_pages),
@@ -241,6 +270,7 @@ static struct kunit_case sgxfive_debug_test_cases[] = {
 	KUNIT_CASE(sgxfive_debug_test_ctx_flags),
 	KUNIT_CASE(sgxfive_debug_test_cleanup),
 	KUNIT_CASE(sgxfive_debug_test_timer_clock),
+	KUNIT_CASE(sgxfive_debug_test_hold_recovery),
 	{}
 };
 

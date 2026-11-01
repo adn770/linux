@@ -401,7 +401,8 @@ void sgxfive_render_job_build(struct sgxfive_ctx *ctx, struct sgxfive_job *job)
  * Under the device lock, with the context's previous render finished: the
  * job's render details and background object in place, the RT data's size
  * words for its target (its TE words were checked against the same layout),
- * its out-of-memory counters cleared (sgx_render_rtds_job), its TA command at the TA
+ * its out-of-memory counters cleared (sgx_render_rtds_job; neither with the
+ * debug option's rtds_keep), its TA command at the TA
  * CCB's write offset, the kick in the RT data set's pending count (the EDM
  * counts every kick of a scene as it finishes, the geometry kicks at the TA's
  * end and the last at its render's, and cleans the set up only when the two
@@ -418,8 +419,10 @@ int sgxfive_render_run(struct sgxfive_ctx *ctx, struct sgxfive_job *job,
 	       SGX_RENDER_RD_SIZE);
 	sgx_render_bgobj(render_bg(r), &job->rc);
 	*rctx(ctx, SGXFIVE_RCTX_BGPRI_OFF) = job->rc.bgobj_words[2];
-	sgx_render_rtds_resize(rctx(ctx, SGXFIVE_RCTX_RTDS_OFF), job->rc.mte_screen);
-	sgx_render_rtds_job(rctx(ctx, SGXFIVE_RCTX_RTDS_OFF));
+	if (!sgxfive_rtds_keep(ctx->sgx)) {
+		sgx_render_rtds_resize(rctx(ctx, SGXFIVE_RCTX_RTDS_OFF), job->rc.mte_screen);
+		sgx_render_rtds_job(rctx(ctx, SGXFIVE_RCTX_RTDS_OFF));
+	}
 	*rctx(ctx, SGXFIVE_RCTX_PENDING_OFF) += sgx_render_executed(hw->cmd);
 	memcpy(sgxfive_ctx_cpu(ctx, SGXFIVE_CTX_CCB_OFF + ctx->woff), hw->cmd,
 	       SGX_RENDER_CMD_STRIDE);

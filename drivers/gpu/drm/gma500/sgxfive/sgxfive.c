@@ -689,6 +689,10 @@ int sgxfive_recover(struct sgxfive *sgx, u64 suspect, enum sgxfive_hang why)
 	int ret;
 
 	mutex_lock(&sgx->lock);
+	if (sgxfive_recovery_hold(sgx, suspect, why)) {
+		mutex_unlock(&sgx->lock);
+		return 0;
+	}
 	ret = sgxfive_reset(sgx, suspect, why, &cd);
 	mutex_unlock(&sgx->lock);
 	if (cd) {

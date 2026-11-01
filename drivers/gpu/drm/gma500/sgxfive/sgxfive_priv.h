@@ -132,6 +132,9 @@ struct sgxfive {
 	u32 render_ctx_flags;		/* new render contexts' extra flags */
 	struct sgxfive_cleanup_trace cleanup;	/* the last one's, under lock */
 	u32 timer_clock;		/* HostCtl's timer clock at boot, 0: default */
+	bool hold_recovery;		/* detectors report hangs, do not reset */
+	bool recovery_held;		/* one is held, under lock (logged once) */
+	bool rtds_keep;			/* renders: no RT data set rewrite */
 #endif
 };
 
@@ -378,6 +381,14 @@ static inline u32 sgxfive_timer_clock(struct sgxfive *sgx, u32 dflt)
 
 	return v ? v : dflt;
 }
+
+bool sgxfive_recovery_hold(struct sgxfive *sgx, u64 suspect, enum sgxfive_hang why);
+
+/* Whether a render leaves its RT data set as it is (debugfs rtds_keep). */
+static inline bool sgxfive_rtds_keep(struct sgxfive *sgx)
+{
+	return READ_ONCE(sgx->rtds_keep);
+}
 #else
 static inline int sgxfive_debug_load(struct sgxfive *sgx)
 {
@@ -436,6 +447,17 @@ static inline void sgxfive_cleanup_trace_end(struct sgxfive *sgx, int ret)
 static inline u32 sgxfive_timer_clock(struct sgxfive *sgx, u32 dflt)
 {
 	return dflt;
+}
+
+static inline bool sgxfive_recovery_hold(struct sgxfive *sgx, u64 suspect,
+					 enum sgxfive_hang why)
+{
+	return false;
+}
+
+static inline bool sgxfive_rtds_keep(struct sgxfive *sgx)
+{
+	return false;
 }
 #endif
 

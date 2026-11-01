@@ -921,11 +921,32 @@ static const struct file_operations sgxfive_reset_fops = {
 	.write = sgxfive_reset_write,
 };
 
+/*
+ * Under the device lock, a recovery about to start: whether to hold it.
+ * While debugfs hold_recovery is set, the hang and fault detectors only
+ * report (once, until the next reset): the hung job stays in the firmware,
+ * its context's memory as the GPU left it, until reset is written. A reset
+ * asked for (reset, a failed render-context cleanup, whose memory must not
+ * be freed under the firmware) is never held.
+ */
+bool sgxfive_recovery_hold(struct sgxfive *sgx, u64 suspect, enum sgxfive_hang why)
+{
+	if (why == SGXFIVE_HANG_MANUAL || !READ_ONCE(sgx->hold_recovery))
+		return false;
+	if (!sgx->recovery_held)
+		drm_warn(sgx->dev,
+			 "sgxfive: job %llu hung, recovery held (debugfs hold_recovery)\n",
+			 suspect);
+	sgx->recovery_held = true;
+	return true;
+}
+
 /* A recovery reset rebuilt the firmware's buffers: the test area starts over. */
 void sgxfive_debug_reset(struct sgxfive *sgx)
 {
 	unsigned int i;
 
+	sgx->recovery_held = false;
 	for (i = 0; i < XB_COUNT; i++)
 		if (sgx->xt.buf[i].va)
 			memset(sgx->xt.buf[i].va, 0, sgxfive_xbuf[i].size);
@@ -1328,4 +1349,8 @@ void sgxfive_debug_init(struct sgxfive *sgx, struct dentry *dir)
 	debugfs_create_file("render_cleanup", 0400, dir, sgx, &sgxfive_render_cleanup_fops);
 	/* HostCtl's timer clock for the next boot; 0 for the default. */
 	debugfs_create_x32("timer_clock", 0600, dir, &sgx->timer_clock);
+	/* Hangs and faults reported, not recovered, until reset is written. */
+	debugfs_create_bool("hold_recovery", 0600, dir, &sgx->hold_recovery);
+	/* Renders leave the RT data set's size words and counters as they are. */
+	debugfs_create_bool("rtds_keep", 0600, dir, &sgx->rtds_keep);
 }
