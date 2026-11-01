@@ -190,7 +190,7 @@ int sgxfive_ioctl_create_ctx(struct sgxfive *sgx, void *data,
 static void sgxfive_ctx_close(struct sgxfive_ctx *ctx)
 {
 	mutex_lock(&ctx->submit_lock);
-	ctx->closed = true;
+	WRITE_ONCE(ctx->closed, true);
 	mutex_unlock(&ctx->submit_lock);
 	drm_sched_entity_destroy(&ctx->entity);	/* waits for its jobs */
 }

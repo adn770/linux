@@ -756,6 +756,64 @@ static void sgxfive_job_test_guilty(struct kunit *test)
 }
 
 /*
+ * At the reset that ends a held recovery the unfinished jobs of a closed
+ * context, which its client gave up, fail with -ECANCELED instead of being
+ * rewound to run again; an open context's jobs stay pending, and so do the
+ * jobs of every context while nothing is cancelled.
+ */
+static void sgxfive_job_test_cancel_closed(struct kunit *test)
+{
+	struct sgxfive_ctx *a = fake_ctx(test), *b = fake_ctx(test), *c = fake_ctx(test);
+	struct dma_fence *f[4];
+	LIST_HEAD(ctxs);
+	u64 order;
+	int i;
+
+	list_add_tail(&a->link, &ctxs);
+	list_add_tail(&b->link, &ctxs);
+	list_add_tail(&c->link, &ctxs);
+	f[0] = fake_job(test, a, 1, 10);
+	f[1] = fake_job(test, a, 2, 11);
+	f[2] = fake_job(test, b, 1, 12);
+	f[3] = fake_job(test, b, 2, 13);
+	for (i = 0; i < 4; i++)
+		KUNIT_ASSERT_NOT_NULL(test, f[i]);
+
+	/* Nothing is closed: nothing is cancelled. */
+	KUNIT_EXPECT_EQ(test, sgxfive_fence_cancel_closed(&ctxs), 0u);
+	for (i = 0; i < 4; i++)
+		KUNIT_EXPECT_FALSE(test, dma_fence_is_signaled(f[i]));
+
+	/* A closed context, with jobs and without, and an open one. */
+	WRITE_ONCE(a->closed, true);
+	WRITE_ONCE(c->closed, true);
+	KUNIT_EXPECT_EQ(test, sgxfive_fence_cancel_closed(&ctxs), 2u);
+	KUNIT_EXPECT_TRUE(test, dma_fence_is_signaled(f[0]));
+	KUNIT_EXPECT_EQ(test, dma_fence_get_status(f[0]), -ECANCELED);
+	KUNIT_EXPECT_EQ(test, dma_fence_get_status(f[1]), -ECANCELED);
+	KUNIT_EXPECT_FALSE(test, sgxfive_ctx_oldest(a, &order));
+	KUNIT_EXPECT_EQ(test, sgxfive_ctx_rewind(a), 0);
+	KUNIT_EXPECT_FALSE(test, dma_fence_is_signaled(f[2]));
+	KUNIT_EXPECT_FALSE(test, dma_fence_is_signaled(f[3]));
+	KUNIT_EXPECT_TRUE(test, sgxfive_ctx_oldest(b, &order));
+	KUNIT_EXPECT_EQ(test, order, 12ull);
+	KUNIT_EXPECT_EQ(test, sgxfive_ctx_rewind(b), 2);
+	/* Again: nothing left to cancel. */
+	KUNIT_EXPECT_EQ(test, sgxfive_fence_cancel_closed(&ctxs), 0u);
+	KUNIT_EXPECT_EQ(test, dma_fence_get_status(f[0]), -ECANCELED);
+	KUNIT_EXPECT_FALSE(test, dma_fence_is_signaled(f[2]));
+
+	/* A job the guilty context already failed keeps its error. */
+	WRITE_ONCE(b->closed, true);
+	sgxfive_fence_fail_guilty(b, -EIO);
+	KUNIT_EXPECT_EQ(test, sgxfive_fence_cancel_closed(&ctxs), 0u);
+	KUNIT_EXPECT_EQ(test, dma_fence_get_status(f[2]), -EIO);
+	KUNIT_EXPECT_EQ(test, dma_fence_get_status(f[3]), -ECANCELED);
+	for (i = 0; i < 4; i++)
+		dma_fence_put(f[i]);
+}
+
+/*
  * A render job whose scene overflowed the parameter buffer: the EDM ran a
  * partial render, which the driver does not support, so the job's fence
  * fails with -ENOSPC when it completes. The context is not lost: its next
@@ -948,6 +1006,7 @@ static struct kunit_case sgxfive_job_test_cases[] = {
 	KUNIT_CASE(sgxfive_job_test_suspect),
 	KUNIT_CASE(sgxfive_job_test_hang_error),
 	KUNIT_CASE(sgxfive_job_test_guilty),
+	KUNIT_CASE(sgxfive_job_test_cancel_closed),
 	KUNIT_CASE(sgxfive_job_test_overflow),
 	KUNIT_CASE(sgxfive_job_test_budget),
 	{}

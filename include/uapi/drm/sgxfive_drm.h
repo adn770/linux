@@ -650,11 +650,14 @@ struct drm_sgxfive_destroy_context_args {
  *    takes the GPU for hung when the device's oldest unfinished job is the
  *    same at two job timeouts of 500 ms in a row, so a job that runs for
  *    about a second or longer fails, even if it would have finished.
- *  - -ECANCELED: the job was queued behind the blamed job on its context, or
- *    its context was already lost.
+ *  - -ECANCELED: the job was queued behind the blamed job on its context,
+ *    its context was already lost, or its context was destroyed while a
+ *    held recovery (a debugging aid of the driver) kept the job in the
+ *    firmware and the reset that ended the hold cancelled it.
  *
  * Other contexts' unfinished jobs run again after the recovery and signal
- * without an error.
+ * without an error, except that the reset ending a held recovery does not
+ * run again the jobs of a context that was destroyed meanwhile.
  *
  * A render job whose scene needs more than its context's parameter buffer
  * (&drm_sgxfive_dev_query_job_info.render_pb_pages) completes, but the

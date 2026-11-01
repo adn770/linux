@@ -94,7 +94,7 @@ struct sgxfive_ctx {
 	u32 woff;			/* client CCB write offset */
 	u32 seqno;			/* last job number handed out */
 	bool lost;			/* a job of it hung: no more jobs */
-	bool closed;			/* destroyed: under submit_lock */
+	bool closed;			/* destroyed: under submit_lock, read by a reset */
 	bool scene_open;		/* render: a geometry job left its scene open */
 	u32 replay;			/* jobs to re-run after a reset */
 };
@@ -140,6 +140,7 @@ struct dma_fence *sgxfive_fence_init(struct sgxfive_fence *f,
 void sgxfive_fence_signal(struct sgxfive_ctx *ctx);
 void sgxfive_fence_fail_all(struct sgxfive_ctx *ctx, int error);
 void sgxfive_fence_fail_guilty(struct sgxfive_ctx *ctx, int error);
+unsigned int sgxfive_fence_cancel_closed(struct list_head *ctxs);
 bool sgxfive_ctx_oldest(struct sgxfive_ctx *ctx, u64 *order);
 struct sgxfive_ctx *sgxfive_ctx_suspect(struct list_head *ctxs, u32 pd, u64 *order);
 struct sgxfive_ctx *sgxfive_ctx_of_job(struct list_head *ctxs, u64 order);

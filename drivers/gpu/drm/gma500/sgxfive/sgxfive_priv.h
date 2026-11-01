@@ -362,7 +362,7 @@ int sgxfive_ioctl_vm_unmap(struct sgxfive *sgx, void *data,
 void sgxfive_debug_init(struct sgxfive *sgx, struct dentry *dir);
 int sgxfive_debug_load(struct sgxfive *sgx);
 void sgxfive_debug_unload(struct sgxfive *sgx);
-void sgxfive_debug_reset(struct sgxfive *sgx);
+bool sgxfive_debug_reset(struct sgxfive *sgx);
 
 static inline bool sgxfive_alias_ta3d_ro(struct sgxfive *sgx)
 {
@@ -438,8 +438,9 @@ static inline void sgxfive_debug_unload(struct sgxfive *sgx)
 {
 }
 
-static inline void sgxfive_debug_reset(struct sgxfive *sgx)
+static inline bool sgxfive_debug_reset(struct sgxfive *sgx)
 {
+	return false;
 }
 
 static inline bool sgxfive_alias_ta3d_ro(struct sgxfive *sgx)

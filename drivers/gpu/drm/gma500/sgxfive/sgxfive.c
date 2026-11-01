@@ -611,7 +611,10 @@ static bool sgxfive_blame(struct sgxfive *sgx, u64 suspect, enum sgxfive_hang wh
  * buffers keep their pages and addresses, so the kernel memory of the render
  * node's contexts, mapped in the same directory, stays where it is. Every
  * context starts over: its HW context image is rebuilt and its client CCB
- * rewritten with its unfinished jobs, which run again after the boot. With a
+ * rewritten with its unfinished jobs, which run again after the boot, except
+ * that the reset which ends a held recovery (debug option) cancels the jobs of
+ * a closed context instead, with -ECANCELED: its client has given up on them,
+ * and what they read may be gone (sgxfive_fence_cancel_closed). With a
  * suspect job (not U64_MAX), its context is lost instead (see sgxfive_blame),
  * and nothing is done if it has already been recovered from.
  * A reset first captures the error state into *dump (sgxfive_coredump.c),
@@ -624,6 +627,8 @@ static int sgxfive_reset(struct sgxfive *sgx, u64 suspect, enum sgxfive_hang why
 	struct sgxfive_coredump *cd;
 	struct sgxfive_ctx *ctx;
 	unsigned int i;
+	unsigned int cancelled = 0;
+	bool ended_hold;
 	int ret;
 
 	*dump = NULL;
@@ -651,8 +656,10 @@ static int sgxfive_reset(struct sgxfive *sgx, u64 suspect, enum sgxfive_hang why
 	ret = sgx_fw_build(&sgx->fw, &sgx->layout, bufs);
 	if (ret)
 		return ret;
-	sgxfive_debug_reset(sgx);
+	ended_hold = sgxfive_debug_reset(sgx);
 	spin_lock_irq(&sgx->ctx_lock);
+	if (ended_hold)
+		cancelled = sgxfive_fence_cancel_closed(&sgx->ctx_list);
 	list_for_each_entry(ctx, &sgx->ctx_list, link) {
 		if (ctx->type == DRM_SGXFIVE_CTX_TYPE_RENDER) {
 			ctx->replay = sgxfive_render_reset(ctx);
@@ -665,6 +672,10 @@ static int sgxfive_reset(struct sgxfive *sgx, u64 suspect, enum sgxfive_hang why
 		ctx->replay = sgxfive_ctx_rewind(ctx);
 	}
 	spin_unlock_irq(&sgx->ctx_lock);
+	if (cancelled)
+		drm_info(sgx->dev,
+			 "sgxfive: the hold ends: %u job(s) of closed contexts cancelled\n",
+			 cancelled);
 	wmb(); /* the write-combined buffers, before the SGX reads them */
 
 	ret = sgxfive_boot(sgx);

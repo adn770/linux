@@ -70,13 +70,14 @@ struct dma_fence *sgxfive_fence_init(struct sgxfive_fence *f,
  * A render job the firmware finished may still have failed: its scene
  * overflowed the parameter buffer (sgxfive_render_job_error); its context
  * runs on. A geometry job is done with its TA (the TA word), which no render
- * follows to write the fence word.
+ * follows to write the fence word. Returns how many fences it signalled.
  */
-static void sgxfive_fence_retire(struct sgxfive_ctx *ctx, int error, int rest)
+static unsigned int sgxfive_fence_retire(struct sgxfive_ctx *ctx, int error, int rest)
 {
 	u32 done = READ_ONCE(*(u32 *)sgxfive_ctx_cpu(ctx, SGXFIVE_CTX_FENCE_OFF));
 	u32 ta = READ_ONCE(*(u32 *)sgxfive_ctx_cpu(ctx, SGXFIVE_CTX_TA_OFF));
 	struct sgxfive_fence *f, *next;
+	unsigned int n = 0;
 	unsigned long flags;
 
 	spin_lock_irqsave(&ctx->fence_lock, flags);
@@ -95,8 +96,10 @@ static void sgxfive_fence_retire(struct sgxfive_ctx *ctx, int error, int rest)
 		dma_fence_signal_locked(&f->base);
 		list_del(&f->link);
 		dma_fence_put(&f->base);
+		n++;
 	}
 	spin_unlock_irqrestore(&ctx->fence_lock, flags);
+	return n;
 }
 
 void sgxfive_fence_signal(struct sgxfive_ctx *ctx)
@@ -116,6 +119,26 @@ void sgxfive_fence_fail_all(struct sgxfive_ctx *ctx, int error)
 void sgxfive_fence_fail_guilty(struct sgxfive_ctx *ctx, int error)
 {
 	sgxfive_fence_retire(ctx, error, -ECANCELED);
+}
+
+/*
+ * Under the device's context lock, at the reset that ends a held recovery:
+ * the unfinished jobs of each closed context, which its client gave up, fail
+ * with -ECANCELED, so the reset does not run them again once the client's
+ * memory is gone. A context stays on the list until its last job's fence has
+ * signalled, which is why they are still here. Jobs the recovery already
+ * failed keep their error; open contexts are left alone. Returns how many
+ * jobs it cancelled.
+ */
+unsigned int sgxfive_fence_cancel_closed(struct list_head *ctxs)
+{
+	struct sgxfive_ctx *ctx;
+	unsigned int n = 0;
+
+	list_for_each_entry(ctx, ctxs, link)
+		if (READ_ONCE(ctx->closed))
+			n += sgxfive_fence_retire(ctx, -ECANCELED, -ECANCELED);
+	return n;
 }
 
 /* The error a hang's guilty job fails with: what the detector found. */

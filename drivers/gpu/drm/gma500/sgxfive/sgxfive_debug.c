@@ -948,9 +948,13 @@ bool sgxfive_recovery_hold(struct sgxfive *sgx, u64 *suspect, enum sgxfive_hang 
 	return true;
 }
 
-/* A recovery reset rebuilt the firmware's buffers: the test area starts over. */
-void sgxfive_debug_reset(struct sgxfive *sgx)
+/*
+ * A recovery reset rebuilt the firmware's buffers: the test area starts over,
+ * and a held recovery ends. Returns whether one was held.
+ */
+bool sgxfive_debug_reset(struct sgxfive *sgx)
 {
+	bool held = sgxfive_recovery_held(sgx);
 	unsigned int i;
 
 	WRITE_ONCE(sgx->recovery_held, false);
@@ -959,6 +963,7 @@ void sgxfive_debug_reset(struct sgxfive *sgx)
 			memset(sgx->xt.buf[i].va, 0, sgxfive_xbuf[i].size);
 	sgx->xt.woff = 0;
 	sgx->xt.runs = 0;	/* the next transfer initialises the context */
+	return held;
 }
 
 /*

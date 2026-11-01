@@ -276,8 +276,10 @@ static void sgxfive_debug_test_hold_recovery(struct kunit *test)
 	KUNIT_EXPECT_TRUE(test, sgxfive_recovery_hold(sgx, &s, &why));
 	KUNIT_EXPECT_EQ(test, sgx->held_suspect, 3ull);
 	KUNIT_EXPECT_EQ(test, sgx->held_why, SGXFIVE_HANG_FAULT);
-	sgxfive_debug_reset(sgx);
+	KUNIT_EXPECT_TRUE(test, sgxfive_debug_reset(sgx));
 	KUNIT_EXPECT_FALSE(test, sgxfive_recovery_held(sgx));
+	/* Nothing held: nothing is ended. */
+	KUNIT_EXPECT_FALSE(test, sgxfive_debug_reset(sgx));
 
 	KUNIT_EXPECT_FALSE(test, sgxfive_rtds_keep(sgx));
 	sgx->rtds_keep = true;
@@ -333,6 +335,52 @@ static struct dma_fence *fake_job(struct kunit *test, struct sgxfive_ctx *ctx, u
 
 	KUNIT_ASSERT_NOT_NULL(test, hw);
 	return sgxfive_fence_init(hw, ctx, seqno, order, SGX_XFER_CMD_SIZE);
+}
+
+/*
+ * A job of a closed context stays queued in the firmware while a recovery is
+ * held. The reset that ends the hold cancels it, as sgxfive_reset does with
+ * what sgxfive_debug_reset reports; a reset with no hold runs it again, so a
+ * context that is gone for good costs nothing unless a hold was on.
+ */
+static void sgxfive_debug_test_held_reset_closed(struct kunit *test)
+{
+	struct sgxfive *sgx = kunit_kzalloc(test, sizeof(*sgx), GFP_KERNEL);
+	struct sgxfive_ctx *gone = fake_ctx(test), *open = fake_ctx(test);
+	struct dma_fence *f[2];
+	enum sgxfive_hang why = SGXFIVE_HANG_FAULT;
+	unsigned int cancelled = 0;
+	u64 s = 20;
+
+	KUNIT_ASSERT_NOT_NULL(test, sgx);
+	spin_lock_init(&sgx->ctx_lock);
+	INIT_LIST_HEAD(&sgx->ctx_list);
+	list_add_tail(&gone->link, &sgx->ctx_list);
+	list_add_tail(&open->link, &sgx->ctx_list);
+	WRITE_ONCE(gone->closed, true);
+	f[0] = fake_job(test, gone, 1, 21);
+	f[1] = fake_job(test, open, 1, 22);
+
+	/* No hold: the reset ends none, the closed context's job runs again. */
+	if (sgxfive_debug_reset(sgx))
+		cancelled = sgxfive_fence_cancel_closed(&sgx->ctx_list);
+	KUNIT_EXPECT_EQ(test, cancelled, 0u);
+	KUNIT_EXPECT_FALSE(test, dma_fence_is_signaled(f[0]));
+	KUNIT_EXPECT_EQ(test, sgxfive_ctx_rewind(gone), 1);
+
+	/* Held: the reset that ends it cancels the closed context's job only. */
+	sgx->hold_recovery = true;
+	KUNIT_EXPECT_TRUE(test, sgxfive_recovery_hold(sgx, &s, &why));
+	if (sgxfive_debug_reset(sgx))
+		cancelled = sgxfive_fence_cancel_closed(&sgx->ctx_list);
+	KUNIT_EXPECT_EQ(test, cancelled, 1u);
+	KUNIT_EXPECT_EQ(test, dma_fence_get_status(f[0]), -ECANCELED);
+	KUNIT_EXPECT_FALSE(test, dma_fence_is_signaled(f[1]));
+	KUNIT_EXPECT_EQ(test, sgxfive_ctx_rewind(gone), 0);
+	KUNIT_EXPECT_EQ(test, sgxfive_ctx_rewind(open), 1);
+	sgxfive_fence_fail_all(open, -EIO);
+	dma_fence_put(f[0]);
+	dma_fence_put(f[1]);
 }
 
 /*
@@ -555,6 +603,7 @@ static struct kunit_case sgxfive_debug_test_cases[] = {
 	KUNIT_CASE(sgxfive_debug_test_timer_clock),
 	KUNIT_CASE(sgxfive_debug_test_hold_recovery),
 	KUNIT_CASE(sgxfive_debug_test_held_reset),
+	KUNIT_CASE(sgxfive_debug_test_held_reset_closed),
 	KUNIT_CASE(sgxfive_debug_test_cleanup_reset),
 	KUNIT_CASE(sgxfive_debug_test_render_run),
 	KUNIT_CASE(sgxfive_debug_test_render_words),
