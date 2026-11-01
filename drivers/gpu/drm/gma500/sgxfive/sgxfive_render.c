@@ -383,11 +383,31 @@ void sgxfive_render_words(struct sgxfive_ctx *ctx, struct drm_printer *p)
 	}
 }
 
+/* Before the kick: the armed fill of a page of the TA data (debugfs tadata_fill). */
+static void sgxfive_render_tdfill(struct sgxfive_ctx *ctx)
+{
+	struct sgxfive_render *r = ctx->render;
+	struct sgxfive_tdfill f;
+
+	if (!sgxfive_tdfill_take(ctx->sgx, &f))
+		return;
+	if (!sgxfive_tdfill_place(&f, r->tdva, r->td_pages)) {
+		drm_warn(ctx->sgx->dev,
+			 "sgxfive: tadata_fill page %u dropped: the context has %u\n",
+			 f.page, r->td_pages);
+		return;
+	}
+	wmb();	/* the write-combined page, before the kick */
+	drm_info(ctx->sgx->dev, "sgxfive: tadata_fill page %u %s 0x%08x applied\n", f.page,
+		 f.ramp ? "ramp from" : "with", f.value);
+}
+
 /* Before the kick: the armed pokes of the context's structures. */
 static void sgxfive_render_poke(struct sgxfive_ctx *ctx)
 {
 	u32 *w[SGXFIVE_KPOKE_SPACES];
 
+	sgxfive_render_tdfill(ctx);
 	render_spaces(ctx, w);
 	w[SGXFIVE_KPOKE_RD] = NULL;	/* poked in the job's image instead */
 	sgxfive_kpoke_run(ctx->sgx, w);

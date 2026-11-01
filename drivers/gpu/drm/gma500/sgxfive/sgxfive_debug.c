@@ -74,6 +74,9 @@ static void sgxfive_debug_disarm(struct sgxfive *sgx)
 {
 	sgxfive_hostirq_reset(&sgx->hostirq);
 	WRITE_ONCE(sgx->alias_ctx_rw, false);
+	spin_lock(&sgx->kpoke_lock);
+	sgx->tdfill.armed = false;
+	spin_unlock(&sgx->kpoke_lock);
 }
 
 int sgxfive_debug_load(struct sgxfive *sgx)
@@ -1242,6 +1245,50 @@ static const struct file_operations sgxfive_kregnow_fops = {
 };
 
 /*
+ * debugfs tadata_fill: arm the fill of a page of the next render's TA data
+ * (sgxfive_kpoke.h); reading shows what is armed. Root only.
+ */
+static int sgxfive_tdfill_show(struct seq_file *m, void *unused)
+{
+	struct sgxfive *sgx = m->private;
+	struct sgxfive_tdfill f;
+
+	spin_lock(&sgx->kpoke_lock);
+	f = sgx->tdfill;
+	spin_unlock(&sgx->kpoke_lock);
+	if (f.armed)
+		seq_printf(m, "%u 0x%08x%s\n", f.page, f.value, f.ramp ? " ramp" : "");
+	return 0;
+}
+
+static int sgxfive_tdfill_open(struct inode *inode, struct file *f)
+{
+	return single_open(f, sgxfive_tdfill_show, inode->i_private);
+}
+
+static ssize_t sgxfive_tdfill_fwrite(struct file *f, const char __user *ubuf,
+				     size_t len, loff_t *ppos)
+{
+	struct sgxfive *sgx = file_inode(f)->i_private;
+	char *buf;
+	int ret;
+
+	if (!len || len >= SGXFIVE_KPOKE_LINE)
+		return -EINVAL;
+	buf = memdup_user_nul(ubuf, len);
+	if (IS_ERR(buf))
+		return PTR_ERR(buf);
+	ret = sgxfive_tdfill_write(sgx, buf);
+	kfree(buf);
+	return ret ? ret : len;
+}
+
+static const struct file_operations sgxfive_tdfill_fops = {
+	.owner = THIS_MODULE, .open = sgxfive_tdfill_open, .read = seq_read,
+	.write = sgxfive_tdfill_fwrite, .llseek = seq_lseek, .release = single_release,
+};
+
+/*
  * debugfs render_param and render_tadata: the newest render context's
  * parameter slot from its PB on, and its TA data buffers, as the GPU left
  * them, to read what the TA wrote (sgxfive_render_dump). Read them while the
@@ -1489,6 +1536,7 @@ void sgxfive_debug_init(struct sgxfive *sgx, struct dentry *dir)
 	sgxfive_hostirq_init(&sgx->hostirq);
 	debugfs_create_file("kpoke", 0600, dir, sgx, &sgxfive_kpoke_fops);
 	debugfs_create_file("kreg", 0600, dir, sgx, &sgxfive_kreg_fops);
+	debugfs_create_file("tadata_fill", 0600, dir, sgx, &sgxfive_tdfill_fops);
 	debugfs_create_file("kregnow", 0600, dir, sgx, &sgxfive_kregnow_fops);
 	/* Pages of the PB of render contexts created from now on. */
 	sgx->render_pb_pages = SGX_RENDER_PB_PAGES;

@@ -574,6 +574,62 @@ static void sgxfive_kpoke_test_oneshot(struct kunit *test)
 }
 
 /*
+ * debugfs tadata_fill: "PAGE VALUE" fills a page of the next render's TA data
+ * with VALUE, "PAGE VALUE ramp" with VALUE + the word's index; the page is
+ * within the largest TA data a context can have.
+ */
+static void sgxfive_kpoke_test_tdfill(struct kunit *test)
+{
+	static const char *const bad[] = {
+		"", "6", "x 1", "6 x", "6 1 foo", "6 1 ramp x", "6 0x100000000", "-1 1",
+	};
+	struct sgxfive_tdfill f;
+	u32 *page = kunit_kzalloc(test, PAGE_SIZE, GFP_KERNEL);
+	unsigned int i;
+
+	KUNIT_ASSERT_NOT_NULL(test, page);
+	KUNIT_EXPECT_EQ(test, sgxfive_tdfill_parse("6 0xdeadbeef", &f), 0);
+	KUNIT_EXPECT_EQ(test, f.page, 6u);
+	KUNIT_EXPECT_EQ(test, f.value, 0xdeadbeefu);
+	KUNIT_EXPECT_FALSE(test, f.ramp);
+	sgxfive_tdfill_apply(&f, page);
+	for (i = 0; i < PAGE_SIZE / 4; i++)
+		KUNIT_EXPECT_EQ(test, page[i], 0xdeadbeefu);
+	KUNIT_EXPECT_EQ(test, sgxfive_tdfill_parse("0 0x100 ramp", &f), 0);
+	KUNIT_EXPECT_TRUE(test, f.ramp);
+	sgxfive_tdfill_apply(&f, page);
+	for (i = 0; i < PAGE_SIZE / 4; i++)
+		KUNIT_EXPECT_EQ(test, page[i], 0x100u + i);
+	KUNIT_EXPECT_EQ(test, sgxfive_tdfill_parse("0x102 1", &f), 0);
+	KUNIT_EXPECT_EQ(test, sgxfive_tdfill_parse("0x103 1", &f), -ERANGE);
+	for (i = 0; i < ARRAY_SIZE(bad); i++)
+		KUNIT_EXPECT_EQ_MSG(test, sgxfive_tdfill_parse(bad[i], &f), -EINVAL,
+				    "\"%s\"", bad[i]);
+}
+
+/* Arming needs the firmware; the fill is taken once, and "clear" drops it. */
+static void sgxfive_kpoke_test_tdfill_take(struct kunit *test)
+{
+	struct sgxfive *sgx = kunit_kzalloc(test, sizeof(*sgx), GFP_KERNEL);
+	struct sgxfive_tdfill f;
+	char line[] = "3 0x55";
+	char clear[] = "clear";
+
+	KUNIT_ASSERT_NOT_NULL(test, sgx);
+	spin_lock_init(&sgx->kpoke_lock);
+	KUNIT_EXPECT_EQ(test, sgxfive_tdfill_write(sgx, line), -ENODEV);
+	sgx->live = true;
+	KUNIT_EXPECT_EQ(test, sgxfive_tdfill_write(sgx, line), 0);
+	KUNIT_EXPECT_TRUE(test, sgxfive_tdfill_take(sgx, &f));
+	KUNIT_EXPECT_EQ(test, f.page, 3u);
+	KUNIT_EXPECT_EQ(test, f.value, 0x55u);
+	KUNIT_EXPECT_FALSE(test, sgxfive_tdfill_take(sgx, &f));
+	KUNIT_EXPECT_EQ(test, sgxfive_tdfill_write(sgx, line), 0);
+	KUNIT_EXPECT_EQ(test, sgxfive_tdfill_write(sgx, clear), 0);
+	KUNIT_EXPECT_FALSE(test, sgxfive_tdfill_take(sgx, &f));
+}
+
+/*
  * A device whose registers are a plain buffer (the offsets index it), its
  * firmware running and its interrupt state ready: what kregnow's write and
  * the host interrupt need.
@@ -695,11 +751,45 @@ static void sgxfive_kpoke_test_reset_disarms(struct kunit *test)
 	KUNIT_ASSERT_EQ(test, sgxfive_kregnow_write(sgx, SGX_EVENT_HOST_ENABLE, false, 0x20), 0);
 	KUNIT_ASSERT_TRUE(test, sgx->hostirq.armed);
 	sgx->alias_ctx_rw = true;
+	sgx->tdfill.armed = true;
 	KUNIT_EXPECT_FALSE(test, sgxfive_debug_reset(sgx));
+	KUNIT_EXPECT_FALSE(test, sgx->tdfill.armed);
 	KUNIT_EXPECT_FALSE(test, sgx->hostirq.armed);
 	KUNIT_EXPECT_FALSE(test, sgx->alias_ctx_rw);
 	KUNIT_EXPECT_EQ(test, atomic_read(&sgx->hostirq.irqs), 0);
 	KUNIT_EXPECT_EQ(test, atomic_read(&sgx->hostirq.extra), 0);
+}
+
+/*
+ * The fill lands on its page of a context's TA data and on no other; a page
+ * past the context's own is dropped and nothing is written.
+ */
+static void sgxfive_kpoke_test_tdfill_place(struct kunit *test)
+{
+	const unsigned int words = PAGE_SIZE / 4;
+	struct sgxfive_tdfill f = { .armed = true, .page = 1, .value = 0xa5a5a5a5 };
+	u32 *td = kunit_kzalloc(test, 3 * PAGE_SIZE, GFP_KERNEL);
+	unsigned int i;
+
+	KUNIT_ASSERT_NOT_NULL(test, td);
+	KUNIT_EXPECT_TRUE(test, sgxfive_tdfill_place(&f, (u8 *)td, 3));
+	for (i = 0; i < words; i++) {
+		KUNIT_EXPECT_EQ(test, td[i], 0u);
+		KUNIT_EXPECT_EQ(test, td[words + i], 0xa5a5a5a5u);
+		KUNIT_EXPECT_EQ(test, td[2 * words + i], 0u);
+	}
+	f.page = 2;			/* the last page, as a ramp */
+	f.ramp = true;
+	f.value = 0x10;
+	KUNIT_EXPECT_TRUE(test, sgxfive_tdfill_place(&f, (u8 *)td, 3));
+	KUNIT_EXPECT_EQ(test, td[2 * words], 0x10u);
+	KUNIT_EXPECT_EQ(test, td[2 * words + 5], 0x15u);
+	KUNIT_EXPECT_EQ(test, td[words], 0xa5a5a5a5u);
+	memset(td, 0, 3 * PAGE_SIZE);
+	f.page = 3;			/* past the context's own */
+	KUNIT_EXPECT_FALSE(test, sgxfive_tdfill_place(&f, (u8 *)td, 3));
+	for (i = 0; i < 3 * words; i++)
+		KUNIT_EXPECT_EQ(test, td[i], 0u);
 }
 
 static struct kunit_case sgxfive_kpoke_test_cases[] = {
@@ -726,6 +816,9 @@ static struct kunit_case sgxfive_kpoke_test_cases[] = {
 	KUNIT_CASE(sgxfive_kpoke_test_debug_irq),
 	KUNIT_CASE(sgxfive_kpoke_test_reset_disarms),
 	KUNIT_CASE(sgxfive_kpoke_test_oneshot),
+	KUNIT_CASE(sgxfive_kpoke_test_tdfill),
+	KUNIT_CASE(sgxfive_kpoke_test_tdfill_take),
+	KUNIT_CASE(sgxfive_kpoke_test_tdfill_place),
 	{}
 };
 

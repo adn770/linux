@@ -380,3 +380,83 @@ u32 sgxfive_ctx_page_flags(bool rw)
 {
 	return rw ? 0 : SGX_MMU_RO;
 }
+
+int sgxfive_tdfill_parse(const char *s, struct sgxfive_tdfill *f)
+{
+	struct sgxfive_tdfill t = { };
+	char buf[SGXFIVE_KPOKE_LINE];
+	char *page, *value, *ramp;
+
+	if (strscpy(buf, s, sizeof(buf)) < 0)
+		return -EINVAL;
+	page = skip_spaces(buf);
+	value = strpbrk(page, " \t");
+	if (!value)
+		return -EINVAL;
+	*value++ = '\0';
+	value = skip_spaces(value);
+	ramp = strpbrk(value, " \t");
+	if (ramp) {
+		*ramp++ = '\0';
+		ramp = skip_spaces(ramp);
+		if (strcmp(ramp, "ramp"))
+			return -EINVAL;
+		t.ramp = true;
+	}
+	if (kstrtou32(page, 0, &t.page) || kstrtou32(value, 0, &t.value))
+		return -EINVAL;
+	if (t.page >= SGX_RENDER_TD_MAX_SIZE >> PAGE_SHIFT)
+		return -ERANGE;
+	*f = t;
+	return 0;
+}
+
+void sgxfive_tdfill_apply(const struct sgxfive_tdfill *f, u32 *page)
+{
+	unsigned int i;
+
+	for (i = 0; i < PAGE_SIZE / 4; i++)
+		page[i] = f->ramp ? f->value + i : f->value;
+}
+
+int sgxfive_tdfill_write(struct sgxfive *sgx, char *buf)
+{
+	struct sgxfive_tdfill f = { .armed = true };
+	char *line = strim(buf);
+	int ret = 0;
+
+	if (strcmp(line, "clear")) {
+		ret = sgxfive_tdfill_parse(line, &f);
+		if (ret)
+			return ret;
+		f.armed = true;
+		if (!READ_ONCE(sgx->live))
+			return -ENODEV;
+	} else {
+		f.armed = false;
+	}
+	spin_lock(&sgx->kpoke_lock);
+	sgx->tdfill = f;
+	spin_unlock(&sgx->kpoke_lock);
+	return 0;
+}
+
+bool sgxfive_tdfill_place(const struct sgxfive_tdfill *f, u8 *td, unsigned int td_pages)
+{
+	if (f->page >= td_pages)
+		return false;
+	sgxfive_tdfill_apply(f, (u32 *)(td + ((size_t)f->page << PAGE_SHIFT)));
+	return true;
+}
+
+bool sgxfive_tdfill_take(struct sgxfive *sgx, struct sgxfive_tdfill *f)
+{
+	bool armed;
+
+	spin_lock(&sgx->kpoke_lock);
+	armed = sgx->tdfill.armed;
+	*f = sgx->tdfill;
+	sgx->tdfill.armed = false;
+	spin_unlock(&sgx->kpoke_lock);
+	return armed;
+}

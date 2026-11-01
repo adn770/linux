@@ -162,6 +162,35 @@ bool sgxfive_hostirq_note(struct sgxfive_hostirq *h, u32 stat_1, u32 stat_2);
 void sgxfive_hostirq_reset(struct sgxfive_hostirq *h);
 
 /*
+ * debugfs tadata_fill: before the next render's kick, one page of its
+ * context's TA data is filled with a value ("PAGE VALUE") or a ramp ("PAGE
+ * VALUE ramp": the word's index added), to see what a unit reads or writes
+ * there. PAGE counts pages of the TA data from its start; it must be within
+ * the largest TA data a context can have, and within this context's own when
+ * the fill is applied (else it is dropped, and logged). Taken once.
+ */
+struct sgxfive_tdfill {
+	bool armed;
+	bool ramp;
+	u32 page;
+	u32 value;
+};
+
+/* -EINVAL, -ERANGE for a page past the largest TA data. */
+int sgxfive_tdfill_parse(const char *s, struct sgxfive_tdfill *f);
+/* Fill the PAGE_SIZE bytes at page with the fill's words. */
+void sgxfive_tdfill_apply(const struct sgxfive_tdfill *f, u32 *page);
+/* One line, or "clear": arm (the firmware must run: -ENODEV) or drop the fill. */
+int sgxfive_tdfill_write(struct sgxfive *sgx, char *buf);
+/* Take the armed fill, once. */
+bool sgxfive_tdfill_take(struct sgxfive *sgx, struct sgxfive_tdfill *f);
+/*
+ * Fill its page of a context's TA data (td_pages pages at td); false, with
+ * nothing written, for a page past the context's own.
+ */
+bool sgxfive_tdfill_place(const struct sgxfive_tdfill *f, u8 *td, unsigned int td_pages);
+
+/*
  * Switches a tester arms from debugfs for the next thing that reads them
  * (alias_ctx_rw, render_share_pb): taken once, whoever reads them first.
  */

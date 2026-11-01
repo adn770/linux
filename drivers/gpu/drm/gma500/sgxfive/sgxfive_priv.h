@@ -148,6 +148,7 @@ struct sgxfive {
 	enum sgxfive_hang held_why;	/* and the detector that found it */
 	bool rtds_keep;			/* renders: no RT data set rewrite */
 	bool alias_ctx_rw;		/* the next render context's page writable, once */
+	struct sgxfive_tdfill tdfill;	/* the next render's TA data page fill */
 	struct sgxfive_hostirq hostirq;	/* host interrupts, kregnow's enables */
 #endif
 };
