@@ -18,12 +18,13 @@
 struct sgx_mmu_pd {
 	struct page *dir;
 	u32 *pde;			/* the directory, uncached */
+	gfp_t gfp;			/* for the directory and its tables */
 	struct page *table[SGX_MMU_ENTRIES];
 };
 
-static struct page *sgx_mmu_alloc_uc(void)
+static struct page *sgx_mmu_alloc_uc(gfp_t gfp)
 {
-	struct page *p = alloc_page(GFP_KERNEL | GFP_DMA32 | __GFP_ZERO);
+	struct page *p = alloc_page(gfp | GFP_DMA32 | __GFP_ZERO);
 
 	if (p && set_pages_uc(p, 1)) {
 		__free_page(p);
@@ -38,19 +39,31 @@ static void sgx_mmu_free_uc(struct page *p)
 	__free_page(p);
 }
 
-struct sgx_mmu_pd *sgx_mmu_pd_create(void)
+static struct sgx_mmu_pd *sgx_mmu_pd_create_gfp(gfp_t gfp)
 {
-	struct sgx_mmu_pd *pd = kzalloc_obj(*pd);
+	struct sgx_mmu_pd *pd = kzalloc_obj(*pd, gfp);
 
 	if (!pd)
 		return NULL;
-	pd->dir = sgx_mmu_alloc_uc();
+	pd->gfp = gfp;
+	pd->dir = sgx_mmu_alloc_uc(gfp);
 	if (!pd->dir) {
 		kfree(pd);
 		return NULL;
 	}
 	pd->pde = page_address(pd->dir);
 	return pd;
+}
+
+struct sgx_mmu_pd *sgx_mmu_pd_create(void)
+{
+	return sgx_mmu_pd_create_gfp(GFP_KERNEL);
+}
+
+/* A client's directory: it and its tables are charged to the caller's memcg. */
+struct sgx_mmu_pd *sgx_mmu_pd_create_user(void)
+{
+	return sgx_mmu_pd_create_gfp(GFP_KERNEL_ACCOUNT);
 }
 
 void sgx_mmu_pd_destroy(struct sgx_mmu_pd *pd)
@@ -111,7 +124,7 @@ int sgx_mmu_map(struct sgx_mmu_pd *pd, u32 addr, struct page **pages,
 		u32 *pte;
 
 		if (!pd->table[d]) {
-			pd->table[d] = sgx_mmu_alloc_uc();
+			pd->table[d] = sgx_mmu_alloc_uc(pd->gfp);
 			if (!pd->table[d]) {
 				sgx_mmu_unmap(pd, addr, i);
 				return -ENOMEM;

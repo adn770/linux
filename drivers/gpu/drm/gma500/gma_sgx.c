@@ -74,6 +74,21 @@ bool gma_sgx_irq(struct drm_device *dev, u32 stat_1, u32 stat_2)
 	return dev_priv->sgx && sgxfive_irq(dev_priv->sgx, stat_1, stat_2);
 }
 
+int gma_sgx_open(struct drm_device *dev, struct drm_file *file)
+{
+	struct drm_psb_private *dev_priv = to_drm_psb_private(dev);
+
+	return dev_priv->sgx ? sgxfive_open(dev_priv->sgx, file) : 0;
+}
+
+void gma_sgx_postclose(struct drm_device *dev, struct drm_file *file)
+{
+	struct drm_psb_private *dev_priv = to_drm_psb_private(dev);
+
+	if (dev_priv->sgx)
+		sgxfive_postclose(dev_priv->sgx, file);
+}
+
 static int gma_sgx_ioctl(struct drm_device *dev, unsigned int nr, void *data,
 			 struct drm_file *file)
 {
@@ -97,6 +112,10 @@ static int gma_sgx_ioctl_##name(struct drm_device *dev, void *data,	\
 GMA_SGX_IOCTL(DEV_QUERY)
 GMA_SGX_IOCTL(CREATE_BO)
 GMA_SGX_IOCTL(GET_BO_MMAP_OFFSET)
+GMA_SGX_IOCTL(CREATE_VM_CONTEXT)
+GMA_SGX_IOCTL(DESTROY_VM_CONTEXT)
+GMA_SGX_IOCTL(VM_MAP)
+GMA_SGX_IOCTL(VM_UNMAP)
 
 #define GMA_SGX_IOCTL_DEF(name)						\
 	DRM_IOCTL_DEF_DRV(SGXFIVE_##name, gma_sgx_ioctl_##name,		\
@@ -107,9 +126,13 @@ const struct drm_ioctl_desc gma_sgx_ioctls[GMA_SGX_NUM_IOCTLS] = {
 	GMA_SGX_IOCTL_DEF(DEV_QUERY),
 	GMA_SGX_IOCTL_DEF(CREATE_BO),
 	GMA_SGX_IOCTL_DEF(GET_BO_MMAP_OFFSET),
+	GMA_SGX_IOCTL_DEF(CREATE_VM_CONTEXT),
+	GMA_SGX_IOCTL_DEF(DESTROY_VM_CONTEXT),
+	GMA_SGX_IOCTL_DEF(VM_MAP),
+	GMA_SGX_IOCTL_DEF(VM_UNMAP),
 };
 
-static_assert(DRM_SGXFIVE_GET_BO_MMAP_OFFSET + 1 == GMA_SGX_NUM_IOCTLS);
+static_assert(DRM_SGXFIVE_VM_UNMAP + 1 == GMA_SGX_NUM_IOCTLS);
 
 /* gma500's own GEM objects do not use this hook; sgxfive's shmem BOs do. */
 struct drm_gem_object *gma_sgx_gem_create_object(struct drm_device *dev,

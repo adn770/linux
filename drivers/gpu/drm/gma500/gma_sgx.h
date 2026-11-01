@@ -19,8 +19,10 @@ void gma_sgx_init(struct drm_device *dev);
 void gma_sgx_fini(struct drm_device *dev);
 void gma_sgx_debugfs_init(struct drm_minor *minor);
 bool gma_sgx_irq(struct drm_device *dev, u32 stat_1, u32 stat_2);
+int gma_sgx_open(struct drm_device *dev, struct drm_file *file);
+void gma_sgx_postclose(struct drm_device *dev, struct drm_file *file);
 
-#define GMA_SGX_NUM_IOCTLS	3	/* DRM_SGXFIVE_DEV_QUERY..GET_BO_MMAP_OFFSET */
+#define GMA_SGX_NUM_IOCTLS	7	/* DRM_SGXFIVE_DEV_QUERY..VM_UNMAP */
 extern const struct drm_ioctl_desc gma_sgx_ioctls[GMA_SGX_NUM_IOCTLS];
 
 struct drm_gem_object *gma_sgx_gem_create_object(struct drm_device *dev,

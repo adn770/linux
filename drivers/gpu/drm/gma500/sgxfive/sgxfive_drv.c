@@ -198,6 +198,11 @@ static struct sgxfive_bo *to_sgxfive_bo(struct drm_gem_object *obj)
 	       NULL;
 }
 
+bool sgxfive_is_bo(struct drm_gem_object *obj)
+{
+	return to_sgxfive_bo(obj);
+}
+
 static int sgxfive_ioctl_create_bo(struct sgxfive *sgx, void *data,
 				   struct drm_file *file)
 {
@@ -269,6 +274,14 @@ int sgxfive_ioctl(struct sgxfive *sgx, unsigned int nr, void *data,
 		return sgxfive_ioctl_create_bo(sgx, data, file);
 	case DRM_SGXFIVE_GET_BO_MMAP_OFFSET:
 		return sgxfive_ioctl_get_bo_mmap_offset(data, file);
+	case DRM_SGXFIVE_CREATE_VM_CONTEXT:
+		return sgxfive_ioctl_create_vm(sgx, data, file);
+	case DRM_SGXFIVE_DESTROY_VM_CONTEXT:
+		return sgxfive_ioctl_destroy_vm(sgx, data, file);
+	case DRM_SGXFIVE_VM_MAP:
+		return sgxfive_ioctl_vm_map(sgx, data, file);
+	case DRM_SGXFIVE_VM_UNMAP:
+		return sgxfive_ioctl_vm_unmap(sgx, data, file);
 	default:
 		return -EINVAL;
 	}

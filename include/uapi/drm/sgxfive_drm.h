@@ -94,6 +94,14 @@ struct drm_sgxfive_obj_array {
 	SGXFIVE_IOCTL(CREATE_BO, DRM_IOWR, create_bo)
 #define DRM_IOCTL_SGXFIVE_GET_BO_MMAP_OFFSET \
 	SGXFIVE_IOCTL(GET_BO_MMAP_OFFSET, DRM_IOWR, get_bo_mmap_offset)
+#define DRM_IOCTL_SGXFIVE_CREATE_VM_CONTEXT \
+	SGXFIVE_IOCTL(CREATE_VM_CONTEXT, DRM_IOWR, create_vm_context)
+#define DRM_IOCTL_SGXFIVE_DESTROY_VM_CONTEXT \
+	SGXFIVE_IOCTL(DESTROY_VM_CONTEXT, DRM_IOW, destroy_vm_context)
+#define DRM_IOCTL_SGXFIVE_VM_MAP \
+	SGXFIVE_IOCTL(VM_MAP, DRM_IOW, vm_map)
+#define DRM_IOCTL_SGXFIVE_VM_UNMAP \
+	SGXFIVE_IOCTL(VM_UNMAP, DRM_IOW, vm_unmap)
 
 /**
  * DOC: sgxfive DEV_QUERY
@@ -385,6 +393,94 @@ struct drm_sgxfive_get_bo_mmap_offset_args {
 
 	/** @offset: [OUT] Fake offset for mmap() on the render node. */
 	__u64 offset;
+};
+
+/**
+ * DOC: sgxfive VM contexts, VM_MAP and VM_UNMAP
+ *
+ * A VM context is one GPU address space (one SGX page directory). The client
+ * manages it: VM_MAP places a range of a BO at an address of its choosing,
+ * 4 KiB aligned and inside one heap that is not %DRM_SGXFIVE_HEAP_RESERVED.
+ * Overlapping an existing mapping fails with -EEXIST. The mapping is in the
+ * page tables when the ioctl returns. VM_UNMAP removes exactly one whole
+ * mapping (-ENOENT otherwise); its pages stay pinned until the GPU can no
+ * longer reach them. An open file has at most
+ * %DRM_SGXFIVE_FILE_MAX_VM_CONTEXTS VM contexts at a time; CREATE_VM_CONTEXT
+ * beyond that fails with -ENOSPC.
+ */
+
+/* VM contexts one open file may hold at a time. */
+#define DRM_SGXFIVE_FILE_MAX_VM_CONTEXTS	32
+
+/**
+ * struct drm_sgxfive_create_vm_context_args - Arguments for
+ * %DRM_IOCTL_SGXFIVE_CREATE_VM_CONTEXT.
+ */
+struct drm_sgxfive_create_vm_context_args {
+	/** @handle: [OUT] VM context handle. */
+	__u32 handle;
+
+	/** @_padding_4: Reserved, zero. */
+	__u32 _padding_4;
+};
+
+/**
+ * struct drm_sgxfive_destroy_vm_context_args - Arguments for
+ * %DRM_IOCTL_SGXFIVE_DESTROY_VM_CONTEXT.
+ */
+struct drm_sgxfive_destroy_vm_context_args {
+	/** @handle: [IN] VM context handle. */
+	__u32 handle;
+
+	/** @_padding_4: Reserved, zero. */
+	__u32 _padding_4;
+};
+
+/* The GPU may only read the mapping (SGX PTE READONLY); writes fault. */
+#define DRM_SGXFIVE_VM_MAP_READ_ONLY		(1U << 0)
+#define DRM_SGXFIVE_VM_MAP_FLAGS_MASK		DRM_SGXFIVE_VM_MAP_READ_ONLY
+
+/**
+ * struct drm_sgxfive_vm_map_args - Arguments for %DRM_IOCTL_SGXFIVE_VM_MAP.
+ */
+struct drm_sgxfive_vm_map_args {
+	/** @vm_context_handle: [IN] VM context. */
+	__u32 vm_context_handle;
+
+	/** @flags: [IN] ``DRM_SGXFIVE_VM_MAP_*`` bits. */
+	__u32 flags;
+
+	/** @device_addr: [IN] GPU address: 4 KiB aligned, non-zero, in one user heap. */
+	__u64 device_addr;
+
+	/** @handle: [IN] GEM handle of the BO; -ENOENT if there is none. */
+	__u32 handle;
+
+	/** @_padding_14: Reserved, zero. */
+	__u32 _padding_14;
+
+	/** @offset: [IN] Offset into the BO, 4 KiB aligned. */
+	__u64 offset;
+
+	/** @size: [IN] Non-zero multiple of 4 KiB, within the BO and the heap. */
+	__u64 size;
+};
+
+/**
+ * struct drm_sgxfive_vm_unmap_args - Arguments for %DRM_IOCTL_SGXFIVE_VM_UNMAP.
+ */
+struct drm_sgxfive_vm_unmap_args {
+	/** @vm_context_handle: [IN] VM context. */
+	__u32 vm_context_handle;
+
+	/** @_padding_4: Reserved, zero. */
+	__u32 _padding_4;
+
+	/** @device_addr: [IN] Start of the mapping. */
+	__u64 device_addr;
+
+	/** @size: [IN] Size of the mapping; must match it exactly. */
+	__u64 size;
 };
 
 #if defined(__cplusplus)

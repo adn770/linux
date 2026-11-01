@@ -10,8 +10,11 @@
 #include <linux/atomic.h>
 #include <linux/debugfs.h>
 #include <linux/io.h>
+#include <linux/list.h>
 #include <linux/mutex.h>
 #include <linux/wait.h>
+#include <linux/workqueue.h>
+#include <linux/xarray.h>
 
 #include <drm/sgxfive_drm.h>
 
@@ -75,6 +78,12 @@ struct sgxfive {
 	u32 host_bridge_rev;
 	bool sw_valid;			/* the firmware's own values, below */
 	u32 core_id_sw, core_revision_sw, ddk_version;
+
+	/* Deferred release (sgxfive_defer), under lock. */
+	u64 ccb_sent;			/* kernel-CCB commands submitted */
+	struct list_head deferred;	/* in order of after */
+	unsigned int ndeferred;
+	struct delayed_work reaper;
 #if IS_ENABLED(CONFIG_DRM_GMA500_SGXFIVE_DEBUG)
 	struct sgxfive_xtest xt;
 #endif
@@ -88,6 +97,8 @@ struct sgxfive {
 struct sgxfive_devstate {
 	bool loaded, live;
 	int sw_events, bif_faults;
+	u64 ccb_sent;
+	unsigned int ndeferred;
 	struct { u32 reg, val; } regs[SGXFIVE_DUMP_NREGS];
 	u32 hostctl[SGXFIVE_HC_DWORDS];
 	u32 ta3dctl[SGXFIVE_TA3D_CTL_DWORDS];
@@ -157,9 +168,49 @@ int sgxfive_wait_mem(const u32 *w, u32 mask, u32 want);
 void sgxfive_dump(struct sgxfive *sgx, struct drm_printer *p);
 int sgxfive_power(struct sgxfive *sgx, u32 powercmd, u32 done);
 
+struct sgxfive_vm;
+
+/*
+ * Memory the GPU may still reach through stale BIF state: page directories,
+ * page tables and pinned BO pages. Freed by free() once kernel-CCB command
+ * number after, which carries the BIF invalidation, has been processed.
+ */
+struct sgxfive_deferred {
+	struct list_head link;
+	u64 after;
+	void (*free)(struct sgxfive_deferred *d);
+};
+
+u64 sgxfive_ccb_done(u64 sent, u32 woff, u32 roff);
+unsigned int sgxfive_reap(struct list_head *list, u64 done, struct list_head *due);
+void sgxfive_free_all(struct list_head *due);
+void sgxfive_defer(struct sgxfive *sgx, struct sgxfive_deferred *d);
+
+/* Per-open-file state of the render node. */
+struct sgxfive_file {
+	struct xarray vms;		/* handle -> struct sgxfive_vm */
+};
+
+struct sgxfive_vm *sgxfive_vm_get(struct sgxfive_file *f, u32 handle);
+void sgxfive_vm_put(struct sgxfive_vm *vm);
+u32 sgxfive_vm_pd_phys(const struct sgxfive_vm *vm);
+
 /* The client heap layout and its query (sgxfive_drv.c). */
 extern const struct drm_sgxfive_heap sgxfive_rev1_heaps[DRM_SGXFIVE_HEAP_COUNT];
 int sgxfive_query_heaps(struct drm_sgxfive_dev_query_args *a);
+
+bool sgxfive_is_bo(struct drm_gem_object *obj);
+void sgxfive_need_bif_inval(struct sgxfive *sgx);
+
+int sgxfive_vm_check_range(const struct drm_sgxfive_heap *heaps, unsigned int n,
+			   u64 addr, u64 size);
+int sgxfive_ioctl_create_vm(struct sgxfive *sgx, void *data,
+			    struct drm_file *file);
+int sgxfive_ioctl_destroy_vm(struct sgxfive *sgx, void *data,
+			     struct drm_file *file);
+int sgxfive_ioctl_vm_map(struct sgxfive *sgx, void *data, struct drm_file *file);
+int sgxfive_ioctl_vm_unmap(struct sgxfive *sgx, void *data,
+			   struct drm_file *file);
 
 /* The debug group's files beyond regs, and its test area (sgxfive_debug.c). */
 #if IS_ENABLED(CONFIG_DRM_GMA500_SGXFIVE_DEBUG)

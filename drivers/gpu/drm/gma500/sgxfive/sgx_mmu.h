@@ -38,6 +38,7 @@ static inline unsigned int sgx_mmu_pt_index(u32 addr)
 }
 
 struct sgx_mmu_pd *sgx_mmu_pd_create(void);
+struct sgx_mmu_pd *sgx_mmu_pd_create_user(void);
 void sgx_mmu_pd_destroy(struct sgx_mmu_pd *pd);
 u32 sgx_mmu_pd_phys(const struct sgx_mmu_pd *pd);
 int sgx_mmu_map(struct sgx_mmu_pd *pd, u32 addr, struct page **pages,
