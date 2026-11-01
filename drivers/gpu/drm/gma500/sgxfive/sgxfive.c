@@ -407,14 +407,19 @@ static void sgxfive_halt(struct sgxfive *sgx)
 }
 
 /*
- * Stop the EDM if it runs. The DDK first asks it to power off through the
- * kernel CCB; this driver gives it no work, so the deinit script and the
- * reset are enough.
+ * Stop the EDM if it runs, as SGXPrePowerState(OFF) does: ask it to power off
+ * through the kernel CCB, then halt it. The halt runs whether or not the EDM
+ * answered, so it is certain to have stopped touching memory.
  */
 static void sgxfive_stop(struct sgxfive *sgx)
 {
+	int ret;
+
 	if (!sgx->live)
 		return;
+	ret = sgxfive_power(sgx, POWERCMD_POWEROFF, POWMAN_POWEROFF_COMPLETE);
+	if (ret)
+		drm_warn(sgx->dev, "SGX power-off request failed: %d\n", ret);
 	sgxfive_halt(sgx);
 }
 
@@ -515,6 +520,50 @@ int sgxfive_command(struct sgxfive *sgx, unsigned int cmd, const u32 *data,
 	if (!ret)
 		sgx->cache_control = 0;
 	return ret;
+}
+
+/*
+ * The POWER command (SGXPrePowerState): POWEROFF or IDLE. Wait for the EDM to
+ * report the transition in HostCtl's power status, then for the clocks to
+ * gate (the init info's clock-gating status register and mask). The firmware
+ * must be running: before the boot there is no HostCtl to write.
+ */
+int sgxfive_power(struct sgxfive *sgx, u32 powercmd, u32 done)
+{
+	const char *what = powercmd == POWERCMD_IDLE ? "idle" : "power-off";
+	const u32 data[] = { 0, powercmd };
+	u32 reg, mask, *hc;
+	ktime_t start;
+	int ret;
+
+	if (!sgx->live)
+		return -ENODEV;
+	hc = sgxfive_words(sgx, BUF_HOST_CTL);
+	reg = sgx->fw.meta[SGX_FW_META_CLKGATE + 2];
+	mask = sgx->fw.meta[SGX_FW_META_CLKGATE + 3];
+	start = ktime_get();
+	WRITE_ONCE(hc[HC_POWER_STATUS], READ_ONCE(hc[HC_POWER_STATUS]) & ~done);
+	ret = sgxfive_command(sgx, SGX_CMD_POWER, data, ARRAY_SIZE(data));
+	if (ret)
+		return ret;
+	ret = sgxfive_wait_mem(&hc[HC_POWER_STATUS], done, done);
+	if (ret) {
+		drm_warn(sgx->dev, "SGX %s: the EDM did not report it (%d)\n",
+			 what, ret);
+		return ret;
+	}
+	while (sgx_rd(sgx, reg) & mask) {
+		if (ktime_ms_delta(ktime_get(), start) > 500) {
+			drm_warn(sgx->dev,
+				 "SGX %s: clocks still on, %#x = %#x (mask %#x)\n",
+				 what, reg, sgx_rd(sgx, reg), mask);
+			return -ETIMEDOUT;
+		}
+		usleep_range(50, 100);
+	}
+	drm_info(sgx->dev, "SGX %s after %lld us\n", what,
+		 ktime_us_delta(ktime_get(), start));
+	return 0;
 }
 
 /* From the host's SGX interrupt; true when the event belongs to the EDM. */

@@ -75,7 +75,14 @@ enum {
 };
 
 /* Kernel CCB commands: SGXMKIF_CMD_*, the index into the kick table. */
+#define SGX_CMD_POWER		3
 #define SGX_CMD_GETMISCINFO	6
+
+/* The POWER command's request and the HostCtl power status bit it sets. */
+#define POWERCMD_POWEROFF	1
+#define POWERCMD_IDLE		2
+#define POWMAN_IDLE_COMPLETE	BIT(2)
+#define POWMAN_POWEROFF_COMPLETE BIT(3)
 
 static inline u32 *sgxfive_words(struct sgxfive *sgx, unsigned int id)
 {
@@ -91,6 +98,7 @@ int sgxfive_command(struct sgxfive *sgx, unsigned int cmd, const u32 *data,
 		    unsigned int ndata);
 int sgxfive_wait_mem(const u32 *w, u32 mask, u32 want);
 void sgxfive_dump(struct sgxfive *sgx, struct drm_printer *p);
+int sgxfive_power(struct sgxfive *sgx, u32 powercmd, u32 done);
 
 /* The debug group's files beyond regs (sgxfive_debug.c). */
 void sgxfive_debug_init(struct sgxfive *sgx, struct dentry *dir);

@@ -7,6 +7,7 @@
  * driver itself needs none of them.
  */
 #include <linux/debugfs.h>
+#include <linux/fs.h>
 #include <linux/ktime.h>
 #include <linux/seq_file.h>
 
@@ -104,7 +105,26 @@ static int sgxfive_miscinfo_show(struct seq_file *m, void *unused)
 }
 DEFINE_SHOW_ATTRIBUTE(sgxfive_miscinfo);
 
+/* Writing to idle asks the EDM to idle the core through the POWER command. */
+static ssize_t sgxfive_idle_write(struct file *f, const char __user *ubuf,
+				  size_t len, loff_t *ppos)
+{
+	struct sgxfive *sgx = file_inode(f)->i_private;
+	int ret;
+
+	mutex_lock(&sgx->lock);
+	ret = sgxfive_power(sgx, POWERCMD_IDLE, POWMAN_IDLE_COMPLETE);
+	mutex_unlock(&sgx->lock);
+	return ret ? ret : len;
+}
+
+static const struct file_operations sgxfive_idle_fops = {
+	.owner = THIS_MODULE,
+	.write = sgxfive_idle_write,
+};
+
 void sgxfive_debug_init(struct sgxfive *sgx, struct dentry *dir)
 {
 	debugfs_create_file("miscinfo", 0400, dir, sgx, &sgxfive_miscinfo_fops);
+	debugfs_create_file("idle", 0200, dir, sgx, &sgxfive_idle_fops);
 }
