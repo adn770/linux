@@ -1120,10 +1120,12 @@ static const struct file_operations sgxfive_kreg_fops = {
 };
 
 /*
- * debugfs kregnow: a write to CR_CLKGATECTL2 or a host event enable
- * (sgxfive_kregnow_allowed) at any time, while a job runs or is held. The
- * firmware writes none of them after its boot, so there is nothing to race
- * with; the device lock only keeps a boot or stop from running meanwhile.
+ * debugfs kregnow: a write to CR_CLKGATECTL2, a host event enable or the
+ * register at 0x0740 (sgxfive_kregnow_allowed) at any time, while a job runs
+ * or is held. The firmware writes none of them after its boot, so there is
+ * nothing to race with, though it reads 0x0740 at a TA kick (a 32-bit store,
+ * so it sees the old value or the new); the device lock only keeps a boot or
+ * stop from running meanwhile.
  * The first write of an enable keeps what both held (sgxfive_hostirq): the
  * interrupt of an event the firmware did not enable puts them back, since
  * only the EDM's SW_EVENT is acknowledged here. That arm, the read and the
@@ -1146,7 +1148,7 @@ int sgxfive_kregnow_write(struct sgxfive *sgx, u32 off, bool flip, u32 value)
 	if (!sgx->live) {
 		ret = -ENODEV;
 	} else {
-		bool enable = off != SGX_CLKGATECTL2;
+		bool enable = off == SGX_EVENT_HOST_ENABLE || off == SGX_EVENT_HOST_ENABLE2;
 
 		spin_lock_irqsave(&h->lock, flags);
 		if (enable && !h->armed)
@@ -1184,7 +1186,7 @@ void sgxfive_debug_irq(struct sgxfive *sgx, u32 stat_1, u32 stat_2)
 			     stat_1, stat_2);
 }
 
-/* The three registers, then the host interrupt counts. */
+/* The registers, then the host interrupt counts. */
 static int sgxfive_kregnow_show(struct seq_file *m, void *unused)
 {
 	struct sgxfive *sgx = m->private;

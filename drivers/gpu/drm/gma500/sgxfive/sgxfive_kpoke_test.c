@@ -591,7 +591,7 @@ static void sgxfive_kpoke_test_hwperf_needs_live(struct kunit *test)
  */
 static void sgxfive_kpoke_test_kregnow_allowed(struct kunit *test)
 {
-	static const u32 want[] = { 0x0004, 0x0110, 0x0130 };
+	static const u32 want[] = { 0x0004, 0x0110, 0x0130, 0x0740 };
 	unsigned int i;
 
 	KUNIT_ASSERT_EQ(test, ARRAY_SIZE(want), (size_t)SGXFIVE_KREGNOW_COUNT);
@@ -603,7 +603,10 @@ static void sgxfive_kpoke_test_kregnow_allowed(struct kunit *test)
 	KUNIT_EXPECT_FALSE(test, sgxfive_kregnow_ok(0x0000));
 	KUNIT_EXPECT_FALSE(test, sgxfive_kregnow_ok(0x0008));
 	KUNIT_EXPECT_FALSE(test, sgxfive_kregnow_ok(0x0134));
+	KUNIT_EXPECT_FALSE(test, sgxfive_kregnow_ok(0x073c));
+	KUNIT_EXPECT_FALSE(test, sgxfive_kregnow_ok(0x0744));
 	KUNIT_EXPECT_FALSE(test, sgxfive_kregnow_ok(0x0810));
+	KUNIT_EXPECT_EQ(test, SGX_DPM_TASK_FIELDS, 0x0740);
 }
 
 static void sgxfive_kpoke_test_kregnow_parse(struct kunit *test)
@@ -622,6 +625,11 @@ static void sgxfive_kpoke_test_kregnow_parse(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, sgxfive_kregnow_parse("0x0130^=0x4", &off, &flip, &val), 0);
 	KUNIT_EXPECT_EQ(test, off, 0x0130u);
 	KUNIT_EXPECT_TRUE(test, flip);
+	KUNIT_EXPECT_EQ(test, sgxfive_kregnow_parse("0x0740=0x3fe00", &off, &flip, &val), 0);
+	KUNIT_EXPECT_EQ(test, off, 0x0740u);
+	KUNIT_EXPECT_EQ(test, val, 0x3fe00u);
+	KUNIT_EXPECT_FALSE(test, flip);
+	KUNIT_EXPECT_EQ(test, sgxfive_kreg_parse("0x0740=1", &off, &flip, &val), -EPERM);
 	/* kreg's own registers are not kregnow's, nor the status. */
 	KUNIT_EXPECT_EQ(test, sgxfive_kregnow_parse("0x0810=1", &off, &flip, &val), -EPERM);
 	KUNIT_EXPECT_EQ(test, sgxfive_kregnow_parse("0x0008=1", &off, &flip, &val), -EPERM);
@@ -638,6 +646,7 @@ static void sgxfive_kpoke_test_kregnow_needs_live(struct kunit *test)
 
 	KUNIT_ASSERT_NOT_NULL(test, sgx);
 	KUNIT_EXPECT_EQ(test, sgxfive_kregnow_write(sgx, 0x0004, false, 0), -ENODEV);
+	KUNIT_EXPECT_EQ(test, sgxfive_kregnow_write(sgx, 0x0740, false, 0), -ENODEV);
 	KUNIT_EXPECT_EQ(test, sgxfive_kregnow_write(sgx, 0x0810, false, 0), -ENODEV);
 }
 
@@ -812,6 +821,16 @@ static void sgxfive_kpoke_test_kregnow_write(struct kunit *test)
 
 	KUNIT_EXPECT_EQ(test, sgxfive_kregnow_write(sgx, 0x0810, false, 1), -EPERM);
 	KUNIT_EXPECT_EQ(test, regs[0x0810 / 4], 0u);
+
+	/* The DPM task fields only write: they are not an enable, nothing is kept. */
+	h->armed = false;
+	regs[SGX_EVENT_HOST_ENABLE / 4] = 0x4000;
+	KUNIT_EXPECT_EQ(test, sgxfive_kregnow_write(sgx, SGX_DPM_TASK_FIELDS, false, 0x200), 0);
+	KUNIT_EXPECT_EQ(test, regs[SGX_DPM_TASK_FIELDS / 4], 0x200u);
+	KUNIT_EXPECT_EQ(test, sgxfive_kregnow_write(sgx, SGX_DPM_TASK_FIELDS, true, 0x1200), 0);
+	KUNIT_EXPECT_EQ(test, regs[SGX_DPM_TASK_FIELDS / 4], 0x1000u);
+	KUNIT_EXPECT_FALSE(test, h->armed);
+	KUNIT_EXPECT_EQ(test, regs[SGX_EVENT_HOST_ENABLE / 4], 0x4000u);
 	KUNIT_EXPECT_TRUE(test, spin_trylock(&h->lock));
 	spin_unlock(&h->lock);
 }

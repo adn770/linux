@@ -328,8 +328,14 @@ int sgxfive_kreg_parse(const char *s, u32 *off, bool *flip, u32 *value)
 	return ret ? ret : sgxfive_kreg_ok(*off) ? 0 : -EPERM;
 }
 
-/* CR_CLKGATECTL2, CR_EVENT_HOST_ENABLE2, CR_EVENT_HOST_ENABLE. */
-const u32 sgxfive_kregnow_allowed[SGXFIVE_KREGNOW_COUNT] = { 0x0004, 0x0110, 0x0130 };
+/*
+ * CR_CLKGATECTL2, CR_EVENT_HOST_ENABLE2, CR_EVENT_HOST_ENABLE and the
+ * register at 0x0740 that the TA kick reads (never writes) for its DPM store
+ * and load tasks.
+ */
+const u32 sgxfive_kregnow_allowed[SGXFIVE_KREGNOW_COUNT] = {
+	SGX_CLKGATECTL2, SGX_EVENT_HOST_ENABLE2, SGX_EVENT_HOST_ENABLE, SGX_DPM_TASK_FIELDS,
+};
 
 bool sgxfive_kregnow_ok(u32 off)
 {
