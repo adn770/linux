@@ -32,6 +32,7 @@
 #define SGX_XFER_STATUS		(SGX_XFER_SHARED + 0xbc)	/* {addr, val}[4] */
 #define SGX_XFER_NUM_UPDATES	0x19c
 #define SGX_XFER_UPDATES	0x1a0				/* {addr, val}[101] */
+#define SGX_XFER_MAX_UPDATES	101
 #define SGX_XFER_FLAG_DUMMY	0x20		/* no render, only the queue work */
 #define SGX_XFER_PIXEL_PARTITIONS 0x194
 #define SGX_XFER_FENCE		0x198		/* the context's fence count */
@@ -97,5 +98,7 @@ u32 sgx_xfer_fill_cmd(u8 *cmd, const struct sgx_xfer_fill *f);
 u32 sgx_xfer_dummy(u8 *cmd, u32 status_addr, u32 status_val, u32 update_addr,
 		   u32 update_val, const struct sgx_xfer_sync *dst);
 void sgx_xfer_ctx_init(u8 *ctx, u32 pd_phys, u32 ccb, u32 ccb_ctl);
+void sgx_xfer_ctx_pd(u8 *ctx, u32 pd_phys);
+u32 sgx_xfer_add_update(u8 *cmd, u32 addr, u32 val);
 
 #endif

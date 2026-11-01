@@ -64,6 +64,42 @@ void sgx_xfer_ctx_init(u8 *ctx, u32 pd_phys, u32 ccb, u32 ccb_ctl)
 	put32(ctx, SGX_XFER_CTX_CCB_CTL, ccb_ctl);
 }
 
+/*
+ * Point an idle context at another page directory: the EDM runs the
+ * context's next command, its render and its memory updates through it.
+ */
+void sgx_xfer_ctx_pd(u8 *ctx, u32 pd_phys)
+{
+	put32(ctx, SGX_XFER_CTX_PD, pd_phys);
+}
+
+static u32 get32(const u8 *p, unsigned int off)
+{
+	return p[off] | p[off + 1] << 8 | p[off + 2] << 16 | (u32)p[off + 3] << 24;
+}
+
+/*
+ * Append one memory update (write val at addr once the command is done) to
+ * a built command and grow its size to cover the list. Returns the new size,
+ * or 0 when the list is full. The size is rounded up to 64 bytes, so with a
+ * full list (0x4c8 bytes) it is 0x500: the CCB's write offset moves past the
+ * command's end, never into it.
+ */
+u32 sgx_xfer_add_update(u8 *cmd, u32 addr, u32 val)
+{
+	u32 n = get32(cmd, SGX_XFER_NUM_UPDATES);
+	u32 end = (SGX_XFER_UPDATES + 8 * (n + 1) + 0x3f) & ~0x3fu;
+
+	if (n >= SGX_XFER_MAX_UPDATES)
+		return 0;
+	put32(cmd, SGX_XFER_UPDATES + 8 * n, addr);
+	put32(cmd, SGX_XFER_UPDATES + 8 * n + 4, val);
+	put32(cmd, SGX_XFER_NUM_UPDATES, n + 1);
+	if (get32(cmd, SGX_XFER_SIZE) < end)
+		put32(cmd, SGX_XFER_SIZE, end);
+	return get32(cmd, SGX_XFER_SIZE);
+}
+
 /* Vertex coordinates: 24-bit fixed point, 8 fraction bits, offset 4096. */
 static u32 vtx(u32 c)
 {

@@ -21,6 +21,7 @@
 #include <drm/drm_print.h>
 
 #include "sgxfive_priv.h"
+#include "sgx_mmu.h"
 #include "sgx_seq.h"
 #include "sgx_xfer.h"
 
@@ -78,6 +79,11 @@ void sgxfive_debug_unload(struct sgxfive *sgx)
 {
 	unsigned int i;
 
+	for (i = 0; i < ARRAY_SIZE(sgx->xt.cbuf); i++)
+		sgxfive_unmap(sgx, &sgx->xt.cbuf[i]);
+	if (sgx->xt.cpd)
+		sgx_mmu_pd_destroy(sgx->xt.cpd);	/* also drops its aliases */
+	sgx->xt.cpd = NULL;
 	for (i = 0; i < XB_COUNT; i++)
 		sgxfive_unmap(sgx, &sgx->xt.buf[i]);
 	sgx->xt.woff = 0;
@@ -218,6 +224,8 @@ static int sgxfive_xfer_submit(struct sgxfive *sgx,
 	if (!sgx->xt.runs)
 		sgx_xfer_ctx_init(ctx, sgx->layout.pd_phys, xb_addr(sgx, XB_CCB),
 				  xb_addr(sgx, XB_CCB_CTL));
+	/* A client-directory check may have left the context on its directory. */
+	sgx_xfer_ctx_pd(ctx, sgx->layout.pd_phys);
 	*fence = 0x1234 + sgx->xt.runs;
 	*update = 0xcafe0000 + sgx->xt.runs;
 	WRITE_ONCE(scr[SCR_U], 0);
@@ -413,11 +421,20 @@ static const struct sgxfive_fill_case {
 	{ "one pixel at (63,31)", 63, 31, 1, 1, 256, 0x12345678 },
 };
 
-/* Where a transfer writes: the destination's CPU and device addresses. */
+/*
+ * Where a transfer writes: the destination's CPU and device addresses, the
+ * page directory the transfer context names (0: the EDM's own), and
+ * optionally one memory update's target.
+ */
 struct sgxfive_fill_target {
 	u32 *cpu;
 	u32 addr;
+	u32 pd_phys;
+	u32 *upd_cpu;
+	u32 upd_addr;
 };
+
+#define FILL_UPDATE	0xc0ffee00
 
 /*
  * Queue one transfer whose programs and background object are in place and
@@ -448,9 +465,16 @@ static int sgxfive_tq_run(struct sgxfive *sgx, struct drm_printer *p,
 	if (!sgx->xt.runs)
 		sgx_xfer_ctx_init((u8 *)ctx, l->pd_phys, xb_addr(sgx, XB_CCB),
 				  xb_addr(sgx, XB_CCB_CTL));
+	/* The context is idle between transfers, so its PD can change. */
+	sgx_xfer_ctx_pd((u8 *)ctx, t->pd_phys ? t->pd_phys : l->pd_phys);
 	WRITE_ONCE(scr[SCR_F], 0);
+	if (t->upd_cpu)
+		WRITE_ONCE(*t->upd_cpu, 0);
 
 	size = sgx_xfer_fill_cmd(cmd, f);
+	if (t->upd_cpu)		/* applied by the EDM through the context's PD */
+		size = sgx_xfer_add_update(cmd, t->upd_addr,
+					   FILL_UPDATE + sgx->xt.runs);
 	n = sgx_fw_tq_cmd(&sgx->fw, l, params, cw, ARRAY_SIZE(cw));
 	if (n < 0)
 		return n;
@@ -483,6 +507,9 @@ static int sgxfive_tq_run(struct sgxfive *sgx, struct drm_printer *p,
 	if (sgxfive_wait_event(sgx, p, sw0, &scr[SCR_F], f->fence_id + 1))
 		(*bad)++;
 
+	if (t->upd_cpu)
+		sgxfive_check(p, "update word", READ_ONCE(*t->upd_cpu),
+			      FILL_UPDATE + f->fence_id, bad);
 	sgxfive_check(p, "status F", READ_ONCE(scr[SCR_F]), f->fence_id + 1, bad);
 	sgxfive_check(p, "ccb read off", READ_ONCE(ctl[1]), done, bad);
 	sgxfive_check(p, "ctx count", READ_ONCE(ctx[SGX_XFER_CTX_COUNT / 4]), 0,
@@ -694,6 +721,123 @@ static int sgxfive_xfer_copies(struct sgxfive *sgx, struct drm_printer *p)
 	return ret;
 }
 
+/*
+ * The isolation check: does a transfer's 3D work use the page directory its
+ * context names? A client PD maps a destination at CLIENT_DST and an update
+ * target at CLIENT_UPD, neither of which exists in the EDM's own PD. The fill
+ * must land, and the update must be applied, through the client PD alone.
+ *
+ * The EDM applies the memory updates while the context's directory is in
+ * force, so the client PD also maps every EDM buffer at its kernel address,
+ * read-write or (alias_ro) read-only. With no_alias it maps only what the
+ * job itself uses (its programs and background object), and the job then
+ * carries no update.
+ */
+#define CLIENT_DST	0x20000000
+#define CLIENT_UPD	0x20010000
+
+static int sgxfive_client_pd(struct sgxfive *sgx)
+{
+	struct sgxfive_xtest *xt = &sgx->xt;
+	unsigned int i;
+	int ret;
+
+	/* Rebuilt each time, so a change of alias_ro or no_alias takes effect. */
+	for (i = 0; i < ARRAY_SIZE(xt->cbuf); i++)
+		sgxfive_unmap(sgx, &xt->cbuf[i]);
+	if (xt->cpd)
+		sgx_mmu_pd_destroy(xt->cpd);
+	xt->cpd = sgx_mmu_pd_create();
+	if (!xt->cpd)
+		return -ENOMEM;
+	ret = sgxfive_map_pd(sgx, xt->cpd, &xt->cbuf[0], CLIENT_DST, 0x3000);
+	if (!ret)
+		ret = sgxfive_map_pd(sgx, xt->cpd, &xt->cbuf[1], CLIENT_UPD, 4);
+	for (i = 0; i < SGX_FW_MAX_BUFFERS + XB_COUNT && !ret; i++) {
+		struct sgxfive_buf *b = i < SGX_FW_MAX_BUFFERS ? &sgx->buf[i] :
+					&xt->buf[i - SGX_FW_MAX_BUFFERS];
+		unsigned int x = i - SGX_FW_MAX_BUFFERS;
+		bool job = i >= SGX_FW_MAX_BUFFERS &&
+			   (x == XB_PDS || x == XB_USE || x == XB_BG);
+
+		if (b->pd && (job || !xt->no_alias))
+			ret = sgx_mmu_map(xt->cpd, b->addr, b->pages, b->npages,
+					  xt->alias_ro ? SGX_MMU_RO : 0);
+	}
+	return ret;
+}
+
+static int sgxfive_xfer_iso(struct sgxfive *sgx, struct drm_printer *p)
+{
+	struct sgxfive_fill_target t;
+	int ret;
+
+	ret = sgx->live ? sgxfive_client_pd(sgx) : -ENODEV;
+	if (ret)
+		return ret;
+	t = (struct sgxfive_fill_target) {
+		.cpu = sgx->xt.cbuf[0].va, .addr = CLIENT_DST,
+		.pd_phys = sgx_mmu_pd_phys(sgx->xt.cpd),
+	};
+	if (!sgx->xt.no_alias) {
+		t.upd_cpu = sgx->xt.cbuf[1].va;
+		t.upd_addr = CLIENT_UPD;
+	}
+	drm_printf(p, "client PD at %#x, EDM aliases %s\n", t.pd_phys,
+		   sgx->xt.no_alias ? "none, no updates" :
+		   sgx->xt.alias_ro ? "read-only" : "read-write");
+	ret = sgxfive_xfer_fill(sgx, p, &sgxfive_fill_cases[1], &t);
+	drm_printf(p, "%s\n", ret ? "ISOLATION CHECK FAILED" :
+		   sgx->xt.no_alias ? "3D work used the client PD alone" :
+		   "3D work and updates used the client PD");
+	return ret;
+}
+
+/*
+ * The negative check: a client fill aimed at a kernel buffer that the client
+ * PD maps only read-only (the destination area, at its kernel address). The
+ * writes must fault and the buffer must keep its sentinel. The fault leaves
+ * the EDM unable to finish the job: reload and boot afterwards.
+ */
+static int sgxfive_xfer_ro(struct sgxfive *sgx, struct drm_printer *p)
+{
+	const bool alias_ro = sgx->xt.alias_ro, no_alias = sgx->xt.no_alias;
+	struct sgxfive_fill_target t;
+	unsigned int i, written = 0;
+	u32 *dst = xb_va(sgx, XB_DST);
+	int ret;
+
+	/* Read-only aliases of every EDM buffer, for this check only. */
+	sgx->xt.alias_ro = true;
+	sgx->xt.no_alias = false;
+	ret = sgx->live ? sgxfive_client_pd(sgx) : -ENODEV;
+	if (ret)
+		goto out;
+	t = (struct sgxfive_fill_target) {
+		.cpu = dst, .addr = xb_addr(sgx, XB_DST),
+		.pd_phys = sgx_mmu_pd_phys(sgx->xt.cpd),
+	};
+	/* -EIO: kicked, then a mismatch; any other error: never kicked. */
+	ret = sgxfive_xfer_fill(sgx, p, &sgxfive_fill_cases[0], &t);
+	if (ret && ret != -EIO)
+		goto out;
+	rmb(); /* what, if anything, reached memory */
+	for (i = 0; i < 3 * PAGE_SIZE / 4; i++)
+		written += READ_ONCE(dst[i]) != FILL_SENTINEL;
+	drm_printf(p, "dwords written through the read-only alias: %u\n",
+		   written);
+	drm_printf(p, "BIF_INT_STAT %#x BIF_FAULT %#x bif_faults %d\n",
+		   sgxfive_rd(sgx, SGX_BIF_INT_STAT), sgxfive_rd(sgx, SGX_BIF_FAULT),
+		   atomic_read(&sgx->bif_faults));
+	drm_printf(p, "%s\n", written ? "NOT PROTECTED" :
+		   "kernel buffer protected; reload and boot to recover");
+	ret = 0;
+out:
+	sgx->xt.alias_ro = alias_ro;
+	sgx->xt.no_alias = no_alias;
+	return ret;
+}
+
 /* Run one check under the device lock; a mismatch still reads as text. */
 static int sgxfive_run(struct seq_file *m,
 		       int (*fn)(struct sgxfive *sgx, struct drm_printer *p))
@@ -734,6 +878,18 @@ static int sgxfive_xfer_copy_show(struct seq_file *m, void *unused)
 }
 DEFINE_SHOW_ATTRIBUTE(sgxfive_xfer_copy);
 
+static int sgxfive_xfer_iso_show(struct seq_file *m, void *unused)
+{
+	return sgxfive_run(m, sgxfive_xfer_iso);
+}
+DEFINE_SHOW_ATTRIBUTE(sgxfive_xfer_iso);
+
+static int sgxfive_xfer_ro_show(struct seq_file *m, void *unused)
+{
+	return sgxfive_run(m, sgxfive_xfer_ro);
+}
+DEFINE_SHOW_ATTRIBUTE(sgxfive_xfer_ro);
+
 void sgxfive_debug_init(struct sgxfive *sgx, struct dentry *dir)
 {
 	debugfs_create_file("miscinfo", 0400, dir, sgx, &sgxfive_miscinfo_fops);
@@ -743,4 +899,8 @@ void sgxfive_debug_init(struct sgxfive *sgx, struct dentry *dir)
 	debugfs_create_file("xfer_sync", 0400, dir, sgx, &sgxfive_xfer_sync_fops);
 	debugfs_create_file("xfer_fill", 0400, dir, sgx, &sgxfive_xfer_fill_fops);
 	debugfs_create_file("xfer_copy", 0400, dir, sgx, &sgxfive_xfer_copy_fops);
+	debugfs_create_file("xfer_iso", 0400, dir, sgx, &sgxfive_xfer_iso_fops);
+	debugfs_create_bool("alias_ro", 0600, dir, &sgx->xt.alias_ro);
+	debugfs_create_bool("no_alias", 0600, dir, &sgx->xt.no_alias);
+	debugfs_create_file("xfer_ro", 0400, dir, sgx, &sgxfive_xfer_ro_fops);
 }

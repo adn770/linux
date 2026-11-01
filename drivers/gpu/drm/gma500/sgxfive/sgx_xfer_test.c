@@ -288,16 +288,67 @@ static void sgx_xfer_test_copy_cmd(struct kunit *test)
 				    off);
 }
 
+/* A new directory changes only the context's PD word. */
+static void sgx_xfer_test_ctx_pd(struct kunit *test)
+{
+	u8 *ctx = kunit_kzalloc(test, SGX_XFER_CTX_SIZE, GFP_KERNEL);
+	unsigned int off;
+
+	KUNIT_ASSERT_NOT_NULL(test, ctx);
+	sgx_xfer_ctx_init(ctx, 0x2468000, 0x32100000, 0x32120000);
+	sgx_xfer_ctx_pd(ctx, 0x1357000);
+	KUNIT_EXPECT_EQ(test, dw(ctx, SGX_XFER_CTX_PD), 0x1357000u);
+	KUNIT_EXPECT_EQ(test, dw(ctx, SGX_XFER_CTX_CCB), 0x32100000u);
+	KUNIT_EXPECT_EQ(test, dw(ctx, SGX_XFER_CTX_CCB_CTL), 0x32120000u);
+	for (off = SGX_XFER_CTX_COUNT; off < SGX_XFER_CTX_SIZE; off += 4)
+		KUNIT_EXPECT_EQ_MSG(test, dw(ctx, off), 0u, "offset %#x", off);
+}
+
+/*
+ * Updates go after the command's own, and the size grows in 64-byte steps
+ * to cover them: 0x1a0 + 8 per update. The list holds 101.
+ */
+static void sgx_xfer_test_add_update(struct kunit *test)
+{
+	static const struct sgx_xfer_fill f = { .rect = { 0, 0, 64, 32 } };
+	u8 *cmd = kunit_kzalloc(test, SGX_XFER_CMD_SIZE, GFP_KERNEL);
+	unsigned int i;
+
+	KUNIT_ASSERT_NOT_NULL(test, cmd);
+	sgx_xfer_fill_cmd(cmd, &f);
+	KUNIT_EXPECT_EQ(test, dw(cmd, SGX_XFER_NUM_UPDATES), 0u);
+	KUNIT_EXPECT_EQ(test, sgx_xfer_add_update(cmd, 0x20010000, 0xc0ffee00),
+			0x1c0u);
+	KUNIT_EXPECT_EQ(test, dw(cmd, SGX_XFER_NUM_UPDATES), 1u);
+	KUNIT_EXPECT_EQ(test, dw(cmd, SGX_XFER_UPDATES), 0x20010000u);
+	KUNIT_EXPECT_EQ(test, dw(cmd, SGX_XFER_UPDATES + 4), 0xc0ffee00u);
+	for (i = 1; i < 4; i++)		/* 0x1a0 + 8 * 4 = 0x1c0 */
+		KUNIT_EXPECT_EQ(test, sgx_xfer_add_update(cmd, 0x20010000 + 4 * i,
+							  i), 0x1c0u);
+	KUNIT_EXPECT_EQ(test, sgx_xfer_add_update(cmd, 0x20010010, 4), 0x200u);
+	KUNIT_EXPECT_EQ(test, dw(cmd, SGX_XFER_UPDATES + 8 * 4), 0x20010010u);
+	KUNIT_EXPECT_EQ(test, dw(cmd, SGX_XFER_SIZE), 0x200u);
+	for (i = 5; i < SGX_XFER_MAX_UPDATES; i++)
+		sgx_xfer_add_update(cmd, 0x20010000, i);
+	KUNIT_EXPECT_EQ(test, dw(cmd, SGX_XFER_NUM_UPDATES), 101u);
+	/* 0x1a0 + 8 * 101 is the whole command, 0x4c8, rounded up */
+	KUNIT_EXPECT_EQ(test, dw(cmd, SGX_XFER_SIZE), 0x500u);
+	KUNIT_EXPECT_EQ(test, sgx_xfer_add_update(cmd, 0x20010000, 0), 0u);
+	KUNIT_EXPECT_EQ(test, dw(cmd, SGX_XFER_NUM_UPDATES), 101u);
+}
+
 static struct kunit_case sgx_xfer_test_cases[] = {
 	KUNIT_CASE(sgx_xfer_test_dummy_cmd),
 	KUNIT_CASE(sgx_xfer_test_dst_sync),
 	KUNIT_CASE(sgx_xfer_test_ctx),
+	KUNIT_CASE(sgx_xfer_test_ctx_pd),
 	KUNIT_CASE(sgx_xfer_test_bgobj),
 	KUNIT_CASE(sgx_xfer_test_fill_cmd),
 	KUNIT_CASE(sgx_xfer_test_render_box),
 	KUNIT_CASE(sgx_xfer_test_bgobj_copy),
 	KUNIT_CASE(sgx_xfer_test_bgobj_copy_coords),
 	KUNIT_CASE(sgx_xfer_test_copy_cmd),
+	KUNIT_CASE(sgx_xfer_test_add_update),
 	{}
 };
 

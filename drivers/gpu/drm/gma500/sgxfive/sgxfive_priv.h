@@ -31,7 +31,8 @@ struct sgxfive_buf {
 /*
  * The debug group's transfer-queue test area (sgxfive_debug.c): buffers in
  * the EDM's address space, the client CCB's write offset and the number of
- * transfers queued since the load.
+ * transfers queued since the load; a client page directory with buffers of
+ * its own, and how it maps the EDM's buffers.
  */
 #define SGXFIVE_XBUFS	10
 
@@ -39,6 +40,10 @@ struct sgxfive_xtest {
 	struct sgxfive_buf buf[SGXFIVE_XBUFS];
 	u32 woff;
 	u32 runs;
+	struct sgx_mmu_pd *cpd;
+	struct sgxfive_buf cbuf[2];
+	bool alias_ro;		/* the EDM's buffers read-only in cpd */
+	bool no_alias;		/* ...or not at all */
 };
 
 struct sgxfive {
