@@ -329,6 +329,8 @@ void sgxfive_watchdog_arm(struct sgxfive *sgx);
 u32 sgxfive_job_build(u8 *cmd, const struct drm_sgxfive_transfer_cmd *regs,
 		      bool dummy, u32 status_addr, u32 value);
 int sgxfive_job_check(const struct drm_sgxfive_transfer_cmd *regs);
+struct sgxfive_ctx;
+void sgxfive_submit_xfer_pokes(struct sgxfive_ctx *ctx, u8 *cmd, bool dummy);
 int sgxfive_ctx_check_args(const struct drm_sgxfive_create_context_args *a);
 
 struct sgx_mmu_pd;
@@ -485,6 +487,10 @@ static inline void sgxfive_kpoke_job(struct sgxfive *sgx, u8 *img, bool render)
 }
 
 static inline void sgxfive_kpoke_run(struct sgxfive *sgx, u32 *const words[])
+{
+}
+
+static inline void sgxfive_kpoke_xfer(struct sgxfive *sgx, u32 *hw)
 {
 }
 

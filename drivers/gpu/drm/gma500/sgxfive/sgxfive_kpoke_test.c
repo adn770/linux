@@ -46,6 +46,9 @@ static void sgxfive_kpoke_test_words(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, sgxfive_kpoke_words(SGXFIVE_KPOKE_RTDS), 20u);
 	KUNIT_EXPECT_EQ(test, sgxfive_kpoke_words(SGXFIVE_KPOKE_PB), 15u);
 	KUNIT_EXPECT_EQ(test, sgxfive_kpoke_words(SGXFIVE_KPOKE_KW), 4u);
+	/* A transfer context's HW context. */
+	KUNIT_EXPECT_EQ(test, sgxfive_kpoke_words(SGXFIVE_KPOKE_TH), (u32)SGX_XFER_CTX_SIZE / 4);
+	KUNIT_EXPECT_EQ(test, sgxfive_kpoke_words(SGXFIVE_KPOKE_TH), 45u);
 	KUNIT_EXPECT_EQ(test, sgxfive_kpoke_words(SGXFIVE_KPOKE_SPACES), 0u);
 	/* The kernel's words are contiguous, in kw order. */
 	KUNIT_EXPECT_EQ(test, SGXFIVE_RCTX_PENDING_OFF, SGXFIVE_RCTX_ACCESS_OFF + 4);
@@ -90,6 +93,10 @@ static void sgxfive_kpoke_test_parse(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, sgxfive_kpoke_parse("kw:1=2", &p), 0);
 	KUNIT_EXPECT_EQ(test, p.space, (u32)SGXFIVE_KPOKE_KW);
 	KUNIT_EXPECT_EQ(test, p.index, 1u);
+	KUNIT_EXPECT_EQ(test, sgxfive_kpoke_parse("th:0^=0x10", &p), 0);
+	KUNIT_EXPECT_EQ(test, p.space, (u32)SGXFIVE_KPOKE_TH);
+	KUNIT_EXPECT_EQ(test, p.index, 0u);
+	KUNIT_EXPECT_TRUE(test, p.flip);
 	for (i = 0; i < ARRAY_SIZE(bad); i++)
 		KUNIT_EXPECT_EQ_MSG(test, sgxfive_kpoke_parse(bad[i], &p), -EINVAL,
 				    "\"%s\"", bad[i]);
@@ -114,6 +121,8 @@ static void sgxfive_kpoke_test_range(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, sgxfive_kpoke_parse("pb:15=1", &p), -ERANGE);
 	KUNIT_EXPECT_EQ(test, sgxfive_kpoke_parse("kw:3=1", &p), 0);
 	KUNIT_EXPECT_EQ(test, sgxfive_kpoke_parse("kw:4=1", &p), -ERANGE);
+	KUNIT_EXPECT_EQ(test, sgxfive_kpoke_parse("th:44=1", &p), 0);
+	KUNIT_EXPECT_EQ(test, sgxfive_kpoke_parse("th:45=1", &p), -ERANGE);
 }
 
 static void sgxfive_kpoke_test_format(struct kunit *test)
@@ -297,6 +306,120 @@ static void sgxfive_kpoke_test_run(struct kunit *test)
 	rtds[1] = 0;
 	KUNIT_EXPECT_EQ(test, sgxfive_kpoke_take_run(k, words, done), 0u);
 	KUNIT_EXPECT_EQ(test, rtds[1], 0u);
+}
+
+/*
+ * th pokes (a transfer context's HW context): applied once, in order, to the
+ * words sgxfive_kpoke_xfer() is given, at the next transfer job whatever its
+ * kind; a render's kick and the image spaces leave them armed, and a transfer
+ * leaves the render context's spaces armed.
+ */
+static void sgxfive_kpoke_test_xfer(struct kunit *test)
+{
+	u32 *hw = kunit_kzalloc(test, SGX_XFER_CTX_SIZE, GFP_KERNEL);
+	struct sgxfive_kpokes *k = kunit_kzalloc(test, sizeof(*k), GFP_KERNEL);
+	struct sgxfive *sgx = kunit_kzalloc(test, sizeof(*sgx), GFP_KERNEL);
+	u32 ctx[17] = { };
+	u32 *words[SGXFIVE_KPOKE_SPACES] = { [SGXFIVE_KPOKE_CTX] = ctx };
+	u8 *img = kunit_kzalloc(test, SGX_XFER_CMD_SIZE, GFP_KERNEL);
+	static const char *const lines[] = {
+		"th:0=0x10", "ctx:1=7", "th:1=1", "tq:2=3", "th:0^=0x2", "th:44=0xaa",
+	};
+	struct sgxfive_kpoke p[ARRAY_SIZE(lines)], done[SGXFIVE_KPOKE_MAX];
+	unsigned int i;
+
+	KUNIT_ASSERT_NOT_NULL(test, hw);
+	KUNIT_ASSERT_NOT_NULL(test, k);
+	KUNIT_ASSERT_NOT_NULL(test, sgx);
+	KUNIT_ASSERT_NOT_NULL(test, img);
+	for (i = 0; i < ARRAY_SIZE(lines); i++)
+		KUNIT_ASSERT_EQ(test, sgxfive_kpoke_parse(lines[i], &p[i]), 0);
+	KUNIT_ASSERT_EQ(test, sgxfive_kpoke_arm(k, p, ARRAY_SIZE(p)), 0);
+
+	/* Not a job image's, not a render's. */
+	KUNIT_EXPECT_EQ(test, sgxfive_kpoke_take(k, img, false, done), 1u);
+	KUNIT_EXPECT_EQ(test, sgxfive_kpoke_take(k, img, true, done), 0u);
+	KUNIT_EXPECT_EQ(test, sgxfive_kpoke_take_run(k, words, done), 1u);
+	KUNIT_EXPECT_EQ(test, ctx[1], 7u);
+	KUNIT_EXPECT_EQ(test, k->n, 4u);
+	for (i = 0; i < 4; i++)
+		KUNIT_EXPECT_EQ(test, k->p[i].space, (u32)SGXFIVE_KPOKE_TH);
+
+	words[SGXFIVE_KPOKE_CTX] = NULL;
+	words[SGXFIVE_KPOKE_TH] = hw;
+	KUNIT_EXPECT_EQ(test, sgxfive_kpoke_take_run(k, words, done), 4u);
+	KUNIT_EXPECT_EQ(test, hw[0], 0x12u);		/* set, then flipped */
+	KUNIT_EXPECT_EQ(test, hw[1], 1u);
+	KUNIT_EXPECT_EQ(test, hw[44], 0xaau);
+	KUNIT_EXPECT_EQ(test, hw[2], 0u);
+	KUNIT_EXPECT_EQ(test, done[0].space, (u32)SGXFIVE_KPOKE_TH);
+	KUNIT_EXPECT_EQ(test, k->n, 0u);
+
+	/* sgxfive_kpoke_xfer(): the debugfs side, th ones only. */
+	spin_lock_init(&sgx->kpoke_lock);
+	memset(hw, 0, SGX_XFER_CTX_SIZE);
+	KUNIT_ASSERT_EQ(test, sgxfive_kpoke_parse("th:2=5", &p[0]), 0);
+	KUNIT_ASSERT_EQ(test, sgxfive_kpoke_parse("ctx:3=6", &p[1]), 0);
+	KUNIT_ASSERT_EQ(test, sgxfive_kpoke_arm(&sgx->kpokes, p, 2), 0);
+	sgxfive_kpoke_xfer(sgx, hw);
+	KUNIT_EXPECT_EQ(test, hw[2], 5u);
+	KUNIT_EXPECT_EQ(test, hw[3], 0u);
+	KUNIT_EXPECT_EQ(test, sgx->kpokes.n, 1u);
+	KUNIT_EXPECT_EQ(test, sgx->kpokes.p[0].space, (u32)SGXFIVE_KPOKE_CTX);
+}
+
+/*
+ * The pokes of a transfer job's submission (sgxfive_submit_xfer_pokes): the
+ * tq pokes go to the job's command and the th pokes to its context's HW
+ * context, in one call. A dummy job has no registers: its tq pokes stay
+ * armed for the next job, its th pokes apply. The render context's spaces
+ * are left armed either way.
+ */
+static void sgxfive_kpoke_test_submit_xfer(struct kunit *test)
+{
+	struct sgxfive *sgx = kunit_kzalloc(test, sizeof(*sgx), GFP_KERNEL);
+	struct sgxfive_ctx *ctx = kunit_kzalloc(test, sizeof(*ctx), GFP_KERNEL);
+	u8 *cmd = kunit_kzalloc(test, SGX_XFER_CMD_SIZE, GFP_KERNEL);
+	u32 *hw;
+	static const char *const lines[] = {
+		"tq:2=0x33", "th:3=0x44", "ctx:1=7", "th:3^=0x1",
+	};
+	struct sgxfive_kpoke p[ARRAY_SIZE(lines)];
+	unsigned int i;
+
+	KUNIT_ASSERT_NOT_NULL(test, sgx);
+	KUNIT_ASSERT_NOT_NULL(test, ctx);
+	KUNIT_ASSERT_NOT_NULL(test, cmd);
+	ctx->mem.va = kunit_kzalloc(test, SGXFIVE_CTX_MEM_SIZE, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, ctx->mem.va);
+	hw = sgxfive_ctx_cpu(ctx, SGXFIVE_CTX_HW_OFF);
+	ctx->sgx = sgx;
+	spin_lock_init(&sgx->kpoke_lock);
+	for (i = 0; i < ARRAY_SIZE(lines); i++)
+		KUNIT_ASSERT_EQ(test, sgxfive_kpoke_parse(lines[i], &p[i]), 0);
+
+	/* A dummy: th applies, in order, on the context's HW context; tq waits. */
+	KUNIT_ASSERT_EQ(test, sgxfive_kpoke_arm(&sgx->kpokes, p, ARRAY_SIZE(p)), 0);
+	sgxfive_submit_xfer_pokes(ctx, cmd, true);
+	KUNIT_EXPECT_EQ(test, hw[3], 0x45u);
+	KUNIT_EXPECT_EQ(test, dw(cmd, 8), 0u);
+	KUNIT_EXPECT_EQ(test, sgx->kpokes.n, 2u);
+	KUNIT_EXPECT_EQ(test, sgx->kpokes.p[0].space, (u32)SGXFIVE_KPOKE_TQ);
+	KUNIT_EXPECT_EQ(test, sgx->kpokes.p[1].space, (u32)SGXFIVE_KPOKE_CTX);
+
+	/* The next, not a dummy: tq reaches the command; ctx is still not theirs. */
+	KUNIT_ASSERT_EQ(test, sgxfive_kpoke_arm(&sgx->kpokes, &p[1], 1), 0);
+	sgxfive_submit_xfer_pokes(ctx, cmd, false);
+	KUNIT_EXPECT_EQ(test, dw(cmd, 8), 0x33u);
+	KUNIT_EXPECT_EQ(test, hw[3], 0x44u);
+	KUNIT_EXPECT_EQ(test, sgx->kpokes.n, 1u);
+	KUNIT_EXPECT_EQ(test, sgx->kpokes.p[0].space, (u32)SGXFIVE_KPOKE_CTX);
+
+	/* Nothing of theirs armed: nothing written. */
+	memset(ctx->mem.va, 0, SGXFIVE_CTX_MEM_SIZE);
+	sgxfive_submit_xfer_pokes(ctx, cmd, false);
+	KUNIT_EXPECT_EQ(test, hw[3], 0u);
+	KUNIT_EXPECT_EQ(test, sgx->kpokes.n, 1u);
 }
 
 /*
@@ -740,6 +863,7 @@ static void sgxfive_kpoke_test_debug_irq(struct kunit *test)
 /* A recovery reset (and a boot) leaves nothing of what a tester armed. */
 static void sgxfive_kpoke_test_reset_disarms(struct kunit *test)
 {
+	struct sgxfive_kpoke p[2];
 	struct sgxfive *sgx;
 	u32 *regs;
 
@@ -753,7 +877,12 @@ static void sgxfive_kpoke_test_reset_disarms(struct kunit *test)
 	sgx->alias_ctx_rw = true;
 	sgx->tdfill.armed = true;
 	sgx->render_share_pb = true;
+	KUNIT_ASSERT_EQ(test, sgxfive_kpoke_parse("th:2=5", &p[0]), 0);
+	KUNIT_ASSERT_EQ(test, sgxfive_kpoke_parse("ta:1^=3", &p[1]), 0);
+	KUNIT_ASSERT_EQ(test, sgxfive_kpoke_arm(&sgx->kpokes, p, 2), 0);
+	KUNIT_ASSERT_EQ(test, sgx->kpokes.n, 2u);
 	KUNIT_EXPECT_FALSE(test, sgxfive_debug_reset(sgx));
+	KUNIT_EXPECT_EQ(test, sgx->kpokes.n, 0u);
 	KUNIT_EXPECT_FALSE(test, sgx->tdfill.armed);
 	KUNIT_EXPECT_FALSE(test, sgx->render_share_pb);
 	KUNIT_EXPECT_FALSE(test, sgx->hostirq.armed);
@@ -803,6 +932,8 @@ static struct kunit_case sgxfive_kpoke_test_cases[] = {
 	KUNIT_CASE(sgxfive_kpoke_test_transfer),
 	KUNIT_CASE(sgxfive_kpoke_test_render),
 	KUNIT_CASE(sgxfive_kpoke_test_run),
+	KUNIT_CASE(sgxfive_kpoke_test_xfer),
+	KUNIT_CASE(sgxfive_kpoke_test_submit_xfer),
 	KUNIT_CASE(sgxfive_kpoke_test_write),
 	KUNIT_CASE(sgxfive_kpoke_test_kreg_allowed),
 	KUNIT_CASE(sgxfive_kpoke_test_kreg_parse),

@@ -14,17 +14,30 @@
  *   kw:N   word N of the words the kernel keeps for it: the access word,
  *          the pending count, the render target's status, the background
  *          primary-PDS update list (SGXFIVE_RCTX_ACCESS_OFF on)
+ *   th:N   word N of a transfer context's HW context (SGX_XFER_CTX_SIZE):
+ *          its flags, priority, page directory, client CCB and control block
  *
  * SPACE:N=V sets the word, SPACE:N^=V flips the bits of V in what the kernel
  * built. A poke applies once, to the next job of its kind (ta and rd to the
  * next render submitted, tq to the next transfer submitted that is not a
  * dummy; ctx, rtds, pb and kw to the next render the kernel kicks, after it
- * has written its own words there), and is then dropped. debugfs
- * dri/N/sgx/render_words shows the render spaces' words of the newest render
- * context, a line each in the same spelling. Every word may be poked, the
- * addresses the kernel fills included: a poked address can make the job
- * fault, hang, or make the firmware write where it should not (the job fails
- * and is recovered; a firmware that no longer recovers needs a reboot).
+ * has written its own words there; th to the next transfer submitted, a
+ * dummy too, in the HW context of the context it is submitted on, where it
+ * stays until another poke or the context goes), and is then dropped.
+ * Armed pokes do not outlive the firmware they were armed for: a boot, a
+ * firmware reload and a recovery reset drop them.
+ *
+ * A th poke lands when the job is queued, not when the firmware runs it, so
+ * jobs of that context already queued or in flight read the word after the
+ * poke, not before it. A recovery reset rewrites every transfer context's
+ * HW context and drops a th poke that landed before it.
+ *
+ * debugfs dri/N/sgx/render_words shows the render spaces' words of the
+ * newest render context, a line each in the same spelling. Every word may be
+ * poked, the addresses the kernel fills included: a poked address can make
+ * the job fault, hang, or make the firmware write where it should not (the
+ * job fails and is recovered; a firmware that no longer recovers needs a
+ * reboot).
  *
  * And the raw register writes of debugfs dri/N/sgx/kreg, only to registers
  * the firmware never touches (sgxfive_kreg_allowed), only while the firmware
@@ -47,6 +60,7 @@ enum sgxfive_kpoke_space {
 	SGXFIVE_KPOKE_RTDS,
 	SGXFIVE_KPOKE_PB,
 	SGXFIVE_KPOKE_KW,
+	SGXFIVE_KPOKE_TH,
 	SGXFIVE_KPOKE_SPACES,
 };
 
@@ -94,6 +108,14 @@ unsigned int sgxfive_kpoke_take(struct sgxfive_kpokes *k, u8 *img, bool render,
 unsigned int sgxfive_kpoke_take_run(struct sgxfive_kpokes *k,
 				    u32 *const words[SGXFIVE_KPOKE_SPACES],
 				    struct sgxfive_kpoke *done);
+
+/*
+ * At a transfer job's submission, on its context's HW context (SGX_XFER_CTX_SIZE
+ * bytes at hw): the armed th pokes. The words are the ones the EDM reads, so
+ * the writes are ordered before the job goes to the firmware. They land at
+ * queue time, not when the job runs, and a recovery reset can overwrite them.
+ */
+void sgxfive_kpoke_xfer(struct sgxfive *sgx, u32 *hw);
 
 /* The debugfs side: arm the lines of buf ("clear" drops what is armed). */
 int sgxfive_kpoke_write(struct sgxfive *sgx, char *buf);

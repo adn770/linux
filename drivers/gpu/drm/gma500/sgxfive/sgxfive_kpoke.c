@@ -27,10 +27,13 @@ static_assert(SGXFIVE_RENDER_IMG_RD + SGX_RENDER_RD_SIZE <= SGX_XFER_CMD_SIZE);
 static const char *const sgxfive_kpoke_names[SGXFIVE_KPOKE_SPACES] = {
 	[SGXFIVE_KPOKE_TA] = "ta", [SGXFIVE_KPOKE_RD] = "rd", [SGXFIVE_KPOKE_TQ] = "tq",
 	[SGXFIVE_KPOKE_CTX] = "ctx", [SGXFIVE_KPOKE_RTDS] = "rtds", [SGXFIVE_KPOKE_PB] = "pb",
-	[SGXFIVE_KPOKE_KW] = "kw",
+	[SGXFIVE_KPOKE_KW] = "kw", [SGXFIVE_KPOKE_TH] = "th",
 };
 
-/* A space of the render context's structures, poked as its render is kicked. */
+/*
+ * A space of a context's structures (a render context's, poked as its render
+ * is kicked, or a transfer context's, as its job is submitted).
+ */
 static bool sgxfive_kpoke_at_run(u32 space)
 {
 	return space >= SGXFIVE_KPOKE_CTX && space < SGXFIVE_KPOKE_SPACES;
@@ -53,6 +56,8 @@ u32 sgxfive_kpoke_words(u32 space)
 		return SGX_RENDER_PBDESC_SIZE / 4;
 	case SGXFIVE_KPOKE_KW:
 		return SGXFIVE_KPOKE_KW_WORDS;
+	case SGXFIVE_KPOKE_TH:
+		return SGX_XFER_CTX_SIZE / 4;
 	}
 	return 0;
 }
@@ -229,6 +234,14 @@ void sgxfive_kpoke_run(struct sgxfive *sgx, u32 *const words[SGXFIVE_KPOKE_SPACE
 		n = sgxfive_kpoke_take_run(&sgx->kpokes, words, done);
 	spin_unlock(&sgx->kpoke_lock);
 	sgxfive_kpoke_log(sgx, done, n);
+}
+
+void sgxfive_kpoke_xfer(struct sgxfive *sgx, u32 *hw)
+{
+	u32 *words[SGXFIVE_KPOKE_SPACES] = { [SGXFIVE_KPOKE_TH] = hw };
+
+	sgxfive_kpoke_run(sgx, words);
+	wmb();	/* the context's memory, before the job reaches the firmware */
 }
 
 /*

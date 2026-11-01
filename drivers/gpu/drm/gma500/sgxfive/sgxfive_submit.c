@@ -168,6 +168,19 @@ static int sgxfive_submit_check(struct sgxfive_submit *s, struct sgxfive_ctx *ct
 	return 0;
 }
 
+/*
+ * The armed pokes (debug option) of a transfer job whose command is built:
+ * the tq pokes on the command, unless the job is a dummy, which has no
+ * registers to poke, then the th pokes on its context's HW context, a dummy
+ * too. Both land when the job is queued, not when it runs: see sgxfive_kpoke.h.
+ */
+void sgxfive_submit_xfer_pokes(struct sgxfive_ctx *ctx, u8 *cmd, bool dummy)
+{
+	if (!dummy)
+		sgxfive_kpoke_job(ctx->sgx, cmd, false);
+	sgxfive_kpoke_xfer(ctx->sgx, sgxfive_ctx_cpu(ctx, SGXFIVE_CTX_HW_OFF));
+}
+
 /* Queue one validated job: dependencies, arming, its command, its signals. */
 static int sgxfive_submit_queue(struct sgxfive_submit *s, struct sgxfive_ctx *ctx,
 				struct drm_file *file)
@@ -218,8 +231,8 @@ static int sgxfive_submit_queue(struct sgxfive_submit *s, struct sgxfive_ctx *ct
 					      d->flags & DRM_SGXFIVE_SUBMIT_JOB_TRANSFER_DUMMY,
 					      ctx->mem.addr + SGXFIVE_CTX_FENCE_OFF,
 					      job->seqno);
-		if (!(d->flags & DRM_SGXFIVE_SUBMIT_JOB_TRANSFER_DUMMY))
-			sgxfive_kpoke_job(ctx->sgx, job->hw->cmd, false);
+		sgxfive_submit_xfer_pokes(ctx, job->hw->cmd,
+					  d->flags & DRM_SGXFIVE_SUBMIT_JOB_TRANSFER_DUMMY);
 	}
 	done = &job->base.s_fence->finished;
 	for (i = 0; i < d->sync_ops.count; i++) {

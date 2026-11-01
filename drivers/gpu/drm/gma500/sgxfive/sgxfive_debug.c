@@ -77,6 +77,7 @@ static void sgxfive_debug_disarm(struct sgxfive *sgx)
 	WRITE_ONCE(sgx->render_share_pb, false);
 	spin_lock(&sgx->kpoke_lock);
 	sgx->tdfill.armed = false;
+	sgx->kpokes.n = 0;
 	spin_unlock(&sgx->kpoke_lock);
 }
 
