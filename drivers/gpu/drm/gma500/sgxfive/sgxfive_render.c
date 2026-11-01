@@ -55,29 +55,32 @@ static u32 *rctx(struct sgxfive_ctx *ctx, u32 off)
 	return sgxfive_ctx_cpu(ctx, off);
 }
 
+static u32 *render_bg(struct sgxfive_render *r)
+{
+	return (u32 *)(r->cpu + SGX_RENDER_PARAM_BG - SGX_RENDER_PARAM_PT);
+}
+
 #if IS_ENABLED(CONFIG_DRM_GMA500_SGXFIVE_DEBUG)
 /*
  * The context's structures by kpoke space (sgxfive_kpoke.h): the HW context,
- * the RT data set, the PB descriptor, the kernel's own words and the render
- * details.
+ * the RT data set, the PB descriptor, the kernel's own words, the render
+ * details and the background object.
  */
 static void render_spaces(struct sgxfive_ctx *ctx, u32 *w[SGXFIVE_KPOKE_SPACES])
 {
+	struct sgxfive_render *r = READ_ONCE(ctx->render);
+
 	memset(w, 0, SGXFIVE_KPOKE_SPACES * sizeof(*w));
 	w[SGXFIVE_KPOKE_CTX] = rctx(ctx, SGXFIVE_CTX_HW_OFF);
 	w[SGXFIVE_KPOKE_RTDS] = rctx(ctx, SGXFIVE_RCTX_RTDS_OFF);
 	w[SGXFIVE_KPOKE_PB] = rctx(ctx, SGXFIVE_RCTX_PBDESC_OFF);
 	w[SGXFIVE_KPOKE_KW] = rctx(ctx, SGXFIVE_RCTX_ACCESS_OFF);
 	w[SGXFIVE_KPOKE_RD] = rctx(ctx, SGXFIVE_RCTX_RD_OFF);
+	w[SGXFIVE_KPOKE_BG] = r ? render_bg(r) : NULL;
 }
 #endif
 
 static bool sgxfive_render_share_pb(struct sgxfive_ctx *ctx, struct sgxfive_render *r);
-
-static u32 *render_bg(struct sgxfive_render *r)
-{
-	return (u32 *)(r->cpu + SGX_RENDER_PARAM_BG - SGX_RENDER_PARAM_PT);
-}
 
 static void free_pages_wc(struct page **pages, unsigned int n)
 {

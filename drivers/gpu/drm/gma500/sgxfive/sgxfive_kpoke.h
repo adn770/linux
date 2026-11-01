@@ -16,12 +16,17 @@
  *          primary-PDS update list (SGXFIVE_RCTX_ACCESS_OFF on)
  *   th:N   word N of a transfer context's HW context (SGX_XFER_CTX_SIZE):
  *          its flags, priority, page directory, client CCB and control block
+ *   bg:N   word N of a render's background object (SGX_XFER_BGOBJ_DWORDS):
+ *          the three PDS state words, six zero words, the rectangle's vertices
  *
  * SPACE:N=V sets the word, SPACE:N^=V flips the bits of V in what the kernel
  * built. A poke applies once, to the next job of its kind (ta and rd to the
  * next render submitted, tq to the next transfer submitted that is not a
- * dummy; ctx, rtds, pb and kw to the next render the kernel kicks, after it
- * has written its own words there; th to the next transfer submitted, a
+ * dummy; ctx, rtds, pb, kw and bg to the next render the kernel kicks, after
+ * it has written its own words there (the EDM then writes bg words 0-2 again
+ * at the kick, so a poke there is lost, and a bg poke is lost too when the
+ * render is replayed after a recovery, which rebuilds the object unpoked); th
+ * to the next transfer submitted, a
  * dummy too, in the HW context of the context it is submitted on, where it
  * stays until another poke or the context goes), and is then dropped. debugfs
  * dri/N/sgx/render_words shows the render spaces' words of the newest render
@@ -52,6 +57,7 @@ enum sgxfive_kpoke_space {
 	SGXFIVE_KPOKE_PB,
 	SGXFIVE_KPOKE_KW,
 	SGXFIVE_KPOKE_TH,
+	SGXFIVE_KPOKE_BG,
 	SGXFIVE_KPOKE_SPACES,
 };
 

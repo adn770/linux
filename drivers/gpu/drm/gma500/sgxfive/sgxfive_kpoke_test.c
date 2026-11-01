@@ -309,6 +309,55 @@ static void sgxfive_kpoke_test_run(struct kunit *test)
 }
 
 /*
+ * bg pokes (the background object a render's kick leaves to the ISP, the 17
+ * dwords of a render with no texture layer): parsed with its range, applied at
+ * the kick on the object's words once, spelt as it parses.
+ */
+static void sgxfive_kpoke_test_bg(struct kunit *test)
+{
+	struct sgxfive_kpokes *k = kunit_kzalloc(test, sizeof(*k), GFP_KERNEL);
+	u32 bg[SGX_XFER_BGOBJ_DWORDS] = { }, ctx[17] = { };
+	u32 *words[SGXFIVE_KPOKE_SPACES] = {
+		[SGXFIVE_KPOKE_CTX] = ctx, [SGXFIVE_KPOKE_BG] = bg,
+	};
+	static const char *const lines[] = { "bg:3=0x11", "bg:16^=0xf0", "ctx:1=7", "bg:3^=0x1" };
+	struct sgxfive_kpoke p[ARRAY_SIZE(lines)], done[SGXFIVE_KPOKE_MAX];
+	u8 *img = kunit_kzalloc(test, SGX_XFER_CMD_SIZE, GFP_KERNEL);
+	char line[SGXFIVE_KPOKE_LINE];
+	unsigned int i;
+
+	KUNIT_ASSERT_NOT_NULL(test, k);
+	KUNIT_ASSERT_NOT_NULL(test, img);
+	KUNIT_EXPECT_EQ(test, sgxfive_kpoke_words(SGXFIVE_KPOKE_BG), 17u);
+	KUNIT_EXPECT_EQ(test, sgxfive_kpoke_parse("bg:0=1", &p[0]), 0);
+	KUNIT_EXPECT_EQ(test, p[0].space, (u32)SGXFIVE_KPOKE_BG);
+	KUNIT_EXPECT_EQ(test, sgxfive_kpoke_parse("bg:16=1", &p[0]), 0);
+	KUNIT_EXPECT_EQ(test, sgxfive_kpoke_parse("bg:17=1", &p[0]), -ERANGE);
+	KUNIT_EXPECT_EQ(test, sgxfive_kpoke_parse("bg:x=1", &p[0]), -EINVAL);
+	sgxfive_kpoke_format(&p[0], line, sizeof(line));	/* the last good parse: bg:16 */
+	KUNIT_EXPECT_STREQ(test, line, "bg:16=0x00000001");
+
+	for (i = 0; i < ARRAY_SIZE(lines); i++)
+		KUNIT_ASSERT_EQ(test, sgxfive_kpoke_parse(lines[i], &p[i]), 0);
+	KUNIT_ASSERT_EQ(test, sgxfive_kpoke_arm(k, p, ARRAY_SIZE(p)), 0);
+	bg[16] = 0x0f;
+	KUNIT_EXPECT_EQ(test, sgxfive_kpoke_take_run(k, words, done), 4u);
+	KUNIT_EXPECT_EQ(test, bg[3], 0x11u ^ 1);
+	KUNIT_EXPECT_EQ(test, bg[16], 0x0fu ^ 0xf0);
+	KUNIT_EXPECT_EQ(test, bg[0], 0u);
+	KUNIT_EXPECT_EQ(test, ctx[1], 7u);
+	KUNIT_EXPECT_EQ(test, k->n, 0u);
+	/* With no object given (a context with no render state) the pokes stay armed. */
+	words[SGXFIVE_KPOKE_BG] = NULL;
+	KUNIT_ASSERT_EQ(test, sgxfive_kpoke_arm(k, p, 1), 0);
+	KUNIT_EXPECT_EQ(test, sgxfive_kpoke_take_run(k, words, done), 0u);
+	KUNIT_EXPECT_EQ(test, k->n, 1u);
+	/* A bg poke is not an image poke: a render's image leaves it armed. */
+	KUNIT_EXPECT_EQ(test, sgxfive_kpoke_take(k, img, true, done), 0u);
+	KUNIT_EXPECT_EQ(test, k->n, 1u);
+}
+
+/*
  * th pokes (a transfer context's HW context): applied once, in order, to the
  * words sgxfive_kpoke_xfer() is given, at the next transfer job whatever its
  * kind; a render's kick and the image spaces leave them armed, and a transfer
@@ -951,6 +1000,7 @@ static struct kunit_case sgxfive_kpoke_test_cases[] = {
 	KUNIT_CASE(sgxfive_kpoke_test_transfer),
 	KUNIT_CASE(sgxfive_kpoke_test_render),
 	KUNIT_CASE(sgxfive_kpoke_test_run),
+	KUNIT_CASE(sgxfive_kpoke_test_bg),
 	KUNIT_CASE(sgxfive_kpoke_test_xfer),
 	KUNIT_CASE(sgxfive_kpoke_test_submit_xfer),
 	KUNIT_CASE(sgxfive_kpoke_test_write),

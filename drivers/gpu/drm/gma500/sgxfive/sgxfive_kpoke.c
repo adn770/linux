@@ -28,6 +28,7 @@ static const char *const sgxfive_kpoke_names[SGXFIVE_KPOKE_SPACES] = {
 	[SGXFIVE_KPOKE_TA] = "ta", [SGXFIVE_KPOKE_RD] = "rd", [SGXFIVE_KPOKE_TQ] = "tq",
 	[SGXFIVE_KPOKE_CTX] = "ctx", [SGXFIVE_KPOKE_RTDS] = "rtds", [SGXFIVE_KPOKE_PB] = "pb",
 	[SGXFIVE_KPOKE_KW] = "kw", [SGXFIVE_KPOKE_TH] = "th",
+	[SGXFIVE_KPOKE_BG] = "bg",
 };
 
 /*
@@ -58,6 +59,8 @@ u32 sgxfive_kpoke_words(u32 space)
 		return SGXFIVE_KPOKE_KW_WORDS;
 	case SGXFIVE_KPOKE_TH:
 		return SGX_XFER_CTX_SIZE / 4;
+	case SGXFIVE_KPOKE_BG:
+		return SGX_XFER_BGOBJ_DWORDS;
 	}
 	return 0;
 }
