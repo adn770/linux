@@ -111,6 +111,7 @@ struct sgxfive {
 	spinlock_t kpoke_lock;		/* pokes for the next jobs' commands */
 	struct sgxfive_kpokes kpokes;
 	u32 render_pb_pages;		/* PB of new render contexts */
+	bool vm_low;			/* VM_MAP also takes the first MiB */
 #endif
 };
 
@@ -284,6 +285,7 @@ int sgxfive_alias_firmware(struct sgxfive *sgx, struct sgx_mmu_pd *pd, bool map)
 
 int sgxfive_vm_check_range(const struct drm_sgxfive_heap *heaps, unsigned int n,
 			   u64 addr, u64 size);
+int sgxfive_vm_check_low(u64 addr, u64 size);
 int sgxfive_vm_render_attach(struct sgxfive_vm *vm, unsigned int *slot);
 void sgxfive_vm_render_detach(struct sgxfive_vm *vm, unsigned int slot);
 int sgxfive_vm_map_pages(struct sgxfive_vm *vm, u32 addr, struct page **pages,
@@ -314,6 +316,11 @@ static inline u32 sgxfive_render_pb_pages(struct sgxfive *sgx)
 {
 	return READ_ONCE(sgx->render_pb_pages);
 }
+
+static inline bool sgxfive_vm_low(struct sgxfive *sgx)
+{
+	return READ_ONCE(sgx->vm_low);
+}
 #else
 static inline int sgxfive_debug_load(struct sgxfive *sgx)
 {
@@ -340,6 +347,11 @@ static inline void sgxfive_kpoke_job(struct sgxfive *sgx, u8 *img, bool render)
 static inline u32 sgxfive_render_pb_pages(struct sgxfive *sgx)
 {
 	return 0;
+}
+
+static inline bool sgxfive_vm_low(struct sgxfive *sgx)
+{
+	return false;
 }
 #endif
 

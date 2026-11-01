@@ -1149,4 +1149,5 @@ void sgxfive_debug_init(struct sgxfive *sgx, struct dentry *dir)
 	debugfs_create_x32("render_pb_pages", 0600, dir, &sgx->render_pb_pages);
 	debugfs_create_file("render_param", 0400, dir, sgx, &sgxfive_render_param_fops);
 	debugfs_create_file("render_tadata", 0400, dir, sgx, &sgxfive_render_tadata_fops);
+	debugfs_create_bool("vm_low", 0600, dir, &sgx->vm_low);
 }

@@ -95,6 +95,22 @@ int sgxfive_vm_check_range(const struct drm_sgxfive_heap *heaps, unsigned int n,
 	return -EINVAL;
 }
 
+/*
+ * A VM_MAP range in the first MiB, page 0 excepted: what the PDS's load and
+ * store reach (their 18-bit dword address), opened to VM_MAP by debugfs
+ * vm_low. No heap lies there.
+ */
+#define SGXFIVE_VM_LOW_START	0x1000ull
+#define SGXFIVE_VM_LOW_END	0x100000ull
+
+int sgxfive_vm_check_low(u64 addr, u64 size)
+{
+	if (!size || (addr | size) & (PAGE_SIZE - 1) || addr + size < addr)
+		return -EINVAL;
+	return addr >= SGXFIVE_VM_LOW_START && addr + size <= SGXFIVE_VM_LOW_END ?
+	       0 : -EINVAL;
+}
+
 static void sgxfive_mapping_release(struct sgxfive_deferred *d)
 {
 	struct sgxfive_mapping *m = container_of(d, struct sgxfive_mapping, release);
@@ -289,6 +305,8 @@ int sgxfive_ioctl_vm_map(struct sgxfive *sgx, void *data, struct drm_file *file)
 		return -EINVAL;
 	ret = sgxfive_vm_check_range(sgxfive_rev1_heaps, DRM_SGXFIVE_HEAP_COUNT,
 				     a->device_addr, a->size);
+	if (ret && sgxfive_vm_low(sgx))
+		ret = sgxfive_vm_check_low(a->device_addr, a->size);
 	if (ret)
 		return ret;
 	obj = drm_gem_object_lookup(file, a->handle);

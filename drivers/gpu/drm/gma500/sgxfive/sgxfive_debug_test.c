@@ -4,6 +4,7 @@
  * only with CONFIG_DRM_GMA500_SGXFIVE_DEBUG, like the files. The parameter
  * buffer of new render contexts.
  * The copies of a render context's pages and the context they come from.
+ * The first MiB VM_MAP may take.
  */
 #include <kunit/test.h>
 #include <linux/module.h>
@@ -139,11 +140,26 @@ static void sgxfive_debug_test_render_newest(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, kref_read(&c[1]->ref), 2u);
 }
 
+/* debugfs vm_low: the first MiB, page 0 excepted, opened to VM_MAP. */
+static void sgxfive_debug_test_vm_low(struct kunit *test)
+{
+	KUNIT_EXPECT_EQ(test, sgxfive_vm_check_low(0x1000, 0x1000), 0);
+	KUNIT_EXPECT_EQ(test, sgxfive_vm_check_low(0xff000, 0x1000), 0);
+	KUNIT_EXPECT_EQ(test, sgxfive_vm_check_low(0x1000, 0xff000), 0);
+	/* page 0, past the first MiB, misaligned, empty */
+	KUNIT_EXPECT_EQ(test, sgxfive_vm_check_low(0, 0x1000), -EINVAL);
+	KUNIT_EXPECT_EQ(test, sgxfive_vm_check_low(0xff000, 0x2000), -EINVAL);
+	KUNIT_EXPECT_EQ(test, sgxfive_vm_check_low(0x1800, 0x1000), -EINVAL);
+	KUNIT_EXPECT_EQ(test, sgxfive_vm_check_low(0x1000, 0), -EINVAL);
+	KUNIT_EXPECT_EQ(test, sgxfive_vm_check_low(0xfffff000, 0x100002000ull), -EINVAL);
+}
+
 static struct kunit_case sgxfive_debug_test_cases[] = {
 	KUNIT_CASE(sgxfive_debug_test_pb_small),
 	KUNIT_CASE(sgxfive_debug_test_pb_pages),
 	KUNIT_CASE(sgxfive_debug_test_pages_copy),
 	KUNIT_CASE(sgxfive_debug_test_render_newest),
+	KUNIT_CASE(sgxfive_debug_test_vm_low),
 	{}
 };
 
