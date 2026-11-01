@@ -31,13 +31,13 @@
  * page: U (update target), F (status target) and, from SCR_SYNC_READ, the
  * read- and write-complete counters of a destination sync. For a render
  * there are also a page of PDS code at the PDS heap base, a page of USE code
- * at the pixel-shader code base, the background object, and a destination
- * of two pages plus a guard page.
+ * at the pixel-shader code base, the background object, a destination of
+ * two pages plus a guard page and, in the texture heap, a copy's source.
  */
 enum { SCR_U = 0, SCR_F = 1, SCR_SYNC_READ = 8, SCR_SYNC_WRITE = 9 };
 enum {
 	XB_CCB, XB_CCB_CTL, XB_CTX, XB_SCRATCH, XB_PDS, XB_USE, XB_BG, XB_DST,
-	XB_COUNT
+	XB_SRC, XB_COUNT
 };
 
 /* By heap and offset, so the area follows the layout. */
@@ -52,8 +52,9 @@ static const struct {
 	[XB_SCRATCH] = { HEAP_KERNEL_DATA, 0x122000, 0x40 },
 	[XB_PDS] = { HEAP_PDSPIXEL, 0, 0x1000 },	/* the PDS code base */
 	[XB_USE] = { HEAP_PIXELSHADER, 0, 0x1000 },	/* the USE code base */
-	[XB_BG] = { HEAP_KERNEL_DATA, 0x130000, 4 * SGX_XFER_BGOBJ_DWORDS },
+	[XB_BG] = { HEAP_KERNEL_DATA, 0x130000, 4 * SGX_XFER_BGOBJ1_DWORDS },
 	[XB_DST] = { HEAP_KERNEL_DATA, 0x200000, 0x3000 },
+	[XB_SRC] = { HEAP_TEXTURE, 0x300000, 0x2000 },
 };
 
 static_assert(XB_COUNT <= SGXFIVE_XBUFS);
@@ -364,6 +365,17 @@ static const struct sgxfive_tq_slot sgxfive_fill_place[SGX_FW_TQ_MAX] = {
 	[SGX_FW_TQ_USE_EOR] = { XB_USE, 0x60 },
 };
 
+/* A copy's PDS primary is larger than a fill's: everything after it moves. */
+static const struct sgxfive_tq_slot sgxfive_copy_place[SGX_FW_TQ_MAX] = {
+	[SGX_FW_TQ_PDS_PRIM_1SRC] = { XB_PDS, 0x00 },
+	[SGX_FW_TQ_PDS_SEC] = { XB_PDS, 0x40 },
+	[SGX_FW_TQ_PDS_PIXEVENT] = { XB_PDS, 0x60 },
+	[SGX_FW_TQ_USE_COPY] = { XB_USE, 0x00 },
+	[SGX_FW_TQ_USE_SEC] = { XB_USE, 0x10 },
+	[SGX_FW_TQ_USE_EOT] = { XB_USE, 0x20 },
+	[SGX_FW_TQ_USE_EOR] = { XB_USE, 0x60 },
+};
+
 /* Place one operation's templates; progs[] gets their CPU addresses. */
 static int sgxfive_tq_place(struct sgxfive *sgx,
 			    const struct sgxfive_tq_slot *place, u32 set,
@@ -481,12 +493,13 @@ static int sgxfive_tq_run(struct sgxfive *sgx, struct drm_printer *p,
 }
 
 /*
- * Check every dword of the destination area (three pages): the colour
- * inside the rectangle, the sentinel outside it.
+ * Check every dword of the destination area (three pages): inside the
+ * rectangle the colour, or with a source the texel at the same offset from
+ * the source's first; the sentinel outside it.
  */
 static void sgxfive_check_dst(struct drm_printer *p, const u32 *dst, u32 stride,
-			      const struct sgx_xfer_rect *r, u32 colour,
-			      int *bad)
+			      const struct sgx_xfer_rect *r, const u32 *src,
+			      u32 src_stride, u32 colour, int *bad)
 {
 	unsigned int i, wrong = 0, first_bad = ~0u;
 
@@ -494,7 +507,8 @@ static void sgxfive_check_dst(struct drm_printer *p, const u32 *dst, u32 stride,
 		u32 x = i % (stride / 4), y = i / (stride / 4), want = FILL_SENTINEL;
 
 		if (x >= r->x0 && x < r->x1 && y >= r->y0 && y < r->y1)
-			want = colour;
+			want = src ? src[(y - r->y0) * (src_stride / 4) + x - r->x0] :
+				     colour;
 		if (READ_ONCE(dst[i]) != want) {
 			wrong++;
 			if (first_bad == ~0u)
@@ -554,7 +568,8 @@ static int sgxfive_xfer_fill(struct sgxfive *sgx, struct drm_printer *p,
 	if (ret)
 		return ret;
 	rmb(); /* fresh reads of what the GPU wrote */
-	sgxfive_check_dst(p, t->cpu, fc->stride, &f.rect, fc->colour, &bad);
+	sgxfive_check_dst(p, t->cpu, fc->stride, &f.rect, NULL, 0, fc->colour,
+			  &bad);
 	drm_printf(p, "%s\n", bad ? "MISMATCHES" : "solid fill correct");
 	return bad ? -EIO : 0;
 }
@@ -570,6 +585,107 @@ static int sgxfive_xfer_fills(struct sgxfive *sgx, struct drm_printer *p)
 
 	for (i = 0; i < ARRAY_SIZE(sgxfive_fill_cases); i++) {
 		r = sgxfive_xfer_fill(sgx, p, &sgxfive_fill_cases[i], &t);
+		if (r && !ret)
+			ret = r;
+		if (r && r != -EIO)
+			break;
+	}
+	return ret;
+}
+
+/*
+ * Copy cases: a width x height rectangle whose first texel is at (sx, sy) of
+ * the source area, to (x, y) of the destination area. Strides may be padded.
+ */
+static const struct sgxfive_copy_case {
+	const char *name;
+	u32 sx, sy, src_stride, x, y, w, h, dst_stride;
+} sgxfive_copy_cases[] = {
+	{ "whole 64x32", 0, 0, 256, 0, 0, 64, 32, 256 },
+	{ "32x16 from (5,3) stride 320 to (8,4) stride 288",
+	  5, 3, 320, 8, 4, 32, 16, 288 },
+	{ "33x16 across tiles", 0, 0, 256, 20, 10, 33, 16, 256 },
+};
+
+#define COPY_SRC_PAGES	2
+
+/* A copy of one case, from a patterned source area. */
+static int sgxfive_xfer_copy(struct sgxfive *sgx, struct drm_printer *p,
+			     const struct sgxfive_copy_case *cc)
+{
+	struct sgx_fw_layout *l = &sgx->layout;
+	const struct sgxfive_fill_target t = {
+		.cpu = xb_va(sgx, XB_DST), .addr = xb_addr(sgx, XB_DST),
+	};
+	u32 *src = xb_va(sgx, XB_SRC);
+	u32 src_first = cc->sy * (cc->src_stride / 4) + cc->sx;
+	const struct sgx_fw_tq_copy tc = {
+		.src = xb_addr(sgx, XB_SRC) + 4 * src_first,
+		.dst = t.addr, .width = cc->w, .height = cc->h,
+		.src_stride = cc->src_stride, .dst_stride = cc->dst_stride,
+		.x = cc->x, .y = cc->y,
+	};
+	const struct sgx_fw_tq *pri = sgx_fw_tq(&sgx->fw, SGX_FW_TQ_PDS_PRIM_1SRC);
+	const struct sgx_fw_tq *sec = sgx_fw_tq(&sgx->fw, SGX_FW_TQ_PDS_SEC);
+	const struct sgx_xfer_rect whole = { 0, 0, cc->w, cc->h };
+	struct sgx_xfer_fill f = {
+		.rect = { cc->x, cc->y, cc->x + cc->w, cc->y + cc->h },
+		.layers = 1,
+	};
+	u32 params[SGX_FW_TQ_NUM_PARAMS];
+	u8 *progs[SGX_FW_TQ_MAX];
+	unsigned int i;
+	int ret, bad = 0;
+
+	if (!sgx->live)
+		return -ENODEV;
+	if (!pri || !sec) {
+		drm_printf(p, "the firmware file has no copy templates (v3)\n");
+		return -ENOENT;
+	}
+	ret = sgxfive_tq_place(sgx, sgxfive_copy_place, SGX_FW_TQ_COPY_SET, progs);
+	if (!ret)
+		ret = sgx_fw_tq_copy_params(&tc, params);
+	if (!ret)
+		ret = sgx_fw_tq_build(&sgx->fw, l, params, progs);
+	if (ret) {
+		drm_printf(p, "building the copy programs failed: %d\n", ret);
+		return ret;
+	}
+	/* The texture is exactly the copied rectangle: coordinates 0..1. */
+	sgx_xfer_bgobj_copy(xb_va(sgx, XB_BG), xb_addr(sgx, XB_PDS),
+			    l->tq_addr[SGX_FW_TQ_PDS_PRIM_1SRC], pri->pds_data,
+			    l->tq_addr[SGX_FW_TQ_PDS_SEC], sec->pds_data, &f.rect,
+			    &whole, cc->w, cc->h);
+	/* Every byte varies: a swizzle or a skew shows. */
+	for (i = 0; i < COPY_SRC_PAGES * PAGE_SIZE / 4; i++) {
+		u32 x = i % (cc->src_stride / 4), y = i / (cc->src_stride / 4);
+
+		WRITE_ONCE(src[i], 0xa5000000 | (y & 0xff) << 16 |
+				   (x & 0xff) << 8 | ((x ^ y) & 0xff));
+	}
+	for (i = 0; i < 3 * PAGE_SIZE / 4; i++)
+		WRITE_ONCE(t.cpu[i], FILL_SENTINEL);
+
+	drm_printf(p, "copy %s: ", cc->name);
+	ret = sgxfive_tq_run(sgx, p, &f, params, &t, &bad);
+	if (ret)
+		return ret;
+	rmb(); /* fresh reads of what the GPU wrote */
+	sgxfive_check_dst(p, t.cpu, cc->dst_stride, &f.rect, src + src_first,
+			  cc->src_stride, 0, &bad);
+	drm_printf(p, "%s\n", bad ? "MISMATCHES" : "copy correct");
+	return bad ? -EIO : 0;
+}
+
+/* Every copy case; a queue failure stops the run. */
+static int sgxfive_xfer_copies(struct sgxfive *sgx, struct drm_printer *p)
+{
+	unsigned int i;
+	int ret = 0, r;
+
+	for (i = 0; i < ARRAY_SIZE(sgxfive_copy_cases); i++) {
+		r = sgxfive_xfer_copy(sgx, p, &sgxfive_copy_cases[i]);
 		if (r && !ret)
 			ret = r;
 		if (r && r != -EIO)
@@ -612,6 +728,12 @@ static int sgxfive_xfer_fill_show(struct seq_file *m, void *unused)
 }
 DEFINE_SHOW_ATTRIBUTE(sgxfive_xfer_fill);
 
+static int sgxfive_xfer_copy_show(struct seq_file *m, void *unused)
+{
+	return sgxfive_run(m, sgxfive_xfer_copies);
+}
+DEFINE_SHOW_ATTRIBUTE(sgxfive_xfer_copy);
+
 void sgxfive_debug_init(struct sgxfive *sgx, struct dentry *dir)
 {
 	debugfs_create_file("miscinfo", 0400, dir, sgx, &sgxfive_miscinfo_fops);
@@ -620,4 +742,5 @@ void sgxfive_debug_init(struct sgxfive *sgx, struct dentry *dir)
 			    &sgxfive_xfer_dummy_fops);
 	debugfs_create_file("xfer_sync", 0400, dir, sgx, &sgxfive_xfer_sync_fops);
 	debugfs_create_file("xfer_fill", 0400, dir, sgx, &sgxfive_xfer_fill_fops);
+	debugfs_create_file("xfer_copy", 0400, dir, sgx, &sgxfive_xfer_copy_fops);
 }

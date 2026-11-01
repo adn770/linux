@@ -5,8 +5,11 @@
  * sync test, the switch to the context's page directory, the memory updates,
  * the status writes, the SW_EVENT interrupt and the client CCB advance. A
  * fill adds a render: a background object whose PDS programs come from the
- * firmware file's templates, and the command's register block.
+ * firmware file's templates, and the command's register block. A copy's
+ * object also carries one texture layer: the source's coordinates.
  */
+#include <linux/math64.h>
+
 #include "sgx_xfer.h"
 
 static void put32(u8 *p, unsigned int off, u32 v)
@@ -117,9 +120,66 @@ void sgx_xfer_bgobj(u32 bg[SGX_XFER_BGOBJ_DWORDS], u32 pds_base, u32 pri,
 }
 
 /*
- * A fill's command: the register block, the size, one status write (the
- * fence) and the fence count. The fixed words are those the firmware file's
- * TQ_CMD list holds for a fill; the debug check compares them. Returns the
+ * x / n as an IEEE single, rounded to nearest: a normalised texture
+ * coordinate. 0 for x = 0, 1.0 for x >= n. Sources are at most 4096 pixels
+ * a side, so the scaled quotient fits 64 bits.
+ */
+static u32 coord(u32 x, u32 n)
+{
+	unsigned int k = 1;
+	u32 rem;
+	u64 q;
+
+	if (!x || !n)
+		return 0;
+	if (x >= n)
+		return 0x3f800000;
+	while ((u64)x << k < n)		/* x / n in [2^-k, 2^-(k-1)) */
+		k++;
+	q = div_u64_rem((u64)x << (k + 23), n, &rem);
+	if (2 * (u64)rem >= n)
+		q++;
+	if (q >> 24) {			/* rounded up to the next power of 2 */
+		q >>= 1;
+		k--;
+	}
+	return (127 - k) << 23 | ((u32)q & 0x7fffff);
+}
+
+/*
+ * The background object of a one-layer copy: the PDS state (one primary
+ * attribute: the texel), the source rectangle's texture coordinates per
+ * vertex (U0 V0, U1 V0, U0 V1, normalised to the source surface), the layer
+ * format word (two dwords per layer, in two fields), then the destination
+ * rectangle's vertices.
+ */
+void sgx_xfer_bgobj_copy(u32 bg[SGX_XFER_BGOBJ1_DWORDS], u32 pds_base,
+			 u32 pri, u32 pri_data, u32 sec, u32 sec_data,
+			 const struct sgx_xfer_rect *dst,
+			 const struct sgx_xfer_rect *src, u32 src_w, u32 src_h)
+{
+	u32 u0 = coord(src->x0, src_w), u1 = coord(src->x1, src_w);
+	u32 v0 = coord(src->y0, src_h), v1 = coord(src->y1, src_h);
+	unsigned int i;
+
+	for (i = 0; i < SGX_XFER_BGOBJ1_DWORDS; i++)
+		bg[i] = 0;
+	put_pds_state(bg, pds_base, pri, pri_data, sec, sec_data, 1);
+	bg[3] = u0;
+	bg[4] = v0;
+	bg[5] = u1;
+	bg[6] = v0;
+	bg[7] = u0;
+	bg[8] = v1;
+	bg[10] = 2 << 8 | 2;
+	put_vertices(&bg[15], dst);
+}
+
+/*
+ * A fill's or a copy's command: the register block, the size, one status
+ * write (the fence) and the fence count. They differ only in the layer count
+ * of the background object's tag. The fixed words are those the firmware
+ * file's TQ_CMD list holds; the debug checks compare them. Returns the
  * command's size in the CCB.
  */
 u32 sgx_xfer_fill_cmd(u8 *cmd, const struct sgx_xfer_fill *f)
@@ -130,7 +190,8 @@ u32 sgx_xfer_fill_cmd(u8 *cmd, const struct sgx_xfer_fill *f)
 
 	for (i = 0; i < SGX_XFER_CMD_SIZE; i++)
 		cmd[i] = 0;
-	put32(cmd, SGX_XFER_BG_TAG, (f->bg - f->req_base) >> 4);
+	put32(cmd, SGX_XFER_BG_TAG,
+	      (f->bg - f->req_base) >> 4 | (f->layers & 0x3f) << 25);
 	put32(cmd, SGX_XFER_BG_OBJ, 0x200);		/* background enabled */
 	put32(cmd, SGX_XFER_BG_DEPTH, 0x3f800000);	/* 1.0f */
 	put32(cmd, SGX_XFER_RENDER, 3);			/* fast scale */

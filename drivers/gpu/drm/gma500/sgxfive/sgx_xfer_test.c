@@ -205,6 +205,89 @@ static void sgx_xfer_test_render_box(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, dw(cmd, SGX_XFER_BOX_MAX), 2u | 3u << 16);
 }
 
+static const struct sgx_xfer_rect rect64x32 = { 0, 0, 64, 32 };
+
+#define F_ONE		0x3f800000		/* 1.0f */
+
+/*
+ * A whole 64 x 32 copy: PDS state with one primary attribute, coordinates
+ * 0 and 1, the layer format word, the destination's vertices.
+ */
+static void sgx_xfer_test_bgobj_copy(struct kunit *test)
+{
+	static const struct sgx_xfer_rect src = { 0, 0, 64, 32 };
+	u32 bg[SGX_XFER_BGOBJ1_DWORDS + 1];
+	unsigned int i;
+
+	memset(bg, 0xa5, sizeof(bg));
+	bg[SGX_XFER_BGOBJ1_DWORDS] = 0;		/* bits() reads one dword ahead */
+	sgx_xfer_bgobj_copy(bg, 0x2e000000, 0x2e000000, 0x30, 0x2e000020, 0x10,
+			    &rect64x32, &src, 64, 32);
+	KUNIT_EXPECT_EQ(test, bg[0] & 0x03ffffff, 0x20u >> 4);	/* secondary */
+	KUNIT_EXPECT_EQ(test, bg[0] >> 26, 0x10u >> 4);
+	KUNIT_EXPECT_EQ(test, bg[1] & 0xffff, 1u);		/* one attribute */
+	KUNIT_EXPECT_EQ(test, bg[1] >> 16, 3u);
+	KUNIT_EXPECT_EQ(test, bg[2] & 0x03ffffff, 0u);		/* primary */
+	KUNIT_EXPECT_EQ(test, bg[2] >> 26, 0x30u >> 4);
+	KUNIT_EXPECT_EQ(test, bg[3], 0u);		/* U0 V0 */
+	KUNIT_EXPECT_EQ(test, bg[4], 0u);
+	KUNIT_EXPECT_EQ(test, bg[5], F_ONE);		/* U1 V0 */
+	KUNIT_EXPECT_EQ(test, bg[6], 0u);
+	KUNIT_EXPECT_EQ(test, bg[7], 0u);		/* U0 V1 */
+	KUNIT_EXPECT_EQ(test, bg[8], F_ONE);
+	KUNIT_EXPECT_EQ(test, bg[9], 0u);
+	KUNIT_EXPECT_EQ(test, bg[10] & 0xff, 2u);	/* dwords per layer */
+	KUNIT_EXPECT_EQ(test, bg[10] >> 8, 2u);
+	for (i = 11; i < 15; i++)
+		KUNIT_EXPECT_EQ_MSG(test, bg[i], 0u, "dword %u", i);
+	expect_vertices(test, &bg[15], &rect64x32);
+	KUNIT_EXPECT_EQ(test, bg[22], 0u);
+}
+
+/*
+ * The source rectangle (8,4)-(40,20) of a 48 x 32 surface: the order of the
+ * coordinates (U0 V0, U1 V0, U0 V1) and IEEE singles rounded to nearest.
+ */
+static void sgx_xfer_test_bgobj_copy_coords(struct kunit *test)
+{
+	static const u32 want[6] = {
+		0x3e2aaaab, 0x3e000000,		/* 8/48 = 1/6, 4/32 = 1/8 */
+		0x3f555555, 0x3e000000,		/* 40/48 = 5/6, 4/32 */
+		0x3e2aaaab, 0x3f200000,		/* 8/48, 20/32 = 0.625 */
+	};
+	static const struct sgx_xfer_rect src = { 8, 4, 40, 20 };
+	u32 bg[SGX_XFER_BGOBJ1_DWORDS];
+	unsigned int i;
+
+	sgx_xfer_bgobj_copy(bg, 0x2e000000, 0x2e000000, 0x30, 0x2e000020, 0x10,
+			    &rect64x32, &src, 48, 32);
+	for (i = 0; i < 6; i++)
+		KUNIT_EXPECT_EQ_MSG(test, bg[3 + i], want[i], "coord %u", i);
+}
+
+/* A copy's command differs from the fill only in the tag's layer count. */
+static void sgx_xfer_test_copy_cmd(struct kunit *test)
+{
+	struct sgx_xfer_fill f = {
+		.rect = { 0, 0, 64, 32 }, .bg = 0x32130000, .req_base = 0x32100000,
+		.pixev_exec = 0x2e000040, .pds_exec_base = 0x2e000000,
+		.status_addr = 0x32122004, .fence_id = 7, .layers = 1,
+	};
+	u8 *cmd = kunit_kzalloc(test, SGX_XFER_CMD_SIZE, GFP_KERNEL);
+	u8 *fill = kunit_kzalloc(test, SGX_XFER_CMD_SIZE, GFP_KERNEL);
+	unsigned int off;
+
+	KUNIT_ASSERT_NOT_NULL(test, cmd);
+	KUNIT_ASSERT_NOT_NULL(test, fill);
+	sgx_xfer_fill_cmd(cmd, &f);
+	KUNIT_EXPECT_EQ(test, dw(cmd, SGX_XFER_BG_TAG), 0x30000u >> 4 | 1u << 25);
+	f.layers = 0;
+	sgx_xfer_fill_cmd(fill, &f);
+	for (off = 4; off < SGX_XFER_CMD_SIZE; off += 4)
+		KUNIT_EXPECT_EQ_MSG(test, dw(cmd, off), dw(fill, off), "offset %#x",
+				    off);
+}
+
 static struct kunit_case sgx_xfer_test_cases[] = {
 	KUNIT_CASE(sgx_xfer_test_dummy_cmd),
 	KUNIT_CASE(sgx_xfer_test_dst_sync),
@@ -212,6 +295,9 @@ static struct kunit_case sgx_xfer_test_cases[] = {
 	KUNIT_CASE(sgx_xfer_test_bgobj),
 	KUNIT_CASE(sgx_xfer_test_fill_cmd),
 	KUNIT_CASE(sgx_xfer_test_render_box),
+	KUNIT_CASE(sgx_xfer_test_bgobj_copy),
+	KUNIT_CASE(sgx_xfer_test_bgobj_copy_coords),
+	KUNIT_CASE(sgx_xfer_test_copy_cmd),
 	{}
 };
 

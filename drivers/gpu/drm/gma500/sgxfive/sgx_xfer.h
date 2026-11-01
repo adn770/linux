@@ -71,8 +71,9 @@ struct sgx_xfer_rect {
 };
 
 #define SGX_XFER_BGOBJ_DWORDS	17	/* the background object, no layers */
+#define SGX_XFER_BGOBJ1_DWORDS	23	/* ... with one texture layer (a copy) */
 
-/* What a fill's command needs besides its programs. */
+/* What a fill's or a copy's command needs besides its programs. */
 struct sgx_xfer_fill {
 	struct sgx_xfer_rect rect;
 	u32 bg;			/* background object address */
@@ -81,11 +82,16 @@ struct sgx_xfer_fill {
 	u32 pds_exec_base;	/* the PDS code base */
 	u32 status_addr;	/* the fence word */
 	u32 fence_id;		/* written there as fence_id + 1 */
+	u32 layers;		/* texture layers in the background object */
 };
 
 void sgx_xfer_bgobj(u32 bg[SGX_XFER_BGOBJ_DWORDS], u32 pds_base, u32 pri,
 		    u32 pri_data, u32 sec, u32 sec_data,
 		    const struct sgx_xfer_rect *r);
+void sgx_xfer_bgobj_copy(u32 bg[SGX_XFER_BGOBJ1_DWORDS], u32 pds_base,
+			 u32 pri, u32 pri_data, u32 sec, u32 sec_data,
+			 const struct sgx_xfer_rect *dst,
+			 const struct sgx_xfer_rect *src, u32 src_w, u32 src_h);
 u32 sgx_xfer_fill_cmd(u8 *cmd, const struct sgx_xfer_fill *f);
 
 u32 sgx_xfer_dummy(u8 *cmd, u32 status_addr, u32 status_val, u32 update_addr,
