@@ -22,6 +22,7 @@
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/vmalloc.h>
+#include <linux/wait.h>
 #include <asm/set_memory.h>
 
 #include <drm/drm_file.h>
@@ -42,15 +43,6 @@
  * below revision 4 (FIX_HW_BRN_SAMPLE_CACHE): every heap below 0x3e000000 and
  * textures in a heap of their own (resgx545's doc/specs/boot_sequence.md (d)).
  */
-enum {
-	HEAP_KERNEL_CODE = 2,
-	HEAP_KERNEL_DATA = 3,
-	HEAP_PIXELSHADER = 4,
-	HEAP_VERTEXSHADER = 5,
-	HEAP_PDSPIXEL = 6,
-	HEAP_TEXTURE = 14,	/* SGX_TEXTURE_HEAP_ID */
-};
-
 static const u32 sgx_heap_base[] = {
 	[HEAP_KERNEL_CODE] = 0x30000000,
 	[HEAP_KERNEL_DATA] = 0x32000000,
@@ -89,7 +81,7 @@ static_assert(TA3D_CTL_DWORDS == SGXFIVE_TA3D_CTL_DWORDS);
 #define SGX_EVENT_SW		0x00004000
 #define SGX_EVENT_MASTER	0x80000000
 
-static void sgxfive_unmap(struct sgxfive *sgx, struct sgxfive_buf *b)
+void sgxfive_unmap(struct sgxfive *sgx, struct sgxfive_buf *b)
 {
 	unsigned int i;
 
@@ -116,6 +108,7 @@ static void sgxfive_unload(struct sgxfive *sgx)
 
 	sgxfive_stop(sgx);
 
+	sgxfive_debug_unload(sgx);
 	for (id = 0; id < SGX_FW_MAX_BUFFERS; id++)
 		sgxfive_unmap(sgx, &sgx->buf[id]);
 	if (sgx->pd)
@@ -128,8 +121,8 @@ static void sgxfive_unload(struct sgxfive *sgx)
 }
 
 /* Allocate a zeroed buffer write-combined, map it for the CPU and in pd. */
-static int sgxfive_map_pd(struct sgxfive *sgx, struct sgx_mmu_pd *pd,
-			  struct sgxfive_buf *b, u32 addr, u32 size)
+int sgxfive_map_pd(struct sgxfive *sgx, struct sgx_mmu_pd *pd,
+		   struct sgxfive_buf *b, u32 addr, u32 size)
 {
 	unsigned int i;
 	int ret;
@@ -208,6 +201,9 @@ static int sgxfive_load(struct sgxfive *sgx)
 			goto err;
 		bufs[fb->id] = sgx->buf[fb->id].va;
 	}
+	ret = sgxfive_debug_load(sgx);
+	if (ret)
+		goto err;
 	ret = sgx_fw_build(&sgx->fw, l, bufs);
 	if (ret)
 		goto err;
@@ -582,6 +578,7 @@ bool sgxfive_irq(struct sgxfive *sgx, u32 stat_1, u32 stat_2)
 	/* SGX_ISRHandler: acknowledge only the EDM's software event. */
 	if (stat_1 & SGX_EVENT_SW) {
 		atomic_inc(&sgx->sw_events);
+		wake_up_all(&sgx->event_wq);
 		sgx_wr(sgx, SGX_EVENT_HOST_CLEAR, SGX_EVENT_SW | SGX_EVENT_MASTER);
 		sgx_wr(sgx, SGX_EVENT_HOST_CLEAR2, 0);
 		(void)sgx_rd(sgx, SGX_EVENT_HOST_CLEAR2);
@@ -692,6 +689,7 @@ struct sgxfive *sgxfive_create(const struct sgxfive_host *host)
 	sgx->regs = host->regs;
 	sgx->reset_pd = host->reset_pd;
 	mutex_init(&sgx->lock);
+	init_waitqueue_head(&sgx->event_wq);
 	return sgx;
 }
 
