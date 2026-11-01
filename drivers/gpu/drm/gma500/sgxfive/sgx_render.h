@@ -67,7 +67,7 @@
 #define SGX_RENDER_TA_FIRST	0x01
 #define SGX_RENDER_TA_LAST	0x02
 #define SGX_RENDER_TA_INVAL	0x70	/* USE, PDS and data caches */
-#define SGX_RENDER_SCENE	0x400	/* render flag: render the scene */
+#define SGX_RENDER_SCENE	0x400	/* render flag: render the scene, counted */
 #define SGX_RENDER_TEPSG_END	0x400000	/* the scene's last kick */
 
 /* The HW render context. */
@@ -267,6 +267,7 @@ u32 sgx_render_cmd(u8 *cmd, const struct sgx_render_addrs *a,
 void sgx_render_bgobj(u32 *bg, const struct drm_sgxfive_render_cmd *c);
 void sgx_render_scene_kick(struct sgx_render_kick *k, u32 seqno, u32 status_val,
 			   bool first, bool last);
+u32 sgx_render_executed(const u8 *cmd);
 int sgx_render_check_size(const struct drm_sgxfive_render_cmd *c, u32 max_w,
 			  u32 max_h);
 

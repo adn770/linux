@@ -15,6 +15,11 @@
 #include "sgx_render.h"
 #include "sgx_xfer.h"
 
+static u32 get32(const u8 *p, unsigned int off)
+{
+	return p[off] | p[off + 1] << 8 | p[off + 2] << 16 | (u32)p[off + 3] << 24;
+}
+
 static void put32(u8 *p, unsigned int off, u32 v)
 {
 	p[off] = v;
@@ -325,6 +330,20 @@ void sgx_render_scene_kick(struct sgx_render_kick *k, u32 seqno, u32 status_val,
 	k->frame = seqno;
 	k->ta_val = status_val;
 	k->td_val = status_val;
+}
+
+/*
+ * What the kick of TA command cmd adds to its RT data set's executed count:
+ * one when the TA finishes a kick that is not the scene's last, one when the
+ * render of a last kick completes with render flag 0x400. The kernel's
+ * pending count, which the set's cleanup waits for the executed count to
+ * reach, grows by the same.
+ */
+u32 sgx_render_executed(const u8 *cmd)
+{
+	if (!(get32(cmd, SGX_RENDER_CMD_FLAGS) & SGX_RENDER_TA_LAST))
+		return 1;
+	return get32(cmd, SGX_RENDER_CMD_RFLAGS) & SGX_RENDER_SCENE ? 1 : 0;
 }
 
 /* The background object: the user's PDS words over the whole render target, zero layers. */

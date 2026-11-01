@@ -738,6 +738,45 @@ static void sgx_render_test_scene_kick(struct kunit *test)
 }
 
 /*
+ * What a kick adds to the RT data set's executed count, read from its TA
+ * command: a kick that is not the scene's last adds one when the TA
+ * finishes, and a last kick adds one when its render, with render flag
+ * 0x400, completes. A scene of n kicks so adds n, one per job: the pending
+ * count the cleanup waits for must grow by as much.
+ */
+static void sgx_render_test_executed(struct kunit *test)
+{
+	static const struct { bool first, last; } kinds[] = {
+		{ true, true }, { true, false }, { false, true }, { false, false },
+	};
+	u8 *cmd = kunit_kzalloc(test, SGX_RENDER_CMD_STRIDE, GFP_KERNEL);
+	struct sgx_render_kick k;
+	unsigned int i, scene;
+
+	KUNIT_ASSERT_NOT_NULL(test, cmd);
+	for (i = 0; i < ARRAY_SIZE(kinds); i++) {
+		sgx_render_scene_kick(&k, 1, 1, kinds[i].first, kinds[i].last);
+		sgx_render_cmd(cmd, &addrs, &cmd64, &k);
+		KUNIT_EXPECT_EQ(test, sgx_render_executed(cmd), 1u);
+	}
+
+	/* A scene of three kicks: geometry, geometry, then the render. */
+	scene = 0;
+	for (i = 0; i < 3; i++) {
+		sgx_render_scene_kick(&k, 1, 1, i == 0, i == 2);
+		sgx_render_cmd(cmd, &addrs, &cmd64, &k);
+		scene += sgx_render_executed(cmd);
+	}
+	KUNIT_EXPECT_EQ(test, scene, 3u);
+
+	/* A last kick whose render lacks flag 0x400 is not counted. */
+	sgx_render_scene_kick(&k, 1, 1, true, true);
+	k.render_flags = 0;
+	sgx_render_cmd(cmd, &addrs, &cmd64, &k);
+	KUNIT_EXPECT_EQ(test, sgx_render_executed(cmd), 0u);
+}
+
+/*
  * The background object: the user's three PDS words, then the whole render
  * target as the transfer queue's zero-layer rectangle (sgx_xfer.c's vertex
  * packing).
@@ -884,6 +923,7 @@ static struct kunit_case sgx_render_test_cases[] = {
 	KUNIT_CASE(sgx_render_test_cmd),
 	KUNIT_CASE(sgx_render_test_cmd_user),
 	KUNIT_CASE(sgx_render_test_scene_kick),
+	KUNIT_CASE(sgx_render_test_executed),
 	KUNIT_CASE(sgx_render_test_bgobj),
 	KUNIT_CASE(sgx_render_test_check_size),
 	KUNIT_CASE(sgx_render_test_check_max_size),
