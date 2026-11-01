@@ -58,6 +58,7 @@ gma500_gfx-y += sgxfive/sgxfive_vm.o
 gma500_gfx-$(CONFIG_DRM_GMA500_SGXFIVE_DEBUG) += sgxfive/sgxfive_regdump.o
 gma500_gfx-$(CONFIG_DRM_GMA500_SGXFIVE_DEBUG) += sgxfive/sgxfive_debug.o
 gma500_gfx-$(CONFIG_DRM_GMA500_SGXFIVE_DEBUG) += sgxfive/sgxfive_kpoke.o
+gma500_gfx-$(CONFIG_DRM_GMA500_SGXFIVE_DEBUG) += sgxfive/sgxfive_owntask.o
 
 gma500_gfx-$(CONFIG_DRM_GMA500_KUNIT_TEST) += sgxfive/sgx_fw_test.o
 gma500_gfx-$(CONFIG_DRM_GMA500_KUNIT_TEST) += sgxfive/sgx_mmu_test.o
@@ -73,6 +74,7 @@ ifdef CONFIG_DRM_GMA500_SGXFIVE_DEBUG
 gma500_gfx-$(CONFIG_DRM_GMA500_KUNIT_TEST) += sgxfive/sgxfive_regdump_test.o
 gma500_gfx-$(CONFIG_DRM_GMA500_KUNIT_TEST) += sgxfive/sgxfive_kpoke_test.o
 gma500_gfx-$(CONFIG_DRM_GMA500_KUNIT_TEST) += sgxfive/sgxfive_debug_test.o
+gma500_gfx-$(CONFIG_DRM_GMA500_KUNIT_TEST) += sgxfive/sgxfive_owntask_test.o
 endif
 
 gma500_gfx-$(CONFIG_DRM_FBDEV_EMULATION) +=  fbdev.o
