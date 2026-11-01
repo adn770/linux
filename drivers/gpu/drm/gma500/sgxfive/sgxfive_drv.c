@@ -99,25 +99,44 @@ int sgxfive_query_heaps(struct drm_sgxfive_dev_query_args *a)
 	return sgxfive_query_out(a, &info, sizeof(info));
 }
 
+/*
+ * GPU_INFO: the registers read at probe and, once the firmware has answered
+ * the boot's misc-info request, its own values. Without a lock: a reset
+ * clears the flag when the firmware stops and writes the same values again
+ * with the next answer.
+ */
+void sgxfive_gpu_info(struct sgxfive *sgx, struct drm_sgxfive_dev_query_gpu_info *g)
+{
+	memset(g, 0, sizeof(*g));
+	g->core_id = sgx->core_id;
+	g->core_revision = sgx->core_revision;
+	g->host_bridge_rev = sgx->host_bridge_rev;
+	if (sgx->host_bridge_rev < 4)
+		g->quirks |= DRM_SGXFIVE_QUIRK_SAMPLE_CACHE;
+	/* Pairs with the smp_store_release() in sgxfive_ident_result(). */
+	if (smp_load_acquire(&sgx->sw_valid)) {
+		g->core_id_sw = READ_ONCE(sgx->core_id_sw);
+		g->core_revision_sw = READ_ONCE(sgx->core_revision_sw);
+		g->flags |= DRM_SGXFIVE_GPU_INFO_SW_VALID;
+	}
+}
+
+/* The firmware's DDK version as its answer gave it, 0 while there is none. */
+u32 sgxfive_ddk_version(struct sgxfive *sgx)
+{
+	/* Pairs with the smp_store_release() in sgxfive_ident_result(). */
+	return smp_load_acquire(&sgx->sw_valid) ? READ_ONCE(sgx->ddk_version) : 0;
+}
+
 static int sgxfive_ioctl_dev_query(struct sgxfive *sgx, void *data)
 {
 	struct drm_sgxfive_dev_query_args *a = data;
 
 	switch (a->type) {
 	case DRM_SGXFIVE_DEV_QUERY_GPU_INFO: {
-		struct drm_sgxfive_dev_query_gpu_info g = {
-			.core_id = sgx->core_id,
-			.core_revision = sgx->core_revision,
-			.host_bridge_rev = sgx->host_bridge_rev,
-		};
+		struct drm_sgxfive_dev_query_gpu_info g;
 
-		if (sgx->host_bridge_rev < 4)
-			g.quirks |= DRM_SGXFIVE_QUIRK_SAMPLE_CACHE;
-		if (sgx->sw_valid) {
-			g.core_id_sw = sgx->core_id_sw;
-			g.core_revision_sw = sgx->core_revision_sw;
-			g.flags |= DRM_SGXFIVE_GPU_INFO_SW_VALID;
-		}
+		sgxfive_gpu_info(sgx, &g);
 		return sgxfive_query_out(a, &g, sizeof(g));
 	}
 	case DRM_SGXFIVE_DEV_QUERY_FW_INFO: {
@@ -125,7 +144,7 @@ static int sgxfive_ioctl_dev_query(struct sgxfive *sgx, void *data)
 
 		mutex_lock(&sgx->lock);
 		if (sgx->loaded) {
-			f.ddk_version = sgx->ddk_version;
+			f.ddk_version = sgxfive_ddk_version(sgx);
 			f.ddk_build = sgx->fw.ddk_build;
 			f.build_options = sgx->fw.build_options;
 			f.fw_format = sgx->fw.version;

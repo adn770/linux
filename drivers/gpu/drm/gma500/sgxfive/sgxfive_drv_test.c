@@ -3,7 +3,7 @@
  * KUnit tests for the render-node gate (sgxfive_ioctl_allowed): with the
  * render node off, only DEV_QUERY may reach the device; everything that
  * allocates, maps or runs on the GPU is for trusted users only. And HEAP_INFO's
- * copy into a user array of any accepted stride.
+ * copy into a user array of any accepted stride. And GPU_INFO's identity.
  */
 #include <kunit/test.h>
 #include <linux/err.h>
@@ -155,7 +155,86 @@ static void sgxfive_drv_test_heaps_stride_cap(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, n, 0u);
 }
 
+/*
+ * GPU_INFO has the registers' values at once and the firmware's own once it
+ * has answered, in a build without the debug option too; none of them, and
+ * the flag clear, while it has not or does not.
+ */
+static void sgxfive_drv_test_gpu_info_identity(struct kunit *test)
+{
+	struct sgxfive *sgx = kunit_kzalloc(test, sizeof(*sgx), GFP_KERNEL);
+	struct drm_sgxfive_dev_query_gpu_info g;
+	u32 mi[MISCINFO_DWORDS] = { MISCINFO_READY };
+
+	KUNIT_ASSERT_NOT_NULL(test, sgx);
+	sgx->core_id = 0x01150000;
+	sgx->core_revision = 0x10001;
+	sgx->host_bridge_rev = 2;
+	memset(&g, 0xa5, sizeof(g));
+	sgxfive_gpu_info(sgx, &g);
+	KUNIT_EXPECT_EQ(test, g.core_id, 0x01150000u);
+	KUNIT_EXPECT_EQ(test, g.core_revision, 0x10001u);
+	KUNIT_EXPECT_EQ(test, g.host_bridge_rev, 2u);
+	KUNIT_EXPECT_EQ(test, g.quirks, (u64)DRM_SGXFIVE_QUIRK_SAMPLE_CACHE);
+	KUNIT_EXPECT_EQ(test, g.flags, 0u);
+	KUNIT_EXPECT_EQ(test, g.core_id_sw, 0u);
+	KUNIT_EXPECT_EQ(test, g.core_revision_sw, 0u);
+
+	mi[MISCINFO_CORE_REV] = 0x10001;
+	mi[MISCINFO_CORE_REV_SW] = 0x10001;
+	mi[MISCINFO_CORE_ID] = 0x01150000;
+	mi[MISCINFO_CORE_ID_SW] = 545;
+	sgxfive_ident_result(sgx, 0, mi);
+	sgxfive_gpu_info(sgx, &g);
+	KUNIT_EXPECT_EQ(test, g.flags, (u32)DRM_SGXFIVE_GPU_INFO_SW_VALID);
+	KUNIT_EXPECT_EQ(test, g.core_id_sw, 545u);
+	KUNIT_EXPECT_EQ(test, g.core_revision_sw, 0x10001u);
+
+	sgxfive_ident_result(sgx, -ETIMEDOUT, mi);
+	sgxfive_gpu_info(sgx, &g);
+	KUNIT_EXPECT_EQ(test, g.flags, 0u);
+	KUNIT_EXPECT_EQ(test, g.core_id_sw, 0u);
+
+	/* A reset clears it when the firmware stops, until the next answer. */
+	sgxfive_ident_result(sgx, 0, mi);
+	sgxfive_ident_clear(sgx);
+	sgxfive_gpu_info(sgx, &g);
+	KUNIT_EXPECT_EQ(test, g.flags, 0u);
+	KUNIT_EXPECT_EQ(test, g.core_id_sw, 0u);
+	KUNIT_EXPECT_EQ(test, g.core_revision_sw, 0u);
+}
+
+/*
+ * FW_INFO's ddk_version is the firmware's own, as GPU_INFO's values are: 0
+ * until it has answered and again after it stops or misses, never the last
+ * answer's.
+ */
+static void sgxfive_drv_test_fw_info_ddk_version(struct kunit *test)
+{
+	struct sgxfive *sgx = kunit_kzalloc(test, sizeof(*sgx), GFP_KERNEL);
+	u32 mi[MISCINFO_DWORDS] = { MISCINFO_READY };
+
+	KUNIT_ASSERT_NOT_NULL(test, sgx);
+	sgx->core_id = 0x01150000;
+	sgx->core_revision = 0x10001;
+	mi[MISCINFO_CORE_REV] = 0x10001;
+	mi[MISCINFO_CORE_REV_SW] = 0x10001;
+	mi[MISCINFO_CORE_ID] = 0x01150000;
+	mi[MISCINFO_CORE_ID_SW] = 545;
+	mi[MISCINFO_DDK_VERSION] = 0x10711;
+	KUNIT_EXPECT_EQ(test, sgxfive_ddk_version(sgx), 0u);
+	sgxfive_ident_result(sgx, 0, mi);
+	KUNIT_EXPECT_EQ(test, sgxfive_ddk_version(sgx), 0x10711u);
+	sgxfive_ident_result(sgx, -ETIMEDOUT, mi);
+	KUNIT_EXPECT_EQ(test, sgxfive_ddk_version(sgx), 0u);
+	sgxfive_ident_result(sgx, 0, mi);
+	sgxfive_ident_clear(sgx);
+	KUNIT_EXPECT_EQ(test, sgxfive_ddk_version(sgx), 0u);
+}
+
 static struct kunit_case sgxfive_drv_test_cases[] = {
+	KUNIT_CASE(sgxfive_drv_test_gpu_info_identity),
+	KUNIT_CASE(sgxfive_drv_test_fw_info_ddk_version),
 	KUNIT_CASE(sgxfive_drv_test_gate_on),
 	KUNIT_CASE(sgxfive_drv_test_gate_off),
 	KUNIT_CASE(sgxfive_drv_test_heaps_exact),

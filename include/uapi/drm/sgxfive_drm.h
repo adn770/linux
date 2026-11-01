@@ -148,9 +148,11 @@ enum drm_sgxfive_dev_query {
 /*
  * The firmware has answered a misc-info request: core_id_sw,
  * core_revision_sw and &drm_sgxfive_dev_query_fw_info.ddk_version are
- * valid; until then they are 0. Only the debug group's dri/N/sgx/miscinfo
- * file sends that request, so in a kernel built without
- * CONFIG_DRM_GMA500_SGXFIVE_DEBUG the flag stays clear.
+ * valid; until then they are 0. The kernel sends the request in every build
+ * when it has loaded and started the firmware, which is at the first
+ * context creation, and after each reset; the flag is clear before the
+ * first, while a reset restarts the firmware, and while the firmware does
+ * not answer.
  */
 #define DRM_SGXFIVE_GPU_INFO_SW_VALID		(1U << 0)
 
@@ -203,8 +205,8 @@ enum drm_sgxfive_fw_state {
 struct drm_sgxfive_dev_query_fw_info {
 	/**
 	 * @ddk_version: The firmware's version, major << 16 | minor << 8 |
-	 * branch, as its misc-info reply gives it; 0 until it has given one
-	 * (see %DRM_SGXFIVE_GPU_INFO_SW_VALID).
+	 * branch, as its misc-info reply gives it; 0 while the flag
+	 * %DRM_SGXFIVE_GPU_INFO_SW_VALID is clear.
 	 */
 	__u32 ddk_version;
 

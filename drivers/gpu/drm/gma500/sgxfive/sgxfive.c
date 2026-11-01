@@ -416,6 +416,8 @@ static void sgxfive_halt(struct sgxfive *sgx)
 	struct sgx_fw_write w[16];
 	int n, i;
 
+	/* The firmware stops: what it answered is no longer its running self. */
+	sgxfive_ident_clear(sgx);
 	n = sgx_fw_script(&sgx->fw, &sgx->layout, SGX_FW_DEINIT, w, ARRAY_SIZE(w));
 	for (i = 0; i < n; i++)
 		seq_wr(sgx, w[i].reg, w[i].val);
@@ -515,6 +517,8 @@ static int sgxfive_boot(struct sgxfive *sgx)
 	/* The first command carries the init info's cache control. */
 	sgx->cache_control = sgx->fw.meta[SGX_FW_META_CACHE_CONTROL];
 	sgxfive_dump(sgx, &p);
+	/* The identity DEV_QUERY reports; an EDM that does not answer is no reason to fail. */
+	sgxfive_ident_ask(sgx, NULL);
 	return 0;
 }
 
@@ -1066,6 +1070,111 @@ int sgxfive_power(struct sgxfive *sgx, u32 powercmd, u32 done)
 	drm_info(sgx->dev, "SGX %s after %lld us\n", what,
 		 ktime_us_delta(ktime_get(), start));
 	return 0;
+}
+
+/*
+ * Whether a GETMISCINFO reply names the core the registers name: the core
+ * and revision the EDM runs on are the ones read at probe, and the core and
+ * revision it was built for are 545 and the same revision.
+ */
+bool sgxfive_ident_core_ok(const struct sgxfive *sgx, const u32 *mi)
+{
+	return mi[MISCINFO_CORE_REV] == sgx->core_revision &&
+	       mi[MISCINFO_CORE_ID] == sgx->core_id &&
+	       mi[MISCINFO_CORE_ID_SW] == SGXFIVE_CORE_ID_SW &&
+	       mi[MISCINFO_CORE_REV_SW] == sgx->core_revision;
+}
+
+/*
+ * The firmware's identity is not known: SW_VALID clear, until an answer
+ * (sgxfive_ident_result). Done when the firmware stops (sgxfive_halt), so a
+ * reset or a failed boot leaves no answer of the firmware that is gone, and
+ * when a request goes unanswered. Readers ignore the values while it is clear.
+ */
+void sgxfive_ident_clear(struct sgxfive *sgx)
+{
+	WRITE_ONCE(sgx->sw_valid, false);
+}
+
+/*
+ * What a GETMISCINFO request came to, under the device lock: ret is its
+ * error, 0 when the EDM answered with the reply mi. An answer is what
+ * DEV_QUERY reports as the firmware's own identity (GPU_INFO_SW_VALID); a
+ * reply for another core than the registers name is kept and warned about. No
+ * answer clears SW_VALID, and logs once until the next answer. Returns how
+ * many warnings it logged.
+ */
+unsigned int sgxfive_ident_result(struct sgxfive *sgx, int ret, const u32 *mi)
+{
+	unsigned int warned = 0;
+
+	if (ret) {
+		sgxfive_ident_clear(sgx);
+		if (!sgx->ident_warned) {
+			drm_warn(sgx->dev,
+				 "sgxfive: no GETMISCINFO answer (%d): DEV_QUERY has no firmware identity\n",
+				 ret);
+			warned++;
+		}
+		sgx->ident_warned = true;
+		return warned;
+	}
+	sgx->ident_warned = false;
+	if (!sgxfive_ident_core_ok(sgx, mi)) {
+		drm_warn(sgx->dev,
+			 "sgxfive: the firmware runs on core %#x rev %#x and is built for core %u rev %#x, the registers say %#x rev %#x\n",
+			 mi[MISCINFO_CORE_ID], mi[MISCINFO_CORE_REV],
+			 mi[MISCINFO_CORE_ID_SW], mi[MISCINFO_CORE_REV_SW],
+			 sgx->core_id, sgx->core_revision);
+		warned++;
+	}
+	WRITE_ONCE(sgx->core_id_sw, mi[MISCINFO_CORE_ID_SW]);
+	WRITE_ONCE(sgx->core_revision_sw, mi[MISCINFO_CORE_REV_SW]);
+	WRITE_ONCE(sgx->ddk_version, mi[MISCINFO_DDK_VERSION]);
+	/*
+	 * Pairs with the smp_load_acquire() of sw_valid in sgxfive_gpu_info()
+	 * and sgxfive_ddk_version(): the values are stored before the flag.
+	 */
+	smp_store_release(&sgx->sw_valid, true);
+	return warned;
+}
+
+/*
+ * Ask the running EDM for its identity (GETMISCINFO, with the sizes of its
+ * structures) and take the answer (sgxfive_ident_result), with how long it
+ * took in *us if that is given: the boot does, after the firmware is loaded
+ * and after each reset, and logs the answer. Under the device lock.
+ */
+int sgxfive_ident_ask(struct sgxfive *sgx, s64 *us)
+{
+	u32 *mi = sgxfive_words(sgx, BUF_MISC);
+	const u32 data[] = { 0, sgx->layout.addr[BUF_MISC] };
+	ktime_t start;
+	s64 elapsed;
+	int i, ret;
+
+	if (!sgx->live)
+		return -ENODEV;
+	for (i = 1; i < MISCINFO_DWORDS; i++)
+		WRITE_ONCE(mi[i], 0);
+	WRITE_ONCE(mi[0], MISCINFO_GET_STRUCT_SIZES);
+	start = ktime_get();
+	ret = sgxfive_command(sgx, SGX_CMD_GETMISCINFO, data, ARRAY_SIZE(data));
+	if (!ret)
+		ret = sgxfive_wait_mem(&mi[0], MISCINFO_READY, MISCINFO_READY);
+	elapsed = ktime_us_delta(ktime_get(), start);
+	if (us)
+		*us = elapsed;
+	if (!ret)
+		dma_rmb(); /* the reply's dwords, after the one that says it is there */
+	sgxfive_ident_result(sgx, ret, mi);
+	if (!ret)
+		drm_info(sgx->dev,
+			 "SGX firmware: core %u rev %#x, DDK %u.%u.%u build %u, answered after %lld us\n",
+			 mi[MISCINFO_CORE_ID_SW], mi[MISCINFO_CORE_REV_SW],
+			 mi[MISCINFO_DDK_VERSION] >> 16, (mi[MISCINFO_DDK_VERSION] >> 8) & 0xff,
+			 mi[MISCINFO_DDK_VERSION] & 0xff, mi[MISCINFO_DDK_BUILD], elapsed);
+	return ret;
 }
 
 /* From the host's SGX interrupt; true when the event belongs to the EDM. */

@@ -106,13 +106,6 @@ static u32 xb_addr(struct sgxfive *sgx, unsigned int i)
 	return sgx->xt.buf[i].addr;
 }
 
-/* SGXMKIF_CMD_GETMISCINFO's request and its reply in the misc-info buffer. */
-#define MISCINFO_READY			0x1
-#define MISCINFO_GET_STRUCT_SIZES	0x2
-#define MISCINFO_FEATURES		7
-#define MISCINFO_STRUCT_SIZES		13
-#define MISCINFO_DWORDS		(1 + MISCINFO_FEATURES + MISCINFO_STRUCT_SIZES)
-
 static void sgxfive_check(struct drm_printer *p, const char *what, u32 got,
 			  u32 want, int *bad)
 {
@@ -130,42 +123,33 @@ static const char *const sgxfive_feature_names[MISCINFO_FEATURES] = {
 };
 
 /*
- * GETMISCINFO with GET_STRUCT_SIZES: the EDM fills in the core and DDK
- * identity and the sizes of the structures it was built with. Check every
- * value against the registers and the firmware file.
+ * GETMISCINFO with GET_STRUCT_SIZES, as the boot asks it (sgxfive_ident_ask):
+ * the EDM fills in the core and DDK identity and the sizes of the structures
+ * it was built with. Check every value against the registers and the
+ * firmware file.
  */
 static int sgxfive_miscinfo(struct sgxfive *sgx, struct drm_printer *p)
 {
 	u32 *mi = sgxfive_words(sgx, BUF_MISC);
-	const u32 data[] = { 0, sgx->layout.addr[BUF_MISC] };
 	u32 want[MISCINFO_FEATURES];
-	ktime_t start;
+	s64 us;
 	int i, ret, bad = 0;
 
-	if (!sgx->live)
-		return -ENODEV;
-	for (i = 1; i < MISCINFO_DWORDS; i++)
-		WRITE_ONCE(mi[i], 0);
-	WRITE_ONCE(mi[0], MISCINFO_GET_STRUCT_SIZES);
-	ret = sgxfive_command(sgx, SGX_CMD_GETMISCINFO, data, ARRAY_SIZE(data));
-	if (ret)
-		return ret;
-	start = ktime_get();
-	ret = sgxfive_wait_mem(&mi[0], MISCINFO_READY, MISCINFO_READY);
-	if (ret) {
+	ret = sgxfive_ident_ask(sgx, &us);
+	if (ret == -ETIMEDOUT) {
 		drm_printf(p, "no MISCINFO_READY after 500 ms\n");
 		sgxfive_dump(sgx, p);
-		return ret;
 	}
-	drm_printf(p, "GETMISCINFO answered after %lld us\n",
-		   ktime_us_delta(ktime_get(), start));
+	if (ret)
+		return ret;
+	drm_printf(p, "GETMISCINFO answered after %lld us\n", us);
 
 	want[0] = sgxfive_rd(sgx, SGX_CORE_REVISION);
 	want[1] = sgxfive_rd(sgx, SGX_CORE_ID);
 	/* major, minor and branch: DDK 1.7 is branch 17 */
 	want[2] = sgx->fw.ddk_major << 16 | sgx->fw.ddk_minor << 8 | 17;
 	want[3] = sgx->fw.ddk_build;
-	want[4] = 545;
+	want[4] = SGXFIVE_CORE_ID_SW;
 	want[5] = want[0];		/* the revision the EDM was built for */
 	want[6] = sgx->fw.build_options;
 	for (i = 0; i < MISCINFO_FEATURES; i++)
@@ -179,11 +163,6 @@ static int sgxfive_miscinfo(struct sgxfive *sgx, struct drm_printer *p)
 			      sgx->fw.meta[SGX_FW_META_STRUCT_SIZES + i], &bad);
 	}
 	drm_printf(p, "%s\n", bad ? "MISMATCHES" : "all values match");
-	/* What DEV_QUERY reports as the firmware's own identity. */
-	sgx->core_id_sw = mi[5];
-	sgx->core_revision_sw = mi[6];
-	sgx->ddk_version = mi[3];
-	sgx->sw_valid = true;
 	return bad ? -EIO : 0;
 }
 

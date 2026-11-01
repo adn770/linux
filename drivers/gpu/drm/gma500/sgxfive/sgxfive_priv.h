@@ -108,7 +108,8 @@ struct sgxfive {
 	u32 core_id, core_revision;	/* read at probe */
 	u32 host_bridge_rev;
 	bool sw_valid;			/* the firmware's own values, below */
-	u32 core_id_sw, core_revision_sw, ddk_version;
+	u32 core_id_sw, core_revision_sw, ddk_version;	/* read after sw_valid is set */
+	bool ident_warned;		/* GETMISCINFO went unanswered, logged */
 
 	/* Deferred release (sgxfive_defer), under lock. */
 	u64 ccb_sent;			/* kernel-CCB commands submitted */
@@ -213,6 +214,27 @@ enum {
 #define POWMAN_IDLE_COMPLETE	BIT(2)
 #define POWMAN_POWEROFF_COMPLETE BIT(3)
 
+/*
+ * GETMISCINFO's request and its reply in the misc-info buffer (BUF_MISC): the
+ * request in dword 0, which the EDM sets READY when it has filled in the
+ * rest, the reply's features after it, then the sizes of its structures.
+ */
+#define MISCINFO_READY			0x1
+#define MISCINFO_GET_STRUCT_SIZES	0x2
+#define MISCINFO_FEATURES		7
+#define MISCINFO_STRUCT_SIZES		13
+#define MISCINFO_DWORDS		(1 + MISCINFO_FEATURES + MISCINFO_STRUCT_SIZES)
+/* The features' dwords: the core it runs on, the core and DDK it was built for. */
+#define MISCINFO_CORE_REV		1
+#define MISCINFO_CORE_ID		2
+#define MISCINFO_DDK_VERSION		3
+#define MISCINFO_DDK_BUILD		4
+#define MISCINFO_CORE_ID_SW		5
+#define MISCINFO_CORE_REV_SW		6
+#define MISCINFO_BUILD_OPTIONS		7
+/* The core the firmware is built for. */
+#define SGXFIVE_CORE_ID_SW		545
+
 /* The CLEANUP command's object types, and the HostCtl status bit it sets. */
 #define CLEANUP_RT		1	/* an RT data set */
 #define CLEANUP_RC		2	/* a HW render context */
@@ -239,6 +261,12 @@ void sgxfive_dump(struct sgxfive *sgx, struct drm_printer *p);
 void sgxfive_devstate(struct sgxfive *sgx, struct sgxfive_devstate *d);
 void sgxfive_devstate_print(struct drm_printer *p, const struct sgxfive_devstate *d);
 int sgxfive_power(struct sgxfive *sgx, u32 powercmd, u32 done);
+bool sgxfive_ident_core_ok(const struct sgxfive *sgx, const u32 *mi);
+unsigned int sgxfive_ident_result(struct sgxfive *sgx, int ret, const u32 *mi);
+void sgxfive_ident_clear(struct sgxfive *sgx);
+int sgxfive_ident_ask(struct sgxfive *sgx, s64 *us);
+void sgxfive_gpu_info(struct sgxfive *sgx, struct drm_sgxfive_dev_query_gpu_info *g);
+u32 sgxfive_ddk_version(struct sgxfive *sgx);
 
 struct sgxfive_vm;
 struct sgxfive_client;
