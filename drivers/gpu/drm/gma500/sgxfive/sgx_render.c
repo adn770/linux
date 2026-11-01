@@ -36,6 +36,18 @@ void sgx_render_ctx(u32 *ctx, const struct sgx_render_addrs *a)
 }
 
 /*
+ * The pages a parameter buffer may have: from the smallest whose ZLS and
+ * global thresholds are above zero to what the parameter slot holds; any
+ * other request gets the slot's whole PB.
+ */
+u32 sgx_render_pb_pages(u32 want)
+{
+	if (want < SGX_RENDER_PB_MIN_PAGES || want > SGX_RENDER_PB_PAGES)
+		return SGX_RENDER_PB_PAGES;
+	return want;
+}
+
+/*
  * A PB of the first pages of the parameter slot, contiguous from its PB and
  * chained in order: the host builds the page table, one entry per page of
  * the slot, linking them {previous << 16 | next} with 0xffff at both ends,
@@ -43,10 +55,11 @@ void sgx_render_ctx(u32 *ctx, const struct sgx_render_addrs *a)
  * the PB's size: TA = pages + 0x10, ZLS = global = pages - 0x22, PDS =
  * global - 0x100 when that is positive, else 0.
  */
-void sgx_render_pb(u32 *desc, u32 *block, u32 *pt, const struct sgx_render_addrs *a)
+void sgx_render_pb(u32 *desc, u32 *block, u32 *pt, const struct sgx_render_addrs *a,
+		   u32 pages)
 {
 	const u32 head = SGX_RENDER_PARAM_PB >> 12;
-	const u32 tail = head + SGX_RENDER_PB_PAGES - 1;
+	const u32 tail = head + sgx_render_pb_pages(pages) - 1;
 	const u32 global = tail - head + 1 - 0x22;
 	const u32 ht = tail << 16 | head, prev = (tail - 1) << 16;
 	u32 i;

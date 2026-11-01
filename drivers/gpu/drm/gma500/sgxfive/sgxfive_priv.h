@@ -110,6 +110,7 @@ struct sgxfive {
 	bool alias_ta3d_ro;		/* render VMs: TA3DCtl read-only */
 	spinlock_t kpoke_lock;		/* pokes for the next jobs' commands */
 	struct sgxfive_kpokes kpokes;
+	u32 render_pb_pages;		/* PB of new render contexts */
 #endif
 };
 
@@ -307,6 +308,12 @@ static inline bool sgxfive_alias_ta3d_ro(struct sgxfive *sgx)
 {
 	return READ_ONCE(sgx->alias_ta3d_ro);
 }
+
+/* 0 or out of range: the default (sgx_render_pb_pages()). */
+static inline u32 sgxfive_render_pb_pages(struct sgxfive *sgx)
+{
+	return READ_ONCE(sgx->render_pb_pages);
+}
 #else
 static inline int sgxfive_debug_load(struct sgxfive *sgx)
 {
@@ -328,6 +335,11 @@ static inline bool sgxfive_alias_ta3d_ro(struct sgxfive *sgx)
 
 static inline void sgxfive_kpoke_job(struct sgxfive *sgx, u8 *img, bool render)
 {
+}
+
+static inline u32 sgxfive_render_pb_pages(struct sgxfive *sgx)
+{
+	return 0;
 }
 #endif
 

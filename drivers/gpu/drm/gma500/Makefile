@@ -72,6 +72,7 @@ gma500_gfx-$(CONFIG_DRM_GMA500_KUNIT_TEST) += sgxfive/sgxfive_vm_test.o
 ifdef CONFIG_DRM_GMA500_SGXFIVE_DEBUG
 gma500_gfx-$(CONFIG_DRM_GMA500_KUNIT_TEST) += sgxfive/sgxfive_regdump_test.o
 gma500_gfx-$(CONFIG_DRM_GMA500_KUNIT_TEST) += sgxfive/sgxfive_kpoke_test.o
+gma500_gfx-$(CONFIG_DRM_GMA500_KUNIT_TEST) += sgxfive/sgxfive_debug_test.o
 endif
 
 gma500_gfx-$(CONFIG_DRM_FBDEV_EMULATION) +=  fbdev.o

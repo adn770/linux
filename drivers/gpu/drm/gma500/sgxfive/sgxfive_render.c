@@ -44,6 +44,7 @@ struct sgxfive_render {
 	u8 *cpu;			/* page table, scratch, background */
 	u8 *tdva;			/* the RT data's buffers */
 	bool mapped;			/* in the VM */
+	u32 pb_pages;			/* its PB, as set at creation */
 	struct sgxfive_deferred release;
 };
 
@@ -108,7 +109,8 @@ static void sgxfive_render_init_mem(struct sgxfive_render *r)
 	/* Sized for the smallest target until a job says otherwise. */
 	sgx_render_rtds(rctx(ctx, SGXFIVE_RCTX_RTDS_OFF), &r->a, 0);
 	sgx_render_pb(rctx(ctx, SGXFIVE_RCTX_PBDESC_OFF),
-		      rctx(ctx, SGXFIVE_RCTX_PBBLOCK_OFF), (u32 *)r->cpu, &r->a);
+		      rctx(ctx, SGXFIVE_RCTX_PBBLOCK_OFF), (u32 *)r->cpu, &r->a,
+		      r->pb_pages);
 	*rctx(ctx, SGXFIVE_RCTX_ACCESS_OFF) = 0;
 	*rctx(ctx, SGXFIVE_RCTX_PENDING_OFF) = 0;
 	*rctx(ctx, SGXFIVE_RCTX_RTSTATUS_OFF) = 0;
@@ -196,6 +198,7 @@ int sgxfive_render_init(struct sgxfive_ctx *ctx)
 	}
 	sgxfive_render_addrs(&r->a, ctx->mem.addr, sgxfive_vm_pd_phys(ctx->vm), r->slot,
 			     &td);
+	r->pb_pages = sgxfive_render_pb_pages(ctx->sgx);
 	ret = alloc_pages_wc(r->param, PARAM_PAGES);
 	if (!ret)
 		ret = alloc_pages_wc(r->td, r->td_pages);

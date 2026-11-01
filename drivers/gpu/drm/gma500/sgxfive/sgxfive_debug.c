@@ -26,6 +26,7 @@
 
 #include "sgxfive_priv.h"
 #include "sgx_mmu.h"
+#include "sgx_render.h"
 #include "sgx_seq.h"
 #include "sgx_xfer.h"
 
@@ -1085,4 +1086,7 @@ void sgxfive_debug_init(struct sgxfive *sgx, struct dentry *dir)
 	spin_lock_init(&sgx->kpoke_lock);
 	debugfs_create_file("kpoke", 0600, dir, sgx, &sgxfive_kpoke_fops);
 	debugfs_create_file("kreg", 0600, dir, sgx, &sgxfive_kreg_fops);
+	/* Pages of the PB of render contexts created from now on. */
+	sgx->render_pb_pages = SGX_RENDER_PB_PAGES;
+	debugfs_create_x32("render_pb_pages", 0600, dir, &sgx->render_pb_pages);
 }

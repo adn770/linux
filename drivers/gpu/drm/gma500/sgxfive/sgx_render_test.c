@@ -148,7 +148,7 @@ static void sgx_render_test_pb(struct kunit *test)
 	KUNIT_ASSERT_NOT_NULL(test, block);
 	memset(pt, 0xa5, SGX_RENDER_PT_BYTES);
 	memset(desc, 0xa5, SGX_RENDER_PBDESC_SIZE);
-	sgx_render_pb(desc, block, pt, &addrs);
+	sgx_render_pb(desc, block, pt, &addrs, SGX_RENDER_PB_PAGES);
 	for (i = 0; i < SGX_RENDER_PBDESC_SIZE; i += 4) {
 		u32 v = 0;
 
