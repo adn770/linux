@@ -131,6 +131,7 @@ struct sgxfive {
 	bool vm_low;			/* VM_MAP also takes the first MiB */
 	u32 render_ctx_flags;		/* new render contexts' extra flags */
 	struct sgxfive_cleanup_trace cleanup;	/* the last one's, under lock */
+	u32 timer_clock;		/* HostCtl's timer clock at boot, 0: default */
 #endif
 };
 
@@ -369,6 +370,14 @@ static inline void sgxfive_cleanup_trace_end(struct sgxfive *sgx, int ret)
 {
 	sgx->cleanup.ret = ret;
 }
+
+/* HostCtl's timer clock for the next boot: the debugfs value, if set. */
+static inline u32 sgxfive_timer_clock(struct sgxfive *sgx, u32 dflt)
+{
+	u32 v = READ_ONCE(sgx->timer_clock);
+
+	return v ? v : dflt;
+}
 #else
 static inline int sgxfive_debug_load(struct sgxfive *sgx)
 {
@@ -418,6 +427,11 @@ static inline void sgxfive_cleanup_trace_note(struct sgxfive *sgx)
 
 static inline void sgxfive_cleanup_trace_end(struct sgxfive *sgx, int ret)
 {
+}
+
+static inline u32 sgxfive_timer_clock(struct sgxfive *sgx, u32 dflt)
+{
+	return dflt;
 }
 #endif
 

@@ -6,6 +6,7 @@
  * The copies of a render context's pages and the context they come from.
  * The first MiB VM_MAP may take.
  * The extra flags of new render contexts and the trace of their cleanup.
+ * The timer clock the boot writes into HostCtl.
  */
 #include <kunit/test.h>
 #include <linux/module.h>
@@ -218,6 +219,19 @@ static void sgxfive_debug_test_cleanup(struct kunit *test)
 			   "before ta 0x00000000 3d 0x00000000\n");
 }
 
+/* debugfs timer_clock: the boot writes it into HostCtl, 0 keeps the default. */
+static void sgxfive_debug_test_timer_clock(struct kunit *test)
+{
+	struct sgxfive *sgx = kunit_kzalloc(test, sizeof(*sgx), GFP_KERNEL);
+
+	KUNIT_ASSERT_NOT_NULL(test, sgx);
+	KUNIT_EXPECT_EQ(test, sgxfive_timer_clock(sgx, 400000), 400000u);
+	sgx->timer_clock = 100000;
+	KUNIT_EXPECT_EQ(test, sgxfive_timer_clock(sgx, 400000), 100000u);
+	sgx->timer_clock = 0;
+	KUNIT_EXPECT_EQ(test, sgxfive_timer_clock(sgx, 400000), 400000u);
+}
+
 static struct kunit_case sgxfive_debug_test_cases[] = {
 	KUNIT_CASE(sgxfive_debug_test_pb_small),
 	KUNIT_CASE(sgxfive_debug_test_pb_pages),
@@ -226,6 +240,7 @@ static struct kunit_case sgxfive_debug_test_cases[] = {
 	KUNIT_CASE(sgxfive_debug_test_vm_low),
 	KUNIT_CASE(sgxfive_debug_test_ctx_flags),
 	KUNIT_CASE(sgxfive_debug_test_cleanup),
+	KUNIT_CASE(sgxfive_debug_test_timer_clock),
 	{}
 };
 

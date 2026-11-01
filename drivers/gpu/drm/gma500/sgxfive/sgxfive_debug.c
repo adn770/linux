@@ -1305,4 +1305,6 @@ void sgxfive_debug_init(struct sgxfive *sgx, struct dentry *dir)
 	/* Flags besides NEW of render contexts created from now on. */
 	debugfs_create_x32("render_ctx_flags", 0600, dir, &sgx->render_ctx_flags);
 	debugfs_create_file("render_cleanup", 0400, dir, sgx, &sgxfive_render_cleanup_fops);
+	/* HostCtl's timer clock for the next boot; 0 for the default. */
+	debugfs_create_x32("timer_clock", 0600, dir, &sgx->timer_clock);
 }

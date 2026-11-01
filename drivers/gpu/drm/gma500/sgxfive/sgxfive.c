@@ -485,7 +485,8 @@ static int sgxfive_boot(struct sgxfive *sgx)
 	hc = sgxfive_words(sgx, BUF_HOST_CTL);
 	WRITE_ONCE(hc[HC_POWER_STATUS], 0);
 	WRITE_ONCE(hc[HC_HWR_SAMPLE_RATE], 10);
-	WRITE_ONCE(hc[HC_UKERNEL_TIMER_CLOCK], SGX_CLOCK_HZ / 1000);
+	WRITE_ONCE(hc[HC_UKERNEL_TIMER_CLOCK],
+		   sgxfive_timer_clock(sgx, SGX_CLOCK_HZ / 1000));
 	WRITE_ONCE(hc[HC_APM_SAMPLE_RATE], 0);
 
 	atomic_set(&sgx->sw_events, 0);
