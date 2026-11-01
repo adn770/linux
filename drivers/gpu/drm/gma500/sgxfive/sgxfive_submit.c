@@ -210,6 +210,7 @@ static int sgxfive_submit_queue(struct sgxfive_submit *s, struct sgxfive_ctx *ct
 		sgxfive_render_job_scene(ctx, job,
 					 d->flags & DRM_SGXFIVE_SUBMIT_JOB_RENDER_GEOMETRY);
 		sgxfive_render_job_build(ctx, job);
+		sgxfive_kpoke_job(ctx->sgx, job->hw->cmd, true);
 	} else {
 		job->size = sgxfive_job_build(job->hw->cmd,
 					      (d->flags & DRM_SGXFIVE_SUBMIT_JOB_TRANSFER_DUMMY) ?
@@ -217,6 +218,8 @@ static int sgxfive_submit_queue(struct sgxfive_submit *s, struct sgxfive_ctx *ct
 					      d->flags & DRM_SGXFIVE_SUBMIT_JOB_TRANSFER_DUMMY,
 					      ctx->mem.addr + SGXFIVE_CTX_FENCE_OFF,
 					      job->seqno);
+		if (!(d->flags & DRM_SGXFIVE_SUBMIT_JOB_TRANSFER_DUMMY))
+			sgxfive_kpoke_job(ctx->sgx, job->hw->cmd, false);
 	}
 	done = &job->base.s_fence->finished;
 	for (i = 0; i < d->sync_ops.count; i++) {

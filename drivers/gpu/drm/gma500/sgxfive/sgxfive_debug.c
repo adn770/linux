@@ -16,6 +16,10 @@
 #include <linux/fs.h>
 #include <linux/ktime.h>
 #include <linux/seq_file.h>
+#include <linux/sizes.h>
+#include <linux/slab.h>
+#include <linux/string.h>
+#include <linux/uaccess.h>
 #include <linux/wait.h>
 
 #include <drm/drm_print.h>
@@ -927,6 +931,142 @@ void sgxfive_debug_reset(struct sgxfive *sgx)
 	sgx->xt.runs = 0;	/* the next transfer initialises the context */
 }
 
+/*
+ * debugfs kpoke (sgxfive_kpoke.h): each line written arms a poke of the
+ * firmware command the kernel builds for the next job of its kind, "ta:N",
+ * "rd:N" or "tq:N" with "=V" or "^=V"; "clear" drops what is armed. Reading
+ * shows what is armed, a poke a line. Root only: a poked kernel word, an
+ * address above all, can fault or hang the job or make the firmware write
+ * where it should not; the job fails and is recovered.
+ */
+static int sgxfive_kpoke_show(struct seq_file *m, void *unused)
+{
+	struct sgxfive *sgx = m->private;
+	char line[SGXFIVE_KPOKE_LINE];
+	struct sgxfive_kpokes *k;
+	unsigned int i;
+
+	k = kzalloc_obj(*k);
+	if (!k)
+		return -ENOMEM;
+	spin_lock(&sgx->kpoke_lock);
+	*k = sgx->kpokes;
+	spin_unlock(&sgx->kpoke_lock);
+	for (i = 0; i < k->n; i++) {
+		sgxfive_kpoke_format(&k->p[i], line, sizeof(line));
+		seq_printf(m, "%s\n", line);
+	}
+	kfree(k);
+	return 0;
+}
+
+static int sgxfive_kpoke_open(struct inode *inode, struct file *f)
+{
+	return single_open(f, sgxfive_kpoke_show, inode->i_private);
+}
+
+static ssize_t sgxfive_kpoke_fwrite(struct file *f, const char __user *ubuf,
+				    size_t len, loff_t *ppos)
+{
+	struct sgxfive *sgx = file_inode(f)->i_private;
+	char *buf;
+	int ret;
+
+	if (!len || len > PAGE_SIZE)
+		return -EINVAL;
+	buf = memdup_user_nul(ubuf, len);
+	if (IS_ERR(buf))
+		return PTR_ERR(buf);
+	ret = sgxfive_kpoke_write(sgx, buf);
+	kfree(buf);
+	return ret ? ret : len;
+}
+
+static const struct file_operations sgxfive_kpoke_fops = {
+	.owner = THIS_MODULE, .open = sgxfive_kpoke_open, .read = seq_read,
+	.write = sgxfive_kpoke_fwrite, .llseek = seq_lseek, .release = single_release,
+};
+
+/*
+ * debugfs kreg: one write to a register the firmware never touches
+ * (sgxfive_kreg_allowed). Only while the firmware runs and has no
+ * render-node job, under the device lock so that none is kicked meanwhile;
+ * every write is logged. The value stays until the next write or the next
+ * reset of the SGX.
+ */
+int sgxfive_kreg_write(struct sgxfive *sgx, u32 off, bool flip, u32 value)
+{
+	u32 old, val;
+	int ret = 0;
+
+	if (!READ_ONCE(sgx->live))
+		return -ENODEV;
+	if (!sgxfive_kreg_ok(off))
+		return -EPERM;
+	mutex_lock(&sgx->lock);
+	if (!sgx->live) {
+		ret = -ENODEV;
+	} else if (sgxfive_oldest(sgx) != U64_MAX) {
+		ret = -EBUSY;
+	} else {
+		old = sgxfive_rd(sgx, off);
+		val = flip ? old ^ value : value;
+		iowrite32(val, sgx->regs + off);
+		drm_info(sgx->dev, "sgxfive: kreg 0x%04x: 0x%08x -> 0x%08x, reads 0x%08x\n",
+			 off, old, val, sgxfive_rd(sgx, off));
+	}
+	mutex_unlock(&sgx->lock);
+	return ret;
+}
+
+/* Reading shows the allowed registers, "0xOFFS 0xVALUE" a line. */
+static int sgxfive_kreg_show(struct seq_file *m, void *unused)
+{
+	struct sgxfive *sgx = m->private;
+	unsigned int i;
+	int ret = 0;
+
+	mutex_lock(&sgx->lock);
+	if (!sgx->live)
+		ret = -ENODEV;
+	for (i = 0; !ret && i < SGXFIVE_KREG_COUNT; i++)
+		seq_printf(m, "0x%04x 0x%08x\n", sgxfive_kreg_allowed[i],
+			   sgxfive_rd(sgx, sgxfive_kreg_allowed[i]));
+	mutex_unlock(&sgx->lock);
+	return ret;
+}
+
+static int sgxfive_kreg_open(struct inode *inode, struct file *f)
+{
+	return single_open(f, sgxfive_kreg_show, inode->i_private);
+}
+
+/* One line: OFFSET=VALUE or OFFSET^=VALUE. */
+static ssize_t sgxfive_kreg_fwrite(struct file *f, const char __user *ubuf,
+				   size_t len, loff_t *ppos)
+{
+	struct sgxfive *sgx = file_inode(f)->i_private;
+	char buf[SGXFIVE_KPOKE_LINE];
+	u32 off, value;
+	bool flip;
+	int ret;
+
+	if (!len || len >= sizeof(buf))
+		return -EINVAL;
+	if (copy_from_user(buf, ubuf, len))
+		return -EFAULT;
+	buf[len] = '\0';
+	ret = sgxfive_kreg_parse(strim(buf), &off, &flip, &value);
+	if (!ret)
+		ret = sgxfive_kreg_write(sgx, off, flip, value);
+	return ret ? ret : len;
+}
+
+static const struct file_operations sgxfive_kreg_fops = {
+	.owner = THIS_MODULE, .open = sgxfive_kreg_open, .read = seq_read,
+	.write = sgxfive_kreg_fwrite, .llseek = seq_lseek, .release = single_release,
+};
+
 void sgxfive_debug_init(struct sgxfive *sgx, struct dentry *dir)
 {
 	debugfs_create_file("miscinfo", 0400, dir, sgx, &sgxfive_miscinfo_fops);
@@ -942,4 +1082,7 @@ void sgxfive_debug_init(struct sgxfive *sgx, struct dentry *dir)
 	debugfs_create_file("xfer_ro", 0400, dir, sgx, &sgxfive_xfer_ro_fops);
 	debugfs_create_file("reset", 0200, dir, sgx, &sgxfive_reset_fops);
 	debugfs_create_bool("alias_ta3d_ro", 0600, dir, &sgx->alias_ta3d_ro);
+	spin_lock_init(&sgx->kpoke_lock);
+	debugfs_create_file("kpoke", 0600, dir, sgx, &sgxfive_kpoke_fops);
+	debugfs_create_file("kreg", 0600, dir, sgx, &sgxfive_kreg_fops);
 }

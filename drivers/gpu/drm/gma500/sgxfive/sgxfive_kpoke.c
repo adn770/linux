@@ -1,0 +1,219 @@
+// SPDX-License-Identifier: GPL-2.0-only OR MIT
+/*
+ * Kernel pokes (sgxfive_kpoke.h): parse, arm and apply changes to the words
+ * of the firmware command the kernel builds for the next job, and the
+ * allow-list of the registers debugfs kreg may write.
+ */
+#include <linux/errno.h>
+#include <linux/kernel.h>
+#include <linux/spinlock.h>
+#include <linux/string.h>
+#include <linux/unaligned.h>
+
+#include <drm/drm_print.h>
+
+#include "sgx_render.h"
+#include "sgx_xfer.h"
+#include "sgxfive_ctx.h"
+#include "sgxfive_kpoke.h"
+#include "sgxfive_priv.h"
+
+/* A render image holds the TA command, then the render details. */
+static_assert(SGXFIVE_RENDER_IMG_RD >= SGX_RENDER_CMD_STRIDE);
+static_assert(SGXFIVE_RENDER_IMG_RD + SGX_RENDER_RD_SIZE <= SGX_XFER_CMD_SIZE);
+
+static const char *const sgxfive_kpoke_names[SGXFIVE_KPOKE_SPACES] = {
+	[SGXFIVE_KPOKE_TA] = "ta", [SGXFIVE_KPOKE_RD] = "rd", [SGXFIVE_KPOKE_TQ] = "tq",
+};
+
+u32 sgxfive_kpoke_words(u32 space)
+{
+	switch (space) {
+	case SGXFIVE_KPOKE_TA:
+		return SGX_RENDER_CMD_STRIDE / 4;
+	case SGXFIVE_KPOKE_RD:
+		return SGX_RENDER_RD_SIZE / 4;
+	case SGXFIVE_KPOKE_TQ:
+		return SGX_XFER_CMD_SIZE / 4;
+	}
+	return 0;
+}
+
+int sgxfive_kpoke_parse(const char *s, struct sgxfive_kpoke *p)
+{
+	struct sgxfive_kpoke k = { .space = SGXFIVE_KPOKE_SPACES };
+	char buf[SGXFIVE_KPOKE_LINE];
+	char *colon, *eq;
+	unsigned int i;
+
+	if (strscpy(buf, s, sizeof(buf)) < 0)
+		return -EINVAL;
+	colon = strchr(buf, ':');
+	eq = strchr(buf, '=');
+	if (!colon || !eq || eq < colon)
+		return -EINVAL;
+	*colon = '\0';
+	for (i = 0; i < SGXFIVE_KPOKE_SPACES; i++)
+		if (!strcmp(buf, sgxfive_kpoke_names[i]))
+			k.space = i;
+	if (k.space == SGXFIVE_KPOKE_SPACES)
+		return -EINVAL;
+	if (eq > colon + 1 && eq[-1] == '^') {
+		k.flip = true;
+		eq[-1] = '\0';
+	}
+	*eq = '\0';
+	if (kstrtou32(colon + 1, 0, &k.index) || kstrtou32(eq + 1, 0, &k.value))
+		return -EINVAL;
+	if (k.index >= sgxfive_kpoke_words(k.space))
+		return -ERANGE;
+	*p = k;
+	return 0;
+}
+
+void sgxfive_kpoke_format(const struct sgxfive_kpoke *p, char *buf, size_t size)
+{
+	snprintf(buf, size, "%s:%u%s=0x%08x",
+		 p->space < SGXFIVE_KPOKE_SPACES ? sgxfive_kpoke_names[p->space] : "?",
+		 p->index, p->flip ? "^" : "", p->value);
+}
+
+int sgxfive_kpoke_arm(struct sgxfive_kpokes *k, const struct sgxfive_kpoke *p,
+		      unsigned int n)
+{
+	unsigned int i;
+
+	if (n > SGXFIVE_KPOKE_MAX - k->n)
+		return -ENOSPC;
+	for (i = 0; i < n; i++)
+		if (p[i].index >= sgxfive_kpoke_words(p[i].space))
+			return -ERANGE;
+	memcpy(&k->p[k->n], p, n * sizeof(*p));
+	k->n += n;
+	return 0;
+}
+
+unsigned int sgxfive_kpoke_take(struct sgxfive_kpokes *k, u8 *img, bool render,
+				struct sgxfive_kpoke *done)
+{
+	unsigned int i, kept = 0, n = 0;
+
+	for (i = 0; i < k->n; i++) {
+		const struct sgxfive_kpoke p = k->p[i];
+		u8 *w;
+		u32 v;
+
+		if (render == (p.space == SGXFIVE_KPOKE_TQ)) {
+			k->p[kept++] = p;		/* the other kind's */
+			continue;
+		}
+		w = img + (p.space == SGXFIVE_KPOKE_RD ? SGXFIVE_RENDER_IMG_RD : 0) +
+		    4 * p.index;
+		v = get_unaligned_le32(w);
+		put_unaligned_le32(p.flip ? v ^ p.value : p.value, w);
+		done[n++] = p;
+	}
+	k->n = kept;
+	return n;
+}
+
+/*
+ * One write's lines, each a poke or "clear" (which drops what was armed
+ * before the write's pokes are added). A bad line fails the whole write and
+ * arms nothing. Arming needs the firmware running; clearing does not.
+ */
+int sgxfive_kpoke_write(struct sgxfive *sgx, char *buf)
+{
+	struct sgxfive_kpoke p[SGXFIVE_KPOKE_MAX];
+	unsigned int n = 0;
+	bool clear = false;
+	char *line;
+	int ret;
+
+	while ((line = strsep(&buf, "\n"))) {
+		line = strim(line);
+		if (!*line)
+			continue;
+		if (!strcmp(line, "clear")) {
+			clear = true;
+			continue;
+		}
+		if (n == SGXFIVE_KPOKE_MAX)
+			return -ENOSPC;
+		ret = sgxfive_kpoke_parse(line, &p[n]);
+		if (ret)
+			return ret;
+		n++;
+	}
+	if (n && !READ_ONCE(sgx->live))
+		return -ENODEV;
+	spin_lock(&sgx->kpoke_lock);
+	if (clear)
+		sgx->kpokes.n = 0;
+	ret = sgxfive_kpoke_arm(&sgx->kpokes, p, n);
+	spin_unlock(&sgx->kpoke_lock);
+	return ret;
+}
+
+void sgxfive_kpoke_job(struct sgxfive *sgx, u8 *img, bool render)
+{
+	struct sgxfive_kpoke done[SGXFIVE_KPOKE_MAX];
+	char line[SGXFIVE_KPOKE_LINE];
+	unsigned int i, n = 0;
+
+	spin_lock(&sgx->kpoke_lock);
+	if (sgx->kpokes.n)
+		n = sgxfive_kpoke_take(&sgx->kpokes, img, render, done);
+	spin_unlock(&sgx->kpoke_lock);
+	for (i = 0; i < n; i++) {
+		sgxfive_kpoke_format(&done[i], line, sizeof(line));
+		drm_info(sgx->dev, "sgxfive: kpoke %s applied\n", line);
+	}
+}
+
+/*
+ * The registers kreg may write, sorted. 0x0810-0x0abc the EDM firmware never
+ * reaches (none is in sgxfive_regdump_regs, which lists every register it
+ * reads or writes): writing them cannot race with the firmware's own use.
+ * 0x0418-0x0800 it writes only from a 3D render's details, never in the
+ * transfer kick: written before a transfer job, they hold through it, and the
+ * next render overwrites them.
+ */
+const u32 sgxfive_kreg_allowed[SGXFIVE_KREG_COUNT] = {
+	0x0418, 0x04dc, 0x04e8, 0x0520, 0x0800,
+	0x0810, 0x0814, 0x0818, 0x0a78, 0x0abc,
+};
+
+bool sgxfive_kreg_ok(u32 off)
+{
+	unsigned int i;
+
+	for (i = 0; i < SGXFIVE_KREG_COUNT; i++)
+		if (sgxfive_kreg_allowed[i] == off)
+			return true;
+	return false;
+}
+
+int sgxfive_kreg_parse(const char *s, u32 *off, bool *flip, u32 *value)
+{
+	char buf[SGXFIVE_KPOKE_LINE];
+	char *eq;
+	bool x = false;
+
+	if (strscpy(buf, s, sizeof(buf)) < 0)
+		return -EINVAL;
+	eq = strchr(buf, '=');
+	if (!eq)
+		return -EINVAL;
+	if (eq > buf && eq[-1] == '^') {
+		x = true;
+		eq[-1] = '\0';
+	}
+	*eq = '\0';
+	if (kstrtou32(buf, 0, off) || kstrtou32(eq + 1, 0, value))
+		return -EINVAL;
+	if (!sgxfive_kreg_ok(*off))
+		return -EPERM;
+	*flip = x;
+	return 0;
+}

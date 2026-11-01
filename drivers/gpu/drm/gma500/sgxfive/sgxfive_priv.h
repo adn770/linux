@@ -22,6 +22,9 @@
 #include <drm/sgxfive_drm.h>
 
 #include "sgx_fw.h"
+#if IS_ENABLED(CONFIG_DRM_GMA500_SGXFIVE_DEBUG)
+#include "sgxfive_kpoke.h"
+#endif
 
 struct drm_device;
 struct drm_file;
@@ -105,6 +108,8 @@ struct sgxfive {
 #if IS_ENABLED(CONFIG_DRM_GMA500_SGXFIVE_DEBUG)
 	struct sgxfive_xtest xt;
 	bool alias_ta3d_ro;		/* render VMs: TA3DCtl read-only */
+	spinlock_t kpoke_lock;		/* pokes for the next jobs' commands */
+	struct sgxfive_kpokes kpokes;
 #endif
 };
 
@@ -319,6 +324,10 @@ static inline void sgxfive_debug_reset(struct sgxfive *sgx)
 static inline bool sgxfive_alias_ta3d_ro(struct sgxfive *sgx)
 {
 	return false;
+}
+
+static inline void sgxfive_kpoke_job(struct sgxfive *sgx, u8 *img, bool render)
+{
 }
 #endif
 
