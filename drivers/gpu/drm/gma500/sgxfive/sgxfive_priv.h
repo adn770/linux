@@ -12,10 +12,12 @@
 #include <linux/io.h>
 #include <linux/list.h>
 #include <linux/mutex.h>
+#include <linux/spinlock.h>
 #include <linux/wait.h>
 #include <linux/workqueue.h>
 #include <linux/xarray.h>
 
+#include <drm/drm_mm.h>
 #include <drm/sgxfive_drm.h>
 
 #include "sgx_fw.h"
@@ -84,6 +86,10 @@ struct sgxfive {
 	struct list_head deferred;	/* in order of after */
 	unsigned int ndeferred;
 	struct delayed_work reaper;
+
+	/* Kernel memory for render-node contexts (sgxfive_kmem_alloc). */
+	struct drm_mm kmem;		/* offsets in the kernel data heap */
+	unsigned int kmem_users;	/* live allocations: no reload */
 #if IS_ENABLED(CONFIG_DRM_GMA500_SGXFIVE_DEBUG)
 	struct sgxfive_xtest xt;
 #endif
@@ -189,6 +195,7 @@ void sgxfive_defer(struct sgxfive *sgx, struct sgxfive_deferred *d);
 /* Per-open-file state of the render node. */
 struct sgxfive_file {
 	struct xarray vms;		/* handle -> struct sgxfive_vm */
+	struct xarray ctxs;		/* handle -> struct sgxfive_ctx */
 };
 
 struct sgxfive_vm *sgxfive_vm_get(struct sgxfive_file *f, u32 handle);
@@ -201,6 +208,12 @@ int sgxfive_query_heaps(struct drm_sgxfive_dev_query_args *a);
 
 bool sgxfive_is_bo(struct drm_gem_object *obj);
 void sgxfive_need_bif_inval(struct sgxfive *sgx);
+int sgxfive_kmem_alloc(struct sgxfive *sgx, struct drm_mm_node *node,
+		       struct sgxfive_buf *b, u32 size);
+void sgxfive_kmem_free(struct sgxfive *sgx, struct drm_mm_node *node,
+		       struct sgxfive_buf *b);
+int sgxfive_ensure_live(struct sgxfive *sgx);
+int sgxfive_ctx_check_args(const struct drm_sgxfive_create_context_args *a);
 
 int sgxfive_vm_check_range(const struct drm_sgxfive_heap *heaps, unsigned int n,
 			   u64 addr, u64 size);

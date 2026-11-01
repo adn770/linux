@@ -12,6 +12,7 @@
 #include <drm/sgxfive_drm.h>
 
 #include "sgxfive.h"
+#include "sgxfive_ctx.h"
 #include "sgxfive_priv.h"
 
 /*
@@ -282,6 +283,10 @@ int sgxfive_ioctl(struct sgxfive *sgx, unsigned int nr, void *data,
 		return sgxfive_ioctl_vm_map(sgx, data, file);
 	case DRM_SGXFIVE_VM_UNMAP:
 		return sgxfive_ioctl_vm_unmap(sgx, data, file);
+	case DRM_SGXFIVE_CREATE_CONTEXT:
+		return sgxfive_ioctl_create_ctx(sgx, data, file);
+	case DRM_SGXFIVE_DESTROY_CONTEXT:
+		return sgxfive_ioctl_destroy_ctx(sgx, data, file);
 	default:
 		return -EINVAL;
 	}

@@ -23,6 +23,7 @@
 #include "sgx_mmu.h"
 #include "sgx_seq.h"
 #include "sgxfive.h"
+#include "sgxfive_ctx.h"
 #include "sgxfive_priv.h"
 
 struct sgxfive_vm {
@@ -313,6 +314,7 @@ int sgxfive_open(struct sgxfive *sgx, struct drm_file *file)
 	if (!f)
 		return -ENOMEM;
 	xa_init_flags(&f->vms, XA_FLAGS_ALLOC1);
+	xa_init_flags(&f->ctxs, XA_FLAGS_ALLOC1);
 	file->driver_priv = f;
 	return 0;
 }
@@ -325,6 +327,7 @@ void sgxfive_postclose(struct sgxfive *sgx, struct drm_file *file)
 
 	if (!f)
 		return;
+	sgxfive_ctx_close_all(f);	/* contexts hold their VMs */
 	xa_for_each(&f->vms, i, vm)
 		sgxfive_vm_put(vm);
 	xa_destroy(&f->vms);

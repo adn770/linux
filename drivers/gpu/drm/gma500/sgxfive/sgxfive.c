@@ -13,6 +13,10 @@
  * the state and dri/N/sgx/stop puts the core back into reset. The row labels
  * in the comments (B1, C7, ...) are those of resgx545's
  * doc/specs/boot_sequence.md.
+ *
+ * The render node (sgxfive_drv.c) loads and boots the firmware itself when
+ * its first context is created, and keeps the memory of its contexts in the
+ * EDM's address space (sgxfive_kmem_alloc).
  */
 #include <linux/debugfs.h>
 #include <linux/delay.h>
@@ -26,6 +30,7 @@
 #include <asm/set_memory.h>
 
 #include <drm/drm_file.h>
+#include <drm/drm_mm.h>
 #include <drm/drm_print.h>
 
 #include "sgxfive.h"
@@ -227,9 +232,13 @@ static ssize_t sgxfive_load_write(struct file *f, const char __user *ubuf,
 	int ret;
 
 	mutex_lock(&sgx->lock);
-	if (sgx->loaded)
-		sgxfive_unload(sgx);
-	ret = sgxfive_load(sgx);
+	if (sgx->kmem_users) {
+		ret = -EBUSY;	/* contexts live in the EDM's page directory */
+	} else {
+		if (sgx->loaded)
+			sgxfive_unload(sgx);
+		ret = sgxfive_load(sgx);
+	}
 	mutex_unlock(&sgx->lock);
 	if (ret)
 		drm_err(sgx->dev, "SGX firmware load failed: %d\n", ret);
@@ -497,6 +506,48 @@ static int sgxfive_boot(struct sgxfive *sgx)
 	return 0;
 }
 
+/*
+ * Kernel memory for the render node (contexts and their CCBs): pages mapped
+ * write-combined in the EDM's page directory, from the kernel data heap above
+ * the firmware's buffers and the debug group's test area.
+ */
+#define KMEM_START	0x400000
+#define KMEM_END	0x05000000		/* REV1 kernel data heap size */
+
+int sgxfive_kmem_alloc(struct sgxfive *sgx, struct drm_mm_node *node,
+		       struct sgxfive_buf *b, u32 size)
+{
+	int ret;
+
+	mutex_lock(&sgx->lock);
+	ret = sgx->pd ? 0 : -ENODEV;	/* the firmware must be loaded */
+	if (!ret)
+		ret = drm_mm_insert_node(&sgx->kmem, node, PAGE_ALIGN(size));
+	if (!ret) {
+		ret = sgxfive_map_pd(sgx, sgx->pd, b,
+				     sgx_heap_base[HEAP_KERNEL_DATA] + node->start,
+				     size);
+		if (ret) {
+			sgxfive_unmap(sgx, b);
+			drm_mm_remove_node(node);
+		}
+	}
+	if (!ret)
+		sgx->kmem_users++;
+	mutex_unlock(&sgx->lock);
+	return ret;
+}
+
+void sgxfive_kmem_free(struct sgxfive *sgx, struct drm_mm_node *node,
+		       struct sgxfive_buf *b)
+{
+	mutex_lock(&sgx->lock);
+	sgxfive_unmap(sgx, b);
+	drm_mm_remove_node(node);
+	sgx->kmem_users--;
+	mutex_unlock(&sgx->lock);
+}
+
 #define SGXFIVE_REAP_MS	10
 
 /*
@@ -558,6 +609,18 @@ static void sgxfive_reaper(struct work_struct *work)
 	if (more)
 		queue_delayed_work(system_dfl_wq, &sgx->reaper,
 				   msecs_to_jiffies(SGXFIVE_REAP_MS));
+}
+
+/* Load and boot the firmware if it is not running yet. */
+int sgxfive_ensure_live(struct sgxfive *sgx)
+{
+	int ret = 0;
+
+	mutex_lock(&sgx->lock);
+	if (!sgx->live)
+		ret = sgxfive_boot(sgx);	/* loads it first if needed */
+	mutex_unlock(&sgx->lock);
+	return ret;
 }
 
 /* Page tables changed: the next command makes the BIF refetch them. */
@@ -775,6 +838,7 @@ struct sgxfive *sgxfive_create(const struct sgxfive_host *host)
 	init_waitqueue_head(&sgx->event_wq);
 	INIT_LIST_HEAD(&sgx->deferred);
 	INIT_DELAYED_WORK(&sgx->reaper, sgxfive_reaper);
+	drm_mm_init(&sgx->kmem, KMEM_START, KMEM_END - KMEM_START);
 	return sgx;
 }
 
@@ -809,5 +873,6 @@ void sgxfive_destroy(struct sgxfive *sgx)
 	cancel_delayed_work_sync(&sgx->reaper);
 	sgxfive_reaper(&sgx->reaper.work);
 	mutex_destroy(&sgx->lock);
+	drm_mm_takedown(&sgx->kmem);
 	kfree(sgx);
 }

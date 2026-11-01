@@ -102,6 +102,10 @@ struct drm_sgxfive_obj_array {
 	SGXFIVE_IOCTL(VM_MAP, DRM_IOW, vm_map)
 #define DRM_IOCTL_SGXFIVE_VM_UNMAP \
 	SGXFIVE_IOCTL(VM_UNMAP, DRM_IOW, vm_unmap)
+#define DRM_IOCTL_SGXFIVE_CREATE_CONTEXT \
+	SGXFIVE_IOCTL(CREATE_CONTEXT, DRM_IOWR, create_context)
+#define DRM_IOCTL_SGXFIVE_DESTROY_CONTEXT \
+	SGXFIVE_IOCTL(DESTROY_CONTEXT, DRM_IOW, destroy_context)
 
 /**
  * DOC: sgxfive DEV_QUERY
@@ -481,6 +485,83 @@ struct drm_sgxfive_vm_unmap_args {
 
 	/** @size: [IN] Size of the mapping; must match it exactly. */
 	__u64 size;
+};
+
+/**
+ * DOC: sgxfive CREATE_CONTEXT and DESTROY_CONTEXT
+ *
+ * A context is one firmware queue (an SGX HW context and its client CCB, all
+ * kernel-owned) bound to one VM context for its lifetime. Contexts run their
+ * jobs in submission order; the firmware arbitrates between contexts. An
+ * open file has at most %DRM_SGXFIVE_FILE_MAX_CONTEXTS contexts at a time;
+ * CREATE_CONTEXT beyond that fails with -ENOSPC.
+ * A context whose job hung is lost: its pending jobs complete with an error
+ * and further submissions fail with -ECANCELED.
+ */
+
+/* Contexts one open file may hold at a time. */
+#define DRM_SGXFIVE_FILE_MAX_CONTEXTS		64
+
+/**
+ * enum drm_sgxfive_ctx_type - Values for &drm_sgxfive_create_context_args.type.
+ */
+enum drm_sgxfive_ctx_type {
+	/** @DRM_SGXFIVE_CTX_TYPE_TRANSFER: Transfer (blit, fill, copy) jobs. */
+	DRM_SGXFIVE_CTX_TYPE_TRANSFER = 0,
+	/* DRM_SGXFIVE_CTX_TYPE_RENDER (TA + 3D) later. */
+};
+
+/**
+ * enum drm_sgxfive_ctx_priority - Values for &drm_sgxfive_create_context_args.priority.
+ */
+enum drm_sgxfive_ctx_priority {
+	/** @DRM_SGXFIVE_CTX_PRIORITY_NORMAL: The only priority the firmware schedules. */
+	DRM_SGXFIVE_CTX_PRIORITY_NORMAL = 0,
+};
+
+/**
+ * struct drm_sgxfive_create_context_args - Arguments for
+ * %DRM_IOCTL_SGXFIVE_CREATE_CONTEXT.
+ */
+struct drm_sgxfive_create_context_args {
+	/** @type: [IN] &enum drm_sgxfive_ctx_type. */
+	__u32 type;
+
+	/** @flags: [IN] None defined; zero. */
+	__u32 flags;
+
+	/** @priority: [IN] &enum drm_sgxfive_ctx_priority. */
+	__s32 priority;
+
+	/** @vm_context_handle: [IN] The VM context the jobs run in. */
+	__u32 vm_context_handle;
+
+	/** @handle: [OUT] Context handle. */
+	__u32 handle;
+
+	/**
+	 * @max_width: [IN] The widest render target of a render context's jobs.
+	 * Transfer contexts: zero.
+	 */
+	__u32 max_width;
+
+	/** @max_height: [IN] As @max_width, for the height. */
+	__u32 max_height;
+
+	/** @_padding_1c: Reserved, zero. */
+	__u32 _padding_1c;
+};
+
+/**
+ * struct drm_sgxfive_destroy_context_args - Arguments for
+ * %DRM_IOCTL_SGXFIVE_DESTROY_CONTEXT.
+ */
+struct drm_sgxfive_destroy_context_args {
+	/** @handle: [IN] Context handle. */
+	__u32 handle;
+
+	/** @_padding_4: Reserved, zero. */
+	__u32 _padding_4;
 };
 
 #if defined(__cplusplus)
