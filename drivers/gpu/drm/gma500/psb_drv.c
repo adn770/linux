@@ -29,6 +29,7 @@
 
 #include "framebuffer.h"
 #include "gem.h"
+#include "gma_sgx.h"
 #include "intel_bios.h"
 #include "mid_bios.h"
 #include "power.h"
@@ -178,6 +179,8 @@ static void psb_driver_unload(struct drm_device *dev)
 		dev_priv->ops->chip_teardown(dev);
 
 	psb_intel_opregion_fini(dev);
+
+	gma_sgx_fini(dev);
 
 	if (dev_priv->pf_pd) {
 		psb_mmu_free_pagedir(dev_priv->pf_pd);
@@ -361,6 +364,8 @@ static int psb_driver_load(struct drm_device *dev, unsigned long flags)
 	PSB_WSGX32(0x20000000, PSB_CR_PDS_EXEC_BASE);
 	PSB_WSGX32(0x30000000, PSB_CR_BIF_3D_REQ_BASE);
 
+	gma_sgx_init(dev);
+
 	acpi_video_register();
 
 	/* Setup vertical blanking handling */
@@ -511,6 +516,9 @@ static const struct drm_driver driver = {
 	PSB_FBDEV_DRIVER_OPS,
 	.ioctls = psb_ioctls,
 	.fops = &psb_gem_fops,
+#if defined(CONFIG_DEBUG_FS)
+	.debugfs_init = gma_sgx_debugfs_init,
+#endif
 	.name = DRIVER_NAME,
 	.desc = DRIVER_DESC,
 	.major = DRIVER_MAJOR,

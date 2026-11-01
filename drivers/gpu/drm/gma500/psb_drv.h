@@ -186,6 +186,8 @@
 struct drm_fb_helper;
 struct drm_fb_helper_surface_size;
 
+struct sgxfive;
+
 struct opregion_header;
 struct opregion_acpi;
 struct opregion_swsci;
@@ -404,6 +406,9 @@ struct drm_psb_private {
 
 	struct psb_mmu_driver *mmu;
 	struct psb_mmu_pd *pf_pd;
+
+	/* The SGX545 GPU (Cedarview only), see gma_sgx.c */
+	struct sgxfive *sgx;
 
 	/* Register base */
 	uint8_t __iomem *sgx_reg;
