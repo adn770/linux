@@ -6,6 +6,8 @@
  * command, and its checks; the order of job numbers. SUBMIT_JOBS' copy of a
  * user array at any stride, the sync op encoding and which waits an earlier
  * job of the same call satisfies.
+ * The client CCB a context is rebuilt with after a recovery reset, whom a
+ * hang blames, the errors a recovery fails jobs with, the fault budget.
  */
 #include <kunit/test.h>
 #include <linux/dma-fence.h>
@@ -340,6 +342,241 @@ static void sgxfive_job_test_sync_signals(struct kunit *test)
 	KUNIT_EXPECT_FALSE(test, sgxfive_sync_signals(earlier, 0, &cases[0].wait));
 }
 
+/* A context with its memory in a plain buffer, as far as fences need one. */
+static struct sgxfive_ctx *fake_ctx(struct kunit *test)
+{
+	struct sgxfive_ctx *ctx = kunit_kzalloc(test, sizeof(*ctx), GFP_KERNEL);
+
+	KUNIT_ASSERT_NOT_NULL(test, ctx);
+	ctx->mem.va = kunit_kzalloc(test, SGXFIVE_CTX_MEM_SIZE, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, ctx->mem.va);
+	ctx->fence_context = dma_fence_context_alloc(1);
+	spin_lock_init(&ctx->fence_lock);
+	INIT_LIST_HEAD(&ctx->pending);
+	return ctx;
+}
+
+/*
+ * After a reset the client CCB holds the context's unfinished commands from
+ * offset 0, in order, and the fence word the last job it finished.
+ */
+static void sgxfive_job_test_rewind(struct kunit *test)
+{
+	struct sgxfive_ctx *ctx = fake_ctx(test);
+	u8 *ccb = sgxfive_ctx_cpu(ctx, SGXFIVE_CTX_CCB_OFF);
+	u32 *ctl = sgxfive_ctx_cpu(ctx, SGXFIVE_CTX_CTL_OFF);
+	u32 *done = sgxfive_ctx_cpu(ctx, SGXFIVE_CTX_FENCE_OFF);
+	struct dma_fence *f[3];
+	u8 *cmd[3];
+	u64 order;
+	int i;
+
+	for (i = 0; i < 3; i++) {
+		struct sgxfive_fence *hw = sgxfive_fence_alloc();
+
+		KUNIT_ASSERT_NOT_NULL(test, hw);
+		cmd[i] = kunit_kzalloc(test, SGX_XFER_CMD_SIZE, GFP_KERNEL);
+		KUNIT_ASSERT_NOT_NULL(test, cmd[i]);
+		memset(cmd[i], 0x11 * (i + 1), SGX_XFER_CMD_SIZE);
+		memcpy(hw->cmd, cmd[i], SGX_XFER_CMD_SIZE);
+		f[i] = sgxfive_fence_init(hw, ctx, i + 1, 10 + i, 0x100);
+	}
+	KUNIT_EXPECT_TRUE(test, sgxfive_ctx_oldest(ctx, &order));
+	KUNIT_EXPECT_EQ(test, order, 10);
+
+	/* The first job completes. */
+	*done = 1;
+	sgxfive_fence_signal(ctx);
+	KUNIT_EXPECT_TRUE(test, dma_fence_is_signaled(f[0]));
+	KUNIT_EXPECT_FALSE(test, dma_fence_is_signaled(f[1]));
+	KUNIT_EXPECT_TRUE(test, sgxfive_ctx_oldest(ctx, &order));
+	KUNIT_EXPECT_EQ(test, order, 11);
+
+	/* Stale state from before the reset. */
+	ctx->woff = 0x300;
+	ctl[0] = 0x300;
+	ctl[1] = 0x200;
+	memset(ccb, 0xee, 0x400);
+	*done = 0xdead;
+
+	KUNIT_EXPECT_EQ(test, sgxfive_ctx_rewind(ctx), 2);
+	KUNIT_EXPECT_EQ(test, ctx->woff, 0x200);
+	KUNIT_EXPECT_EQ(test, ctl[0], 0x200);
+	KUNIT_EXPECT_EQ(test, ctl[1], 0);
+	KUNIT_EXPECT_EQ(test, *done, 1);
+	KUNIT_EXPECT_EQ(test, memcmp(ccb, cmd[1], 0x100), 0);
+	KUNIT_EXPECT_EQ(test, memcmp(ccb + 0x100, cmd[2], SGX_XFER_CMD_SIZE), 0);
+	KUNIT_EXPECT_FALSE(test, dma_fence_is_signaled(f[1]));
+	KUNIT_EXPECT_FALSE(test, dma_fence_is_signaled(f[2]));
+
+	/* A guilty context's jobs fail instead. */
+	sgxfive_fence_fail_all(ctx, -EIO);
+	for (i = 1; i < 3; i++) {
+		KUNIT_EXPECT_TRUE(test, dma_fence_is_signaled(f[i]));
+		KUNIT_EXPECT_EQ(test, f[i]->error, -EIO);
+	}
+	KUNIT_EXPECT_FALSE(test, sgxfive_ctx_oldest(ctx, &order));
+	KUNIT_EXPECT_EQ(test, sgxfive_ctx_rewind(ctx), 0);
+	KUNIT_EXPECT_EQ(test, ctx->woff, 0);
+	for (i = 0; i < 3; i++)
+		dma_fence_put(f[i]);
+}
+
+/* A job of order on ctx, unfinished, its fence returned. */
+static struct dma_fence *fake_job(struct kunit *test, struct sgxfive_ctx *ctx, u32 seqno,
+				  u64 order)
+{
+	struct sgxfive_fence *hw = sgxfive_fence_alloc();
+
+	if (!hw)
+		return NULL;
+	return sgxfive_fence_init(hw, ctx, seqno, order, SGX_XFER_CMD_SIZE);
+}
+
+/*
+ * Whom a hang blames. A BIF fault names a page directory: the context to blame
+ * is the one with the oldest unfinished job among the contexts on that
+ * directory (one VM). Without a directory (the EDM's own list, a directory no
+ * context uses, or one whose contexts have nothing unfinished) it is the owner
+ * of the oldest unfinished job of all, as before.
+ */
+static void sgxfive_job_test_suspect(struct kunit *test)
+{
+	struct sgxfive_ctx *a = fake_ctx(test), *b = fake_ctx(test), *c = fake_ctx(test);
+	struct dma_fence *f[4];
+	LIST_HEAD(ctxs);
+	u64 order;
+	int i;
+
+	a->pd_phys = 0x01234000;	/* a render context and ... */
+	c->pd_phys = 0x01234000;	/* ... a transfer context in one VM */
+	b->pd_phys = 0x02345000;	/* a transfer context in another */
+	list_add_tail(&a->link, &ctxs);
+	list_add_tail(&b->link, &ctxs);
+	list_add_tail(&c->link, &ctxs);
+
+	order = 1;
+	KUNIT_EXPECT_NULL(test, sgxfive_ctx_suspect(&ctxs, 0, &order));
+	KUNIT_EXPECT_EQ(test, order, U64_MAX);
+	f[0] = fake_job(test, a, 1, 10);	/* the render, queued first */
+	f[1] = fake_job(test, b, 1, 11);	/* the faulting transfer */
+	f[2] = fake_job(test, c, 1, 12);
+	f[3] = fake_job(test, a, 2, 13);
+	for (i = 0; i < 4; i++)
+		KUNIT_ASSERT_NOT_NULL(test, f[i]);
+
+	/* By age: the render. */
+	KUNIT_EXPECT_PTR_EQ(test, sgxfive_ctx_suspect(&ctxs, 0, &order), a);
+	KUNIT_EXPECT_EQ(test, order, 10);
+	/* By the fault's directory: the transfer. */
+	KUNIT_EXPECT_PTR_EQ(test, sgxfive_ctx_suspect(&ctxs, 0x02345000, &order), b);
+	KUNIT_EXPECT_EQ(test, order, 11);
+	/* Two contexts on the directory: the older job of the two. */
+	KUNIT_EXPECT_PTR_EQ(test, sgxfive_ctx_suspect(&ctxs, 0x01234000, &order), a);
+	KUNIT_EXPECT_EQ(test, order, 10);
+	/* A directory no context uses: by age. */
+	KUNIT_EXPECT_PTR_EQ(test, sgxfive_ctx_suspect(&ctxs, 0x03456000, &order), a);
+	KUNIT_EXPECT_EQ(test, order, 10);
+
+	/* The job a suspect order names, while it is its context's oldest. */
+	KUNIT_EXPECT_PTR_EQ(test, sgxfive_ctx_of_job(&ctxs, 11), b);
+	KUNIT_EXPECT_PTR_EQ(test, sgxfive_ctx_of_job(&ctxs, 10), a);
+	KUNIT_EXPECT_PTR_EQ(test, sgxfive_ctx_of_job(&ctxs, 12), c);
+	KUNIT_EXPECT_NULL(test, sgxfive_ctx_of_job(&ctxs, 13));	/* a has 10 first */
+	KUNIT_EXPECT_NULL(test, sgxfive_ctx_of_job(&ctxs, 14));
+	KUNIT_EXPECT_NULL(test, sgxfive_ctx_of_job(&ctxs, U64_MAX));
+
+	/* Once the transfer is failed (recovered), its directory has nothing left. */
+	sgxfive_fence_fail_all(b, -EIO);
+	KUNIT_EXPECT_NULL(test, sgxfive_ctx_of_job(&ctxs, 11));
+	KUNIT_EXPECT_PTR_EQ(test, sgxfive_ctx_suspect(&ctxs, 0x02345000, &order), a);
+	KUNIT_EXPECT_EQ(test, order, 10);
+	sgxfive_fence_fail_all(a, -EIO);
+	sgxfive_fence_fail_all(c, -EIO);
+	for (i = 0; i < 4; i++)
+		dma_fence_put(f[i]);
+}
+
+/* The error a hang's guilty job fails with names the detector that found it. */
+static void sgxfive_job_test_hang_error(struct kunit *test)
+{
+	KUNIT_EXPECT_EQ(test, sgxfive_hang_error(SGXFIVE_HANG_FAULT), -EIO);
+	KUNIT_EXPECT_EQ(test, sgxfive_hang_error(SGXFIVE_HANG_TIMEOUT), -ETIMEDOUT);
+	KUNIT_EXPECT_EQ(test, sgxfive_hang_error(SGXFIVE_HANG_MANUAL), -EIO);
+}
+
+/*
+ * A recovery fails the guilty context's oldest unfinished job, the one that
+ * faulted or hung, with the hang's error and its later jobs with -ECANCELED.
+ * Another context's unfinished jobs are rewound, re-run and signal without
+ * an error.
+ */
+static void sgxfive_job_test_guilty(struct kunit *test)
+{
+	struct sgxfive_ctx *a = fake_ctx(test), *b = fake_ctx(test);
+	u32 *done = sgxfive_ctx_cpu(b, SGXFIVE_CTX_FENCE_OFF);
+	struct dma_fence *f[5];
+	u64 order;
+	int i;
+
+	f[0] = fake_job(test, a, 1, 10);	/* faults */
+	f[1] = fake_job(test, b, 1, 11);	/* innocent, queued behind it */
+	f[2] = fake_job(test, a, 2, 12);
+	f[3] = fake_job(test, a, 3, 13);
+	f[4] = fake_job(test, b, 2, 14);
+	for (i = 0; i < 5; i++)
+		KUNIT_ASSERT_NOT_NULL(test, f[i]);
+
+	sgxfive_fence_fail_guilty(a, sgxfive_hang_error(SGXFIVE_HANG_FAULT));
+	KUNIT_EXPECT_TRUE(test, dma_fence_is_signaled(f[0]));
+	KUNIT_EXPECT_EQ(test, dma_fence_get_status(f[0]), -EIO);
+	KUNIT_EXPECT_EQ(test, dma_fence_get_status(f[2]), -ECANCELED);
+	KUNIT_EXPECT_EQ(test, dma_fence_get_status(f[3]), -ECANCELED);
+	KUNIT_EXPECT_FALSE(test, sgxfive_ctx_oldest(a, &order));
+	KUNIT_EXPECT_EQ(test, dma_fence_get_status(f[1]), 0);	/* still pending */
+	KUNIT_EXPECT_EQ(test, dma_fence_get_status(f[4]), 0);
+
+	/* The innocent context re-runs both jobs after the reset. */
+	*done = 0xdead;
+	KUNIT_EXPECT_EQ(test, sgxfive_ctx_rewind(b), 2);
+	KUNIT_EXPECT_EQ(test, *done, 0);
+	*done = 2;
+	sgxfive_fence_signal(b);
+	KUNIT_EXPECT_EQ(test, dma_fence_get_status(f[1]), 1);
+	KUNIT_EXPECT_EQ(test, dma_fence_get_status(f[4]), 1);
+
+	/* A hang found by the job timeout, on a context with one job. */
+	dma_fence_put(f[0]);
+	f[0] = fake_job(test, a, 4, 15);
+	KUNIT_ASSERT_NOT_NULL(test, f[0]);
+	sgxfive_fence_fail_guilty(a, sgxfive_hang_error(SGXFIVE_HANG_TIMEOUT));
+	KUNIT_EXPECT_EQ(test, dma_fence_get_status(f[0]), -ETIMEDOUT);
+	/* Nothing unfinished: nothing to fail. */
+	sgxfive_fence_fail_guilty(a, -EIO);
+	KUNIT_EXPECT_EQ(test, dma_fence_get_status(f[0]), -ETIMEDOUT);
+	for (i = 0; i < 5; i++)
+		dma_fence_put(f[i]);
+}
+
+/* Three faults within a minute ban the file; older faults do not count. */
+static void sgxfive_job_test_budget(struct kunit *test)
+{
+	struct sgxfive_client c = { }, w = { };
+	unsigned long t = 1000, u = ULONG_MAX - HZ;
+
+	KUNIT_EXPECT_FALSE(test, sgxfive_client_fault(&c, t));
+	KUNIT_EXPECT_FALSE(test, sgxfive_client_fault(&c, t + 61 * HZ));
+	KUNIT_EXPECT_FALSE(test, sgxfive_client_fault(&c, t + 62 * HZ));
+	KUNIT_EXPECT_FALSE(test, c.banned);
+	KUNIT_EXPECT_TRUE(test, sgxfive_client_fault(&c, t + 63 * HZ));
+	KUNIT_EXPECT_TRUE(test, c.banned);
+
+	/* Across the jiffies wrap. */
+	KUNIT_EXPECT_FALSE(test, sgxfive_client_fault(&w, u));
+	KUNIT_EXPECT_FALSE(test, sgxfive_client_fault(&w, u + HZ));
+	KUNIT_EXPECT_TRUE(test, sgxfive_client_fault(&w, u + 2 * HZ));
+}
+
 static struct kunit_case sgxfive_job_test_cases[] = {
 	KUNIT_CASE(sgxfive_job_test_build),
 	KUNIT_CASE(sgxfive_job_test_dummy),
@@ -350,6 +587,11 @@ static struct kunit_case sgxfive_job_test_cases[] = {
 	KUNIT_CASE(sgxfive_job_test_copy_array_limits),
 	KUNIT_CASE(sgxfive_job_test_sync_op),
 	KUNIT_CASE(sgxfive_job_test_sync_signals),
+	KUNIT_CASE(sgxfive_job_test_rewind),
+	KUNIT_CASE(sgxfive_job_test_suspect),
+	KUNIT_CASE(sgxfive_job_test_hang_error),
+	KUNIT_CASE(sgxfive_job_test_guilty),
+	KUNIT_CASE(sgxfive_job_test_budget),
 	{}
 };
 

@@ -895,6 +895,38 @@ static int sgxfive_xfer_ro_show(struct seq_file *m, void *unused)
 }
 DEFINE_SHOW_ATTRIBUTE(sgxfive_xfer_ro);
 
+/*
+ * Writing to reset resets the firmware in place without blaming a job: the
+ * recovery of a hang, on demand. Contexts with unfinished jobs run them
+ * again.
+ */
+static ssize_t sgxfive_reset_write(struct file *f, const char __user *ubuf,
+				   size_t len, loff_t *ppos)
+{
+	struct sgxfive *sgx = file_inode(f)->i_private;
+	int ret;
+
+	ret = sgxfive_recover(sgx, U64_MAX, SGXFIVE_HANG_MANUAL);
+	return ret ? ret : len;
+}
+
+static const struct file_operations sgxfive_reset_fops = {
+	.owner = THIS_MODULE,
+	.write = sgxfive_reset_write,
+};
+
+/* A recovery reset rebuilt the firmware's buffers: the test area starts over. */
+void sgxfive_debug_reset(struct sgxfive *sgx)
+{
+	unsigned int i;
+
+	for (i = 0; i < XB_COUNT; i++)
+		if (sgx->xt.buf[i].va)
+			memset(sgx->xt.buf[i].va, 0, sgxfive_xbuf[i].size);
+	sgx->xt.woff = 0;
+	sgx->xt.runs = 0;	/* the next transfer initialises the context */
+}
+
 void sgxfive_debug_init(struct sgxfive *sgx, struct dentry *dir)
 {
 	debugfs_create_file("miscinfo", 0400, dir, sgx, &sgxfive_miscinfo_fops);
@@ -908,4 +940,5 @@ void sgxfive_debug_init(struct sgxfive *sgx, struct dentry *dir)
 	debugfs_create_bool("alias_ro", 0600, dir, &sgx->xt.alias_ro);
 	debugfs_create_bool("no_alias", 0600, dir, &sgx->xt.no_alias);
 	debugfs_create_file("xfer_ro", 0400, dir, sgx, &sgxfive_xfer_ro_fops);
+	debugfs_create_file("reset", 0200, dir, sgx, &sgxfive_reset_fops);
 }

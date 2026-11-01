@@ -18,6 +18,21 @@
 #include "sgxfive_priv.h"
 
 /*
+ * The fault budget of one open file, shared with its contexts, which may
+ * outlive the file through their jobs: after SGXFIVE_FAULT_BUDGET faulting or
+ * hung jobs within SGXFIVE_FAULT_WINDOW the file is banned.
+ */
+#define SGXFIVE_FAULT_BUDGET	3
+#define SGXFIVE_FAULT_WINDOW	(60 * HZ)
+
+struct sgxfive_client {
+	struct kref ref;
+	unsigned long faults[SGXFIVE_FAULT_BUDGET];	/* jiffies, a ring */
+	unsigned int nfaults;
+	bool banned;
+};
+
+/*
  * A context's kernel memory: the client CCB, then one page of control data:
  * the HW transfer context and the CCB's control block.
  */
@@ -34,6 +49,7 @@ struct sgxfive_ctx {
 	u32 type;			/* enum drm_sgxfive_ctx_type */
 	struct sgxfive_vm *vm;		/* holds a reference */
 	u32 pd_phys;			/* the VM's page directory */
+	struct sgxfive_client *client;	/* holds a reference */
 	struct drm_mm_node node;	/* in the kernel data heap */
 	struct sgxfive_buf mem;
 
@@ -50,10 +66,13 @@ struct sgxfive_ctx {
 	u32 seqno;			/* last job number handed out */
 	bool lost;			/* a job of it hung: no more jobs */
 	bool closed;			/* destroyed: under submit_lock */
+	u32 replay;			/* jobs to re-run after a reset */
 };
 
 /*
- * A job's hardware fence (sgxfive_fence.c), with the job's firmware command.
+ * A job's hardware fence (sgxfive_fence.c). It keeps the job's firmware
+ * command until it signals, so that after a recovery reset the context's
+ * client CCB can be rebuilt with the commands the firmware has not finished.
  */
 struct sgxfive_fence {
 	struct dma_fence base;
@@ -87,6 +106,11 @@ struct dma_fence *sgxfive_fence_init(struct sgxfive_fence *f,
 				     u64 order, u32 size);
 void sgxfive_fence_signal(struct sgxfive_ctx *ctx);
 void sgxfive_fence_fail_all(struct sgxfive_ctx *ctx, int error);
+void sgxfive_fence_fail_guilty(struct sgxfive_ctx *ctx, int error);
+bool sgxfive_ctx_oldest(struct sgxfive_ctx *ctx, u64 *order);
+struct sgxfive_ctx *sgxfive_ctx_suspect(struct list_head *ctxs, u32 pd, u64 *order);
+struct sgxfive_ctx *sgxfive_ctx_of_job(struct list_head *ctxs, u64 order);
+u32 sgxfive_ctx_rewind(struct sgxfive_ctx *ctx);
 
 /* SUBMIT_JOBS (sgxfive_submit.c) and its limits, which DEV_QUERY reports. */
 #define SGXFIVE_MAX_JOBS	16
@@ -99,6 +123,10 @@ int sgxfive_copy_array(void *dst, size_t size, const struct drm_sgxfive_obj_arra
 int sgxfive_sync_op_check(const struct drm_sgxfive_sync_op *op);
 bool sgxfive_sync_signals(const struct drm_sgxfive_sync_op *ops, u32 n,
 			  const struct drm_sgxfive_sync_op *wait);
+
+struct sgxfive_client *sgxfive_client_create(void);
+void sgxfive_client_put(struct sgxfive_client *c);
+bool sgxfive_client_fault(struct sgxfive_client *c, unsigned long now);
 
 struct sgxfive_ctx *sgxfive_ctx_get(struct sgxfive_file *f, u32 handle);
 void sgxfive_ctx_put(struct sgxfive_ctx *ctx);

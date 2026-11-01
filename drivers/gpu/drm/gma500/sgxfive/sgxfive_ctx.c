@@ -16,6 +16,41 @@
 #include "sgxfive_ctx.h"
 #include "sgxfive_priv.h"
 
+struct sgxfive_client *sgxfive_client_create(void)
+{
+	struct sgxfive_client *c = kzalloc_obj(*c);
+
+	if (c)
+		kref_init(&c->ref);
+	return c;
+}
+
+static void sgxfive_client_release(struct kref *ref)
+{
+	kfree(container_of(ref, struct sgxfive_client, ref));
+}
+
+void sgxfive_client_put(struct sgxfive_client *c)
+{
+	kref_put(&c->ref, sgxfive_client_release);
+}
+
+/*
+ * One of the client's jobs faulted or hung at now (jiffies). Returns whether
+ * the client is banned: SGXFIVE_FAULT_BUDGET faults within the window.
+ */
+bool sgxfive_client_fault(struct sgxfive_client *c, unsigned long now)
+{
+	unsigned long first;
+
+	c->faults[c->nfaults++ % SGXFIVE_FAULT_BUDGET] = now;
+	first = c->faults[c->nfaults % SGXFIVE_FAULT_BUDGET];
+	if (c->nfaults >= SGXFIVE_FAULT_BUDGET &&
+	    time_before(now, first + SGXFIVE_FAULT_WINDOW))
+		WRITE_ONCE(c->banned, true);
+	return c->banned;
+}
+
 /*
  * CREATE_CONTEXT's arguments: no flags, the one priority, zero padding.
  * A transfer context states no render target size: both fields stay zero.
@@ -42,6 +77,7 @@ static void sgxfive_ctx_release(struct kref *ref)
 	sgxfive_fence_fail_all(ctx, -ECANCELED);	/* none should be left */
 	sgxfive_kmem_free(sgx, &ctx->node, &ctx->mem);
 	sgxfive_vm_put(ctx->vm);
+	sgxfive_client_put(ctx->client);
 	mutex_destroy(&ctx->submit_lock);
 	kfree(ctx);
 }
@@ -73,6 +109,8 @@ int sgxfive_ioctl_create_ctx(struct sgxfive *sgx, void *data,
 
 	if (sgxfive_ctx_check_args(a))
 		return -EINVAL;
+	if (READ_ONCE(f->client->banned))
+		return -ECANCELED;
 	ctx = kzalloc_obj(*ctx);
 	if (!ctx)
 		return -ENOMEM;
@@ -93,6 +131,8 @@ int sgxfive_ioctl_create_ctx(struct sgxfive *sgx, void *data,
 	ctx->sgx = sgx;
 	ctx->type = a->type;
 	ctx->pd_phys = sgxfive_vm_pd_phys(ctx->vm);
+	ctx->client = f->client;
+	kref_get(&ctx->client->ref);
 	kref_init(&ctx->ref);
 	mutex_init(&ctx->submit_lock);
 	ctx->fence_context = dma_fence_context_alloc(1);

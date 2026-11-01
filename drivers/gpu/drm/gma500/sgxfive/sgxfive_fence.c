@@ -5,6 +5,7 @@
  * it raises SW_EVENT, so on every SW_EVENT the interrupt handler signals each
  * context's pending fences up to the number in its fence word. Contexts run
  * their jobs in order, so the word only moves forward.
+ * Fences keep their job's command for sgxfive_ctx_rewind (sgxfive_ctx.h).
  */
 #include <linux/dma-fence.h>
 #include <linux/slab.h>
@@ -96,6 +97,115 @@ void sgxfive_fence_signal(struct sgxfive_ctx *ctx)
 void sgxfive_fence_fail_all(struct sgxfive_ctx *ctx, int error)
 {
 	sgxfive_fence_retire(ctx, error, error);
+}
+
+/*
+ * A recovery blamed ctx: its oldest unfinished job, the one that faulted or
+ * hung, fails with error and the jobs queued behind it with -ECANCELED.
+ */
+void sgxfive_fence_fail_guilty(struct sgxfive_ctx *ctx, int error)
+{
+	sgxfive_fence_retire(ctx, error, -ECANCELED);
+}
+
+/* The error a hang's guilty job fails with: what the detector found. */
+int sgxfive_hang_error(enum sgxfive_hang why)
+{
+	return why == SGXFIVE_HANG_TIMEOUT ? -ETIMEDOUT : -EIO;
+}
+
+/* The order of the context's oldest unfinished job; false if it has none. */
+bool sgxfive_ctx_oldest(struct sgxfive_ctx *ctx, u64 *order)
+{
+	struct sgxfive_fence *f;
+	unsigned long flags;
+
+	spin_lock_irqsave(&ctx->fence_lock, flags);
+	f = list_first_entry_or_null(&ctx->pending, struct sgxfive_fence, link);
+	if (f)
+		*order = f->order;
+	spin_unlock_irqrestore(&ctx->fence_lock, flags);
+	return f;
+}
+
+/*
+ * Under the device's context lock: the context to blame for a hang, and the
+ * order of its job in *order (U64_MAX and NULL if no job is unfinished). With
+ * pd, the page directory a BIF fault went through, the context with the oldest
+ * unfinished job among those on that directory, i.e. in the faulting VM: the
+ * firmware runs a transfer queued after a render ahead of the render's 3D
+ * work, so the oldest job of all need not be the one that faulted. Without
+ * one (pd 0), or when no context on it has an unfinished job, the owner of the
+ * oldest unfinished job of all.
+ */
+struct sgxfive_ctx *sgxfive_ctx_suspect(struct list_head *ctxs, u32 pd, u64 *order)
+{
+	struct sgxfive_ctx *ctx, *owner = NULL, *any = NULL;
+	u64 o, oldest = U64_MAX, all = U64_MAX;
+
+	list_for_each_entry(ctx, ctxs, link) {
+		if (!sgxfive_ctx_oldest(ctx, &o))
+			continue;
+		if (o < all) {
+			all = o;
+			any = ctx;
+		}
+		if (pd && ctx->pd_phys == pd && o < oldest) {
+			oldest = o;
+			owner = ctx;
+		}
+	}
+	if (!owner) {
+		owner = any;
+		oldest = all;
+	}
+	*order = oldest;
+	return owner;
+}
+
+/*
+ * Under the device's context lock: the context whose oldest unfinished job is
+ * the one of order, NULL if none (the job finished or failed, or is not next).
+ */
+struct sgxfive_ctx *sgxfive_ctx_of_job(struct list_head *ctxs, u64 order)
+{
+	struct sgxfive_ctx *ctx;
+	u64 o;
+
+	if (order == U64_MAX)
+		return NULL;
+	list_for_each_entry(ctx, ctxs, link)
+		if (sgxfive_ctx_oldest(ctx, &o) && o == order)
+			return ctx;
+	return NULL;
+}
+
+/*
+ * With the firmware stopped: rewrite the client CCB from offset 0 with the
+ * commands of the context's unfinished jobs, in order, and set the fence word
+ * to the job before the first of them. Returns how many there are.
+ */
+u32 sgxfive_ctx_rewind(struct sgxfive_ctx *ctx)
+{
+	u32 *ctl = sgxfive_ctx_cpu(ctx, SGXFIVE_CTX_CTL_OFF);
+	u8 *ccb = sgxfive_ctx_cpu(ctx, SGXFIVE_CTX_CCB_OFF);
+	struct sgxfive_fence *f;
+	unsigned long flags;
+	u32 n = 0, woff = 0;
+
+	spin_lock_irqsave(&ctx->fence_lock, flags);
+	list_for_each_entry(f, &ctx->pending, link) {
+		if (!n++)
+			WRITE_ONCE(*(u32 *)sgxfive_ctx_cpu(ctx, SGXFIVE_CTX_FENCE_OFF),
+				   (u32)f->base.seqno - 1);
+		memcpy(ccb + woff, f->cmd, SGX_XFER_CMD_SIZE);
+		woff = (woff + f->size) & (SGX_XFER_CCB_SIZE - 1);
+	}
+	spin_unlock_irqrestore(&ctx->fence_lock, flags);
+	ctx->woff = woff;
+	WRITE_ONCE(ctl[0], woff);	/* host write offset */
+	WRITE_ONCE(ctl[1], 0);		/* firmware read offset */
+	return n;
 }
 
 /* From the SW_EVENT interrupt: every live context. */

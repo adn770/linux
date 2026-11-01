@@ -500,8 +500,12 @@ struct drm_sgxfive_vm_unmap_args {
  * DESTROY_CONTEXT waits for the context's queued jobs; a SUBMIT_JOBS call
  * that reaches the context after it has been destroyed fails at that job
  * with -EINVAL.
- * A context whose job hung is lost: its pending jobs complete with an error
- * and further submissions fail with -ECANCELED.
+ * A context whose job faulted or hung is lost: its pending jobs complete with
+ * an error (see SUBMIT_JOBS) and further submissions fail with -ECANCELED.
+ * After three such jobs within a minute the whole file is banned:
+ * CREATE_CONTEXT and SUBMIT_JOBS on it fail with -ECANCELED, while jobs it
+ * already queued on contexts that are not lost still run. The budget and the
+ * ban belong to the open file: a new open of the render node starts afresh.
  */
 
 /* Contexts one open file may hold at a time. */
@@ -587,9 +591,21 @@ struct drm_sgxfive_destroy_context_args {
  * A job's out-fence signals once the firmware reports completion, after the
  * job's memory writes are visible to write-combined CPU mappings.
  *
- * A job that has not completed within the 500 ms job timeout loses its
- * context: its fence and those of the context's unfinished jobs signal
- * -ETIMEDOUT.
+ * A job that does not complete signals its out-fence with an error, which
+ * the fence status reports (a sync_file exported from the signalled syncobj,
+ * SYNC_IOC_FILE_INFO; a syncobj wait itself succeeds). Its memory writes may
+ * be partial.
+ *
+ *  - -EIO: a GPU fault was blamed on the job.
+ *  - -ETIMEDOUT: a hang without a fault was blamed on the job. The kernel
+ *    takes the GPU for hung when the device's oldest unfinished job is the
+ *    same at two job timeouts of 500 ms in a row, so a job that runs for
+ *    about a second or longer fails, even if it would have finished.
+ *  - -ECANCELED: the job was queued behind the blamed job on its context, or
+ *    its context was already lost.
+ *
+ * Other contexts' unfinished jobs run again after the recovery and signal
+ * without an error.
  */
 
 /* Sync op encoding, as in pvr_drm.h. */

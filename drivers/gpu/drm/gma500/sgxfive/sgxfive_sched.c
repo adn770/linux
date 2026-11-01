@@ -5,7 +5,8 @@
  * submission order. Running a job copies its firmware command into the
  * context's client CCB, advances the write offset, creates its hardware fence
  * and kicks the firmware's transfer queue for the context.
- * All of it happens under the device lock.
+ * All of it happens under the device lock, so a recovery reset never sees
+ * half a submission.
  */
 #include <linux/slab.h>
 #include <linux/string.h>
@@ -54,6 +55,8 @@ static struct dma_fence *sgxfive_run_job(struct drm_sched_job *sched_job)
 		sgxfive_fence_fail_all(ctx, ret);
 		dma_fence_put(fence);
 		fence = ERR_PTR(ret);
+	} else {
+		sgxfive_watchdog_arm(sgx);
 	}
 out:
 	mutex_unlock(&sgx->lock);
@@ -61,18 +64,26 @@ out:
 }
 
 /*
- * A job ran past its timeout. Without a way to recover the firmware yet, the
- * context is lost: its unfinished jobs fail and no more are accepted. The
- * job stays with the scheduler, which frees it once its fence has signalled
- * (failed), so this reports NO_HANG.
+ * A job ran past its timeout. The firmware runs one transfer at a time, so a
+ * job may only be waiting behind other contexts' work: the GPU hangs when the
+ * oldest unfinished job is the same as at the previous timeout. Then the
+ * recovery reset fails that job's context and re-runs every other context's
+ * unfinished jobs. Either way the job stays with the scheduler, which frees it
+ * once its fence signals (failed, if it was guilty), so this always reports
+ * NO_HANG: the reset is done here, without stopping the scheduler.
  */
 static enum drm_gpu_sched_stat sgxfive_timedout_job(struct drm_sched_job *sched_job)
 {
-	struct sgxfive_ctx *ctx = to_sgxfive_job(sched_job)->ctx;
+	struct sgxfive *sgx = to_sgxfive_job(sched_job)->ctx->sgx;
+	u64 oldest = sgxfive_oldest(sgx);
 
-	drm_err(ctx->sgx->dev, "sgxfive: job timed out, context lost\n");
-	WRITE_ONCE(ctx->lost, true);
-	sgxfive_fence_fail_all(ctx, -ETIMEDOUT);
+	if (oldest == U64_MAX || oldest != sgx->hang_oldest) {
+		sgx->hang_oldest = oldest;	/* progress since the last look */
+		return DRM_GPU_SCHED_STAT_NO_HANG;
+	}
+	drm_err(sgx->dev, "sgxfive: job %llu hung, recovering\n", oldest);
+	sgxfive_recover(sgx, oldest, SGXFIVE_HANG_TIMEOUT);
+	sgx->hang_oldest = U64_MAX;
 	return DRM_GPU_SCHED_STAT_NO_HANG;
 }
 

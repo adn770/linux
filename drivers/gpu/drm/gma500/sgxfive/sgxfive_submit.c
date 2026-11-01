@@ -109,7 +109,7 @@ static int sgxfive_submit_check(struct sgxfive_submit *s, struct sgxfive_ctx *ct
 	/* Job and context types match (they share their values). */
 	if (d->type != ctx->type)
 		return -EINVAL;
-	if (READ_ONCE(ctx->lost))
+	if (READ_ONCE(ctx->lost) || READ_ONCE(ctx->client->banned))
 		return -ECANCELED;
 	if (dummy) {
 		if (len || d->cmd_stream)

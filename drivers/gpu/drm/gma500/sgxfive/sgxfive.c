@@ -17,6 +17,8 @@
  * The render node (sgxfive_drv.c) loads and boots the firmware itself when
  * its first context is created, and keeps the memory of its contexts in the
  * EDM's address space (sgxfive_kmem_alloc).
+ * When a job faults or hangs, the firmware is reset in place and the
+ * contexts that did not cause it start over (sgxfive_recover).
  */
 #include <linux/debugfs.h>
 #include <linux/delay.h>
@@ -508,6 +510,158 @@ static int sgxfive_boot(struct sgxfive *sgx)
 	return 0;
 }
 
+/* With every block in reset: drop a latched BIF fault and stale events. */
+static void sgxfive_clear_faults(struct sgxfive *sgx)
+{
+	u32 st = sgx_rd(sgx, SGX_EVENT_STATUS), st2 = sgx_rd(sgx, SGX_EVENT_STATUS2);
+
+	drm_info(sgx->dev, "SGX reset: BIF_FAULT %#x EVENT_STATUS %#x/%#x\n",
+		 sgx_rd(sgx, SGX_BIF_FAULT), st, st2);
+	sgx_wr(sgx, SGX_BIF_CTRL, SGX_BIF_CTRL_CLEAR_FAULT);
+	sgx_wr(sgx, SGX_BIF_CTRL, 0);
+	sgx_wr(sgx, SGX_EVENT_HOST_CLEAR, st);
+	sgx_wr(sgx, SGX_EVENT_HOST_CLEAR2, st2);
+	udelay(1);
+}
+
+/*
+ * The order of the job a hang is blamed on, or U64_MAX if none is unfinished:
+ * with pd, a page directory a BIF fault went through, the oldest unfinished
+ * job on that directory, else the oldest of all (sgxfive_ctx_suspect).
+ */
+static u64 sgxfive_suspect(struct sgxfive *sgx, u32 pd)
+{
+	u64 order;
+
+	spin_lock_irq(&sgx->ctx_lock);
+	sgxfive_ctx_suspect(&sgx->ctx_list, pd, &order);
+	spin_unlock_irq(&sgx->ctx_lock);
+	return order;
+}
+
+/* The order of the oldest job the firmware has not finished, or U64_MAX. */
+u64 sgxfive_oldest(struct sgxfive *sgx)
+{
+	return sgxfive_suspect(sgx, 0);
+}
+
+/*
+ * The page directory a BIF fault went through, from BIF_FAULT's directory
+ * list and that list's DIR_LIST_BASE; 0 for the EDM's own list 15, which
+ * names no client. Read while the faulting pipe is stalled, so the EDM has
+ * not handed the list to another context.
+ */
+static u32 sgxfive_fault_pd(struct sgxfive *sgx, u32 bif_fault)
+{
+	const unsigned int list = sgx_bif_fault_list(bif_fault);
+
+	if (list == SGX_BIF_EDM_LIST)
+		return 0;
+	return sgx_rd(sgx, sgx_bif_dir_list_reg(list)) & SGX_BIF_DIR_LIST_ADDR;
+}
+
+/*
+ * The firmware hung on job suspect, which the detector why chose (the oldest
+ * job on a BIF fault's directory, or the oldest of all): fail its context,
+ * suspect with the hang's error and the jobs behind it with -ECANCELED, and
+ * count the fault against the file that owns the context. False when suspect
+ * is no longer its context's oldest unfinished job, because another detector
+ * already recovered from it. U64_MAX blames no one.
+ */
+static bool sgxfive_blame(struct sgxfive *sgx, u64 suspect, enum sgxfive_hang why)
+{
+	struct sgxfive_ctx *guilty;
+	bool hang;
+
+	spin_lock_irq(&sgx->ctx_lock);
+	guilty = sgxfive_ctx_of_job(&sgx->ctx_list, suspect);
+	hang = suspect == U64_MAX || guilty;
+	if (hang && guilty) {
+		WRITE_ONCE(guilty->lost, true);
+		sgxfive_fence_fail_guilty(guilty, sgxfive_hang_error(why));
+		if (!guilty->client->banned &&
+		    sgxfive_client_fault(guilty->client, jiffies))
+			drm_warn(sgx->dev, "sgxfive: %u faults within a minute, file banned\n",
+				 SGXFIVE_FAULT_BUDGET);
+	}
+	spin_unlock_irq(&sgx->ctx_lock);
+	return hang;
+}
+
+/*
+ * Recovery reset: halt the firmware without asking a wedged EDM to power off,
+ * rebuild every firmware buffer from the file in place and boot again. The
+ * buffers keep their pages and addresses, so the kernel memory of the render
+ * node's contexts, mapped in the same directory, stays where it is. Every
+ * context starts over: its HW context image is rebuilt and its client CCB
+ * rewritten with its unfinished jobs, which run again after the boot. With a
+ * suspect job (not U64_MAX), its context is lost instead (see sgxfive_blame),
+ * and nothing is done if it has already been recovered from.
+ */
+static int sgxfive_reset(struct sgxfive *sgx, u64 suspect, enum sgxfive_hang why)
+{
+	u8 *bufs[SGX_FW_MAX_BUFFERS] = { NULL };
+	struct sgxfive_ctx *ctx;
+	unsigned int i;
+	int ret;
+
+	if (!sgx->loaded)
+		return -ENODEV;
+	if (!sgxfive_blame(sgx, suspect, why))
+		return 0;
+	if (sgx->live)
+		sgxfive_halt(sgx);
+	sgxfive_clear_faults(sgx);
+	for (i = 0; i < sgx->fw.nbuffers; i++) {
+		unsigned int id = sgx->fw.buffers[i].id;
+
+		bufs[id] = sgx->buf[id].va;
+	}
+	ret = sgx_fw_build(&sgx->fw, &sgx->layout, bufs);
+	if (ret)
+		return ret;
+	sgxfive_debug_reset(sgx);
+	spin_lock_irq(&sgx->ctx_lock);
+	list_for_each_entry(ctx, &sgx->ctx_list, link) {
+		sgx_xfer_ctx_init(sgxfive_ctx_cpu(ctx, SGXFIVE_CTX_HW_OFF),
+				  ctx->pd_phys,
+				  ctx->mem.addr + SGXFIVE_CTX_CCB_OFF,
+				  ctx->mem.addr + SGXFIVE_CTX_CTL_OFF);
+		ctx->replay = sgxfive_ctx_rewind(ctx);
+	}
+	spin_unlock_irq(&sgx->ctx_lock);
+	wmb(); /* the write-combined buffers, before the SGX reads them */
+
+	ret = sgxfive_boot(sgx);
+	spin_lock_irq(&sgx->ctx_lock);
+	list_for_each_entry(ctx, &sgx->ctx_list, link) {
+		if (ret) {
+			WRITE_ONCE(ctx->lost, true);	/* nothing runs any more */
+			sgxfive_fence_fail_all(ctx, -EIO);
+		} else if (ctx->replay) {
+			sgxfive_kick_transfer(sgx, ctx->mem.addr + SGXFIVE_CTX_HW_OFF);
+		}
+	}
+	spin_unlock_irq(&sgx->ctx_lock);
+	return ret;
+}
+
+/*
+ * Reset the firmware and recover the render node's contexts (see above); why
+ * says which detector found the hang, for the error.
+ */
+int sgxfive_recover(struct sgxfive *sgx, u64 suspect, enum sgxfive_hang why)
+{
+	int ret;
+
+	mutex_lock(&sgx->lock);
+	ret = sgxfive_reset(sgx, suspect, why);
+	mutex_unlock(&sgx->lock);
+	if (ret)
+		drm_err(sgx->dev, "SGX recovery failed: %d\n", ret);
+	return ret;
+}
+
 /*
  * Kernel memory for the render node (contexts and their CCBs): pages mapped
  * write-combined in the EDM's page directory, from the kernel data heap above
@@ -621,6 +775,58 @@ static void sgxfive_reaper(struct work_struct *work)
 	if (more)
 		queue_delayed_work(system_dfl_wq, &sgx->reaper,
 				   msecs_to_jiffies(SGXFIVE_REAP_MS));
+}
+
+#define SGXFIVE_WATCHDOG_MS	50
+
+/*
+ * While jobs are in flight. A BIF fault under a job stalls the 3D pipe without
+ * raising an interrupt, so poll for one instead of waiting for the job
+ * timeout. The job to blame is the oldest one on the page directory the
+ * fault went through, the faulting VM's (the oldest of all when the fault
+ * names none): a transfer the firmware ran ahead of an older render is
+ * blamed, not the render. Not every fault is a hang: the tiling engine and
+ * cache requestors fault at page 0 during dummy transfers and the firmware
+ * carries on. So recover only when that job is still the same, unfinished, a
+ * poll after the fault was seen. The directory is read when a new BIF_FAULT
+ * value is first seen.
+ */
+static void sgxfive_watchdog(struct work_struct *work)
+{
+	struct sgxfive *sgx = container_of(to_delayed_work(work), struct sgxfive,
+					   watchdog);
+	u32 stat, fault;
+	u64 suspect;
+
+	if (sgxfive_oldest(sgx) == U64_MAX || !READ_ONCE(sgx->live))
+		return;			/* the next job arms it again */
+	stat = sgx_rd(sgx, SGX_BIF_INT_STAT);
+	if (!(stat & SGX_BIF_FAULT_REQ)) {
+		sgx->fault_suspect = U64_MAX;
+		sgxfive_watchdog_arm(sgx);
+		return;
+	}
+	fault = sgx_rd(sgx, SGX_BIF_FAULT);
+	if (sgx->fault_suspect == U64_MAX || fault != sgx->fault_reg) {
+		sgx->fault_reg = fault;
+		sgx->fault_pd = sgxfive_fault_pd(sgx, fault);
+	}
+	suspect = sgxfive_suspect(sgx, sgx->fault_pd);
+	if (suspect != sgx->fault_suspect) {
+		sgx->fault_suspect = suspect;	/* look again next time */
+	} else {
+		drm_err(sgx->dev, "sgxfive: BIF fault %#x at %#x (PD %#x) stalls job %llu, recovering\n",
+			stat, fault, sgx->fault_pd, suspect);
+		sgxfive_recover(sgx, suspect, SGXFIVE_HANG_FAULT);
+		sgx->fault_suspect = U64_MAX;
+	}
+	sgxfive_watchdog_arm(sgx);
+}
+
+void sgxfive_watchdog_arm(struct sgxfive *sgx)
+{
+	queue_delayed_work(system_dfl_wq, &sgx->watchdog,
+			   msecs_to_jiffies(SGXFIVE_WATCHDOG_MS));
 }
 
 /* Load and boot the firmware if it is not running yet. */
@@ -854,6 +1060,9 @@ struct sgxfive *sgxfive_create(const struct sgxfive_host *host)
 	drm_mm_init(&sgx->kmem, KMEM_START, KMEM_END - KMEM_START);
 	spin_lock_init(&sgx->ctx_lock);
 	INIT_LIST_HEAD(&sgx->ctx_list);
+	INIT_DELAYED_WORK(&sgx->watchdog, sgxfive_watchdog);
+	sgx->fault_suspect = U64_MAX;
+	sgx->hang_oldest = U64_MAX;
 	if (sgxfive_sched_init(sgx)) {
 		drm_mm_takedown(&sgx->kmem);
 		mutex_destroy(&sgx->lock);
@@ -887,6 +1096,7 @@ void sgxfive_destroy(struct sgxfive *sgx)
 {
 	if (!sgx)
 		return;
+	cancel_delayed_work_sync(&sgx->watchdog);
 	mutex_lock(&sgx->lock);
 	sgxfive_unload(sgx);
 	mutex_unlock(&sgx->lock);

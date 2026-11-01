@@ -97,6 +97,10 @@ struct sgxfive {
 	struct list_head ctx_list;
 	struct drm_gpu_scheduler sched;	/* render-node jobs */
 	u64 kicks;			/* jobs given to the firmware, under lock */
+	u64 hang_oldest;		/* oldest job at the last timeout */
+	struct delayed_work watchdog;	/* BIF fault poll while jobs run */
+	u64 fault_suspect;		/* job blamed when a fault was last seen */
+	u32 fault_reg, fault_pd;	/* that fault's BIF_FAULT, its directory */
 #if IS_ENABLED(CONFIG_DRM_GMA500_SGXFIVE_DEBUG)
 	struct sgxfive_xtest xt;
 #endif
@@ -182,6 +186,7 @@ void sgxfive_dump(struct sgxfive *sgx, struct drm_printer *p);
 int sgxfive_power(struct sgxfive *sgx, u32 powercmd, u32 done);
 
 struct sgxfive_vm;
+struct sgxfive_client;
 
 /*
  * Memory the GPU may still reach through stale BIF state: page directories,
@@ -203,6 +208,7 @@ void sgxfive_defer(struct sgxfive *sgx, struct sgxfive_deferred *d);
 struct sgxfive_file {
 	struct xarray vms;		/* handle -> struct sgxfive_vm */
 	struct xarray ctxs;		/* handle -> struct sgxfive_ctx */
+	struct sgxfive_client *client;	/* its fault budget */
 };
 
 struct sgxfive_vm *sgxfive_vm_get(struct sgxfive_file *f, u32 handle);
@@ -225,6 +231,18 @@ int sgxfive_kick_transfer(struct sgxfive *sgx, u32 hw_ctx_addr);
 int sgxfive_sched_init(struct sgxfive *sgx);
 void sgxfive_sched_fini(struct sgxfive *sgx);
 
+/* Which detector found a hang. */
+enum sgxfive_hang {
+	SGXFIVE_HANG_MANUAL,		/* a reset asked for */
+	SGXFIVE_HANG_FAULT,		/* the BIF fault watchdog */
+	SGXFIVE_HANG_TIMEOUT,		/* the drm_sched job timeout */
+};
+
+u64 sgxfive_oldest(struct sgxfive *sgx);
+int sgxfive_recover(struct sgxfive *sgx, u64 suspect, enum sgxfive_hang why);
+int sgxfive_hang_error(enum sgxfive_hang why);
+void sgxfive_watchdog_arm(struct sgxfive *sgx);
+
 u32 sgxfive_job_build(u8 *cmd, const struct drm_sgxfive_transfer_cmd *regs,
 		      bool dummy, u32 status_addr, u32 value);
 int sgxfive_job_check(const struct drm_sgxfive_transfer_cmd *regs);
@@ -245,6 +263,7 @@ int sgxfive_ioctl_vm_unmap(struct sgxfive *sgx, void *data,
 void sgxfive_debug_init(struct sgxfive *sgx, struct dentry *dir);
 int sgxfive_debug_load(struct sgxfive *sgx);
 void sgxfive_debug_unload(struct sgxfive *sgx);
+void sgxfive_debug_reset(struct sgxfive *sgx);
 #else
 static inline int sgxfive_debug_load(struct sgxfive *sgx)
 {
@@ -252,6 +271,10 @@ static inline int sgxfive_debug_load(struct sgxfive *sgx)
 }
 
 static inline void sgxfive_debug_unload(struct sgxfive *sgx)
+{
+}
+
+static inline void sgxfive_debug_reset(struct sgxfive *sgx)
 {
 }
 #endif
