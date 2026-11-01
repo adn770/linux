@@ -53,6 +53,23 @@ static u32 *rctx(struct sgxfive_ctx *ctx, u32 off)
 	return sgxfive_ctx_cpu(ctx, off);
 }
 
+#if IS_ENABLED(CONFIG_DRM_GMA500_SGXFIVE_DEBUG)
+/*
+ * The context's structures by kpoke space (sgxfive_kpoke.h): the HW context,
+ * the RT data set, the PB descriptor, the kernel's own words and the render
+ * details.
+ */
+static void render_spaces(struct sgxfive_ctx *ctx, u32 *w[SGXFIVE_KPOKE_SPACES])
+{
+	memset(w, 0, SGXFIVE_KPOKE_SPACES * sizeof(*w));
+	w[SGXFIVE_KPOKE_CTX] = rctx(ctx, SGXFIVE_CTX_HW_OFF);
+	w[SGXFIVE_KPOKE_RTDS] = rctx(ctx, SGXFIVE_RCTX_RTDS_OFF);
+	w[SGXFIVE_KPOKE_PB] = rctx(ctx, SGXFIVE_RCTX_PBDESC_OFF);
+	w[SGXFIVE_KPOKE_KW] = rctx(ctx, SGXFIVE_RCTX_ACCESS_OFF);
+	w[SGXFIVE_KPOKE_RD] = rctx(ctx, SGXFIVE_RCTX_RD_OFF);
+}
+#endif
+
 static u32 *render_bg(struct sgxfive_render *r)
 {
 	return (u32 *)(r->cpu + SGX_RENDER_PARAM_BG - SGX_RENDER_PARAM_PT);
@@ -315,6 +332,49 @@ size_t sgxfive_render_dump(struct sgxfive_ctx *ctx, bool tadata, void *dst, size
 		return sgxfive_pages_copy(r->td, r->td_pages, dst, len, off);
 	return sgxfive_pages_copy(r->param, PARAM_PAGES, dst, len, off);
 }
+
+/*
+ * The words of the context's structures the kernel and the firmware share,
+ * as they are now: every word of the render spaces (render_spaces), one line
+ * each, spelt as a kpoke that would set it.
+ */
+void sgxfive_render_words(struct sgxfive_ctx *ctx, struct drm_printer *p)
+{
+	static const u32 spaces[] = {
+		SGXFIVE_KPOKE_CTX, SGXFIVE_KPOKE_RTDS, SGXFIVE_KPOKE_PB, SGXFIVE_KPOKE_KW,
+		SGXFIVE_KPOKE_RD,
+	};
+	char line[SGXFIVE_KPOKE_LINE];
+	u32 *w[SGXFIVE_KPOKE_SPACES];
+	unsigned int i, j;
+
+	render_spaces(ctx, w);
+	for (i = 0; i < ARRAY_SIZE(spaces); i++) {
+		for (j = 0; j < sgxfive_kpoke_words(spaces[i]); j++) {
+			const struct sgxfive_kpoke k = {
+				.space = spaces[i], .index = j,
+				.value = READ_ONCE(w[spaces[i]][j]),
+			};
+
+			sgxfive_kpoke_format(&k, line, sizeof(line));
+			drm_printf(p, "%s\n", line);
+		}
+	}
+}
+
+/* Before the kick: the armed pokes of the context's structures. */
+static void sgxfive_render_poke(struct sgxfive_ctx *ctx)
+{
+	u32 *w[SGXFIVE_KPOKE_SPACES];
+
+	render_spaces(ctx, w);
+	w[SGXFIVE_KPOKE_RD] = NULL;	/* poked in the job's image instead */
+	sgxfive_kpoke_run(ctx->sgx, w);
+}
+#else
+static void sgxfive_render_poke(struct sgxfive_ctx *ctx)
+{
+}
 #endif
 
 /*
@@ -345,7 +405,8 @@ void sgxfive_render_job_build(struct sgxfive_ctx *ctx, struct sgxfive_job *job)
  * CCB's write offset, the kick in the RT data set's pending count (the EDM
  * counts every kick of a scene as it finishes, the geometry kicks at the TA's
  * end and the last at its render's, and cleans the set up only when the two
- * counts agree), then the kick.
+ * counts agree), the armed pokes of its structures (debug option), then the
+ * kick.
  */
 int sgxfive_render_run(struct sgxfive_ctx *ctx, struct sgxfive_job *job,
 		       const struct sgxfive_fence *hw)
@@ -363,6 +424,7 @@ int sgxfive_render_run(struct sgxfive_ctx *ctx, struct sgxfive_job *job,
 	memcpy(sgxfive_ctx_cpu(ctx, SGXFIVE_CTX_CCB_OFF + ctx->woff), hw->cmd,
 	       SGX_RENDER_CMD_STRIDE);
 	ctx->woff = (ctx->woff + job->size) & (SGX_RENDER_CCB_SIZE - 1);
+	sgxfive_render_poke(ctx);
 	WRITE_ONCE(ctl[0], ctx->woff);		/* host write offset */
 	return sgxfive_kick_render(ctx->sgx, r->a.ctx);
 }

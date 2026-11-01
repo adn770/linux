@@ -1126,6 +1126,26 @@ static const struct file_operations sgxfive_render_tadata_fops = {
 	.llseek = default_llseek,
 };
 
+/*
+ * debugfs render_words: the newest render context's HW context, RT data set,
+ * PB descriptor, the kernel's words for it and its render details, as they
+ * are now, a word a line spelt as kpoke spells it (sgxfive_render_words).
+ * Root only.
+ */
+static int sgxfive_render_words_show(struct seq_file *m, void *unused)
+{
+	struct sgxfive *sgx = m->private;
+	struct drm_printer p = drm_seq_file_printer(m);
+	struct sgxfive_ctx *ctx = sgxfive_render_newest(sgx);
+
+	if (!ctx)
+		return -ENODEV;
+	sgxfive_render_words(ctx, &p);
+	sgxfive_ctx_put(ctx);
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(sgxfive_render_words);
+
 /* The firmware buffer at a device address, or NULL. */
 static struct sgxfive_buf *sgxfive_buf_at(struct sgxfive *sgx, u32 addr)
 {
@@ -1300,6 +1320,7 @@ void sgxfive_debug_init(struct sgxfive *sgx, struct dentry *dir)
 	debugfs_create_x32("render_pb_pages", 0600, dir, &sgx->render_pb_pages);
 	debugfs_create_file("render_param", 0400, dir, sgx, &sgxfive_render_param_fops);
 	debugfs_create_file("render_tadata", 0400, dir, sgx, &sgxfive_render_tadata_fops);
+	debugfs_create_file("render_words", 0400, dir, sgx, &sgxfive_render_words_fops);
 	debugfs_create_bool("vm_low", 0600, dir, &sgx->vm_low);
 	debugfs_create_file("hwperf", 0600, dir, sgx, &sgxfive_hwperf_fops);
 	/* Flags besides NEW of render contexts created from now on. */

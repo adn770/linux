@@ -36,7 +36,16 @@ static void sgxfive_kpoke_test_words(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, sgxfive_kpoke_words(SGXFIVE_KPOKE_TA), 176u);
 	KUNIT_EXPECT_EQ(test, sgxfive_kpoke_words(SGXFIVE_KPOKE_RD), 123u);
 	KUNIT_EXPECT_EQ(test, sgxfive_kpoke_words(SGXFIVE_KPOKE_TQ), 306u);
+	/* A render context's structures, and the kernel's four words. */
+	KUNIT_EXPECT_EQ(test, sgxfive_kpoke_words(SGXFIVE_KPOKE_CTX), 17u);
+	KUNIT_EXPECT_EQ(test, sgxfive_kpoke_words(SGXFIVE_KPOKE_RTDS), 20u);
+	KUNIT_EXPECT_EQ(test, sgxfive_kpoke_words(SGXFIVE_KPOKE_PB), 15u);
+	KUNIT_EXPECT_EQ(test, sgxfive_kpoke_words(SGXFIVE_KPOKE_KW), 4u);
 	KUNIT_EXPECT_EQ(test, sgxfive_kpoke_words(SGXFIVE_KPOKE_SPACES), 0u);
+	/* The kernel's words are contiguous, in kw order. */
+	KUNIT_EXPECT_EQ(test, SGXFIVE_RCTX_PENDING_OFF, SGXFIVE_RCTX_ACCESS_OFF + 4);
+	KUNIT_EXPECT_EQ(test, SGXFIVE_RCTX_RTSTATUS_OFF, SGXFIVE_RCTX_ACCESS_OFF + 8);
+	KUNIT_EXPECT_EQ(test, SGXFIVE_RCTX_BGPRI_OFF, SGXFIVE_RCTX_ACCESS_OFF + 12);
 	/* The render details follow the TA command in a render image. */
 	KUNIT_EXPECT_GE(test, SGXFIVE_RENDER_IMG_RD, SGX_RENDER_CMD_STRIDE);
 }
@@ -66,6 +75,16 @@ static void sgxfive_kpoke_test_parse(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, p.space, (u32)SGXFIVE_KPOKE_TQ);
 	KUNIT_EXPECT_EQ(test, p.index, 305u);
 	KUNIT_EXPECT_EQ(test, p.value, 0xffffffffu);
+	KUNIT_EXPECT_EQ(test, sgxfive_kpoke_parse("ctx:5=0", &p), 0);
+	KUNIT_EXPECT_EQ(test, p.space, (u32)SGXFIVE_KPOKE_CTX);
+	KUNIT_EXPECT_EQ(test, sgxfive_kpoke_parse("rtds:1^=0x8", &p), 0);
+	KUNIT_EXPECT_EQ(test, p.space, (u32)SGXFIVE_KPOKE_RTDS);
+	KUNIT_EXPECT_TRUE(test, p.flip);
+	KUNIT_EXPECT_EQ(test, sgxfive_kpoke_parse("pb:14=1", &p), 0);
+	KUNIT_EXPECT_EQ(test, p.space, (u32)SGXFIVE_KPOKE_PB);
+	KUNIT_EXPECT_EQ(test, sgxfive_kpoke_parse("kw:1=2", &p), 0);
+	KUNIT_EXPECT_EQ(test, p.space, (u32)SGXFIVE_KPOKE_KW);
+	KUNIT_EXPECT_EQ(test, p.index, 1u);
 	for (i = 0; i < ARRAY_SIZE(bad); i++)
 		KUNIT_EXPECT_EQ_MSG(test, sgxfive_kpoke_parse(bad[i], &p), -EINVAL,
 				    "\"%s\"", bad[i]);
@@ -83,6 +102,13 @@ static void sgxfive_kpoke_test_range(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, sgxfive_kpoke_parse("tq:305=1", &p), 0);
 	KUNIT_EXPECT_EQ(test, sgxfive_kpoke_parse("tq:306=1", &p), -ERANGE);
 	KUNIT_EXPECT_EQ(test, sgxfive_kpoke_parse("tq:0xffffffff=1", &p), -ERANGE);
+	KUNIT_EXPECT_EQ(test, sgxfive_kpoke_parse("ctx:16=1", &p), 0);
+	KUNIT_EXPECT_EQ(test, sgxfive_kpoke_parse("ctx:17=1", &p), -ERANGE);
+	KUNIT_EXPECT_EQ(test, sgxfive_kpoke_parse("rtds:19=1", &p), 0);
+	KUNIT_EXPECT_EQ(test, sgxfive_kpoke_parse("rtds:20=1", &p), -ERANGE);
+	KUNIT_EXPECT_EQ(test, sgxfive_kpoke_parse("pb:15=1", &p), -ERANGE);
+	KUNIT_EXPECT_EQ(test, sgxfive_kpoke_parse("kw:3=1", &p), 0);
+	KUNIT_EXPECT_EQ(test, sgxfive_kpoke_parse("kw:4=1", &p), -ERANGE);
 }
 
 static void sgxfive_kpoke_test_format(struct kunit *test)
@@ -102,6 +128,10 @@ static void sgxfive_kpoke_test_format(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, p.index, b.index);
 	KUNIT_EXPECT_EQ(test, p.value, b.value);
 	KUNIT_EXPECT_EQ(test, p.flip, b.flip);
+	/* The longest line fits. */
+	sgxfive_kpoke_format(&(struct sgxfive_kpoke){ SGXFIVE_KPOKE_RTDS, 19, 0xffffffff, true },
+			     line, sizeof(line));
+	KUNIT_EXPECT_STREQ(test, line, "rtds:19^=0xffffffff");
 }
 
 /* Arming takes all of a write or none of it. */
@@ -202,6 +232,8 @@ static void sgxfive_kpoke_test_render(struct kunit *test)
 	KUNIT_ASSERT_EQ(test, sgxfive_kpoke_parse("tq:2=1", &p[2]), 0);
 	KUNIT_ASSERT_EQ(test, sgxfive_kpoke_parse("rd:122^=0xffffffff", &p[3]), 0);
 	KUNIT_ASSERT_EQ(test, sgxfive_kpoke_arm(k, p, 4), 0);
+	KUNIT_ASSERT_EQ(test, sgxfive_kpoke_parse("rtds:1=3", &p[0]), 0);
+	KUNIT_ASSERT_EQ(test, sgxfive_kpoke_arm(k, p, 1), 0);
 
 	KUNIT_EXPECT_EQ(test, sgxfive_kpoke_take(k, img, true, done), 3u);
 	KUNIT_EXPECT_EQ(test, dw(img, SGX_RENDER_CMD_FRAME), 9u ^ 0x100);
@@ -211,9 +243,55 @@ static void sgxfive_kpoke_test_render(struct kunit *test)
 	put_unaligned_le32(0x55, want + SGXFIVE_RENDER_IMG_RD + SGX_RENDER_RD_PIXELBE);
 	put_unaligned_le32(0xffffffff, want + SGXFIVE_RENDER_IMG_RD + 4 * 122);
 	KUNIT_EXPECT_EQ(test, memcmp(img, want, SGX_XFER_CMD_SIZE), 0);
-	KUNIT_EXPECT_EQ(test, k->n, 1u);
+	/* The transfer's and the RT data set's stay armed, the latter for the kick. */
+	KUNIT_EXPECT_EQ(test, k->n, 2u);
 	KUNIT_EXPECT_EQ(test, k->p[0].space, (u32)SGXFIVE_KPOKE_TQ);
+	KUNIT_EXPECT_EQ(test, k->p[1].space, (u32)SGXFIVE_KPOKE_RTDS);
 	KUNIT_EXPECT_EQ(test, sgxfive_kpoke_take(k, img, true, done), 0u);
+	KUNIT_EXPECT_EQ(test, sgxfive_kpoke_take(k, img, false, done), 1u);
+	KUNIT_EXPECT_EQ(test, k->n, 1u);
+}
+
+/*
+ * At a render's kick: the pokes of the context's structures, each at its
+ * structure's word, in order, once; the image spaces' stay armed, and a space
+ * with no structure given keeps its pokes.
+ */
+static void sgxfive_kpoke_test_run(struct kunit *test)
+{
+	struct sgxfive_kpokes *k = kunit_kzalloc(test, sizeof(*k), GFP_KERNEL);
+	u32 ctx[17] = { }, rtds[20] = { }, kw[4] = { };
+	u32 *words[SGXFIVE_KPOKE_SPACES] = {
+		[SGXFIVE_KPOKE_CTX] = ctx, [SGXFIVE_KPOKE_RTDS] = rtds,
+		[SGXFIVE_KPOKE_KW] = kw,
+	};
+	static const char *const lines[] = {
+		"rtds:1=5", "ta:3=1", "kw:1^=0x3", "pb:2=7", "ctx:16=0xabcd", "rtds:1^=0x1",
+	};
+	struct sgxfive_kpoke p[ARRAY_SIZE(lines)], done[SGXFIVE_KPOKE_MAX];
+	unsigned int i;
+
+	KUNIT_ASSERT_NOT_NULL(test, k);
+	for (i = 0; i < ARRAY_SIZE(lines); i++)
+		KUNIT_ASSERT_EQ(test, sgxfive_kpoke_parse(lines[i], &p[i]), 0);
+	KUNIT_ASSERT_EQ(test, sgxfive_kpoke_arm(k, p, ARRAY_SIZE(p)), 0);
+	kw[1] = 1;
+
+	KUNIT_EXPECT_EQ(test, sgxfive_kpoke_take_run(k, words, done), 4u);
+	KUNIT_EXPECT_EQ(test, rtds[1], 5u ^ 1);
+	KUNIT_EXPECT_EQ(test, kw[1], 1u ^ 3);
+	KUNIT_EXPECT_EQ(test, ctx[16], 0xabcdu);
+	KUNIT_EXPECT_EQ(test, done[0].space, (u32)SGXFIVE_KPOKE_RTDS);
+	KUNIT_EXPECT_EQ(test, done[1].space, (u32)SGXFIVE_KPOKE_KW);
+	KUNIT_EXPECT_EQ(test, done[2].space, (u32)SGXFIVE_KPOKE_CTX);
+	/* ta waits for a render's image, pb for a PB descriptor. */
+	KUNIT_EXPECT_EQ(test, k->n, 2u);
+	KUNIT_EXPECT_EQ(test, k->p[0].space, (u32)SGXFIVE_KPOKE_TA);
+	KUNIT_EXPECT_EQ(test, k->p[1].space, (u32)SGXFIVE_KPOKE_PB);
+	/* Once. */
+	rtds[1] = 0;
+	KUNIT_EXPECT_EQ(test, sgxfive_kpoke_take_run(k, words, done), 0u);
+	KUNIT_EXPECT_EQ(test, rtds[1], 0u);
 }
 
 /*
@@ -386,6 +464,7 @@ static struct kunit_case sgxfive_kpoke_test_cases[] = {
 	KUNIT_CASE(sgxfive_kpoke_test_arm),
 	KUNIT_CASE(sgxfive_kpoke_test_transfer),
 	KUNIT_CASE(sgxfive_kpoke_test_render),
+	KUNIT_CASE(sgxfive_kpoke_test_run),
 	KUNIT_CASE(sgxfive_kpoke_test_write),
 	KUNIT_CASE(sgxfive_kpoke_test_kreg_allowed),
 	KUNIT_CASE(sgxfive_kpoke_test_kreg_parse),

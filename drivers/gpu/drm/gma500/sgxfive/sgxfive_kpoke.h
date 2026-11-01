@@ -1,20 +1,30 @@
 /* SPDX-License-Identifier: GPL-2.0-only OR MIT */
 /*
  * Kernel pokes (CONFIG_DRM_GMA500_SGXFIVE_DEBUG): a privileged tester changes
- * words of the firmware command the kernel builds for the next job, through
- * debugfs dri/N/sgx/kpoke, by structure and word index, never by name:
+ * words of the firmware command the kernel builds for the next job, or of the
+ * render context structures the job runs with, through debugfs
+ * dri/N/sgx/kpoke, by structure and word index, never by name:
  *
  *   ta:N   word N of a render's TA command (SGX_RENDER_CMD_STRIDE bytes)
  *   rd:N   word N of a render's render details (SGX_RENDER_RD_SIZE bytes)
  *   tq:N   word N of a transfer command (SGX_XFER_CMD_SIZE bytes)
+ *   ctx:N  word N of the render context's HW context (SGX_RENDER_CTX_SIZE)
+ *   rtds:N word N of its RT data set (SGX_RENDER_RTDS_SIZE)
+ *   pb:N   word N of its PB descriptor (SGX_RENDER_PBDESC_SIZE)
+ *   kw:N   word N of the words the kernel keeps for it: the access word,
+ *          the pending count, the render target's status, the background
+ *          primary-PDS update list (SGXFIVE_RCTX_ACCESS_OFF on)
  *
  * SPACE:N=V sets the word, SPACE:N^=V flips the bits of V in what the kernel
- * built. A poke applies once, to the next job of its kind submitted (ta and
- * rd to the next render, tq to the next transfer that is not a dummy), and is
- * then dropped. Every word may be poked, the addresses the kernel fills
- * included: a poked address can make the job fault, hang, or make the
- * firmware write where it should not (the job fails and is recovered; a
- * firmware that no longer recovers needs a reboot).
+ * built. A poke applies once, to the next job of its kind (ta and rd to the
+ * next render submitted, tq to the next transfer submitted that is not a
+ * dummy; ctx, rtds, pb and kw to the next render the kernel kicks, after it
+ * has written its own words there), and is then dropped. debugfs
+ * dri/N/sgx/render_words shows the render spaces' words of the newest render
+ * context, a line each in the same spelling. Every word may be poked, the
+ * addresses the kernel fills included: a poked address can make the job
+ * fault, hang, or make the firmware write where it should not (the job fails
+ * and is recovered; a firmware that no longer recovers needs a reboot).
  *
  * And the raw register writes of debugfs dri/N/sgx/kreg, only to registers
  * the firmware never touches (sgxfive_kreg_allowed), only while the firmware
@@ -31,10 +41,15 @@ enum sgxfive_kpoke_space {
 	SGXFIVE_KPOKE_TA,
 	SGXFIVE_KPOKE_RD,
 	SGXFIVE_KPOKE_TQ,
+	SGXFIVE_KPOKE_CTX,
+	SGXFIVE_KPOKE_RTDS,
+	SGXFIVE_KPOKE_PB,
+	SGXFIVE_KPOKE_KW,
 	SGXFIVE_KPOKE_SPACES,
 };
 
 #define SGXFIVE_KPOKE_MAX	16	/* armed at once */
+#define SGXFIVE_KPOKE_KW_WORDS	4	/* access, pending, RT status, bgpri */
 #define SGXFIVE_KPOKE_LINE	32	/* "tq:305^=0xffffffff", a NUL, room */
 
 struct sgxfive_kpoke {
@@ -69,10 +84,21 @@ int sgxfive_kpoke_arm(struct sgxfive_kpokes *k, const struct sgxfive_kpoke *p,
 unsigned int sgxfive_kpoke_take(struct sgxfive_kpokes *k, u8 *img, bool render,
 				struct sgxfive_kpoke *done);
 
+/*
+ * Apply, in order, the armed pokes of the spaces a render context's structures
+ * hold (ctx, rtds, pb, kw) to the words at words[space], and drop them; the
+ * others stay armed. Returns how many applied, copied to done.
+ */
+unsigned int sgxfive_kpoke_take_run(struct sgxfive_kpokes *k,
+				    u32 *const words[SGXFIVE_KPOKE_SPACES],
+				    struct sgxfive_kpoke *done);
+
 /* The debugfs side: arm the lines of buf ("clear" drops what is armed). */
 int sgxfive_kpoke_write(struct sgxfive *sgx, char *buf);
 /* At submission, on the job's built image: the armed pokes of its kind. */
 void sgxfive_kpoke_job(struct sgxfive *sgx, u8 *img, bool render);
+/* Before a render's kick, on its context's structures: the armed pokes of theirs. */
+void sgxfive_kpoke_run(struct sgxfive *sgx, u32 *const words[SGXFIVE_KPOKE_SPACES]);
 
 /* The registers debugfs kreg may write, sorted. */
 #define SGXFIVE_KREG_COUNT	10

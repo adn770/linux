@@ -24,7 +24,15 @@ static_assert(SGXFIVE_RENDER_IMG_RD + SGX_RENDER_RD_SIZE <= SGX_XFER_CMD_SIZE);
 
 static const char *const sgxfive_kpoke_names[SGXFIVE_KPOKE_SPACES] = {
 	[SGXFIVE_KPOKE_TA] = "ta", [SGXFIVE_KPOKE_RD] = "rd", [SGXFIVE_KPOKE_TQ] = "tq",
+	[SGXFIVE_KPOKE_CTX] = "ctx", [SGXFIVE_KPOKE_RTDS] = "rtds", [SGXFIVE_KPOKE_PB] = "pb",
+	[SGXFIVE_KPOKE_KW] = "kw",
 };
+
+/* A space of the render context's structures, poked as its render is kicked. */
+static bool sgxfive_kpoke_at_run(u32 space)
+{
+	return space >= SGXFIVE_KPOKE_CTX && space < SGXFIVE_KPOKE_SPACES;
+}
 
 u32 sgxfive_kpoke_words(u32 space)
 {
@@ -35,6 +43,14 @@ u32 sgxfive_kpoke_words(u32 space)
 		return SGX_RENDER_RD_SIZE / 4;
 	case SGXFIVE_KPOKE_TQ:
 		return SGX_XFER_CMD_SIZE / 4;
+	case SGXFIVE_KPOKE_CTX:
+		return SGX_RENDER_CTX_SIZE / 4;
+	case SGXFIVE_KPOKE_RTDS:
+		return SGX_RENDER_RTDS_SIZE / 4;
+	case SGXFIVE_KPOKE_PB:
+		return SGX_RENDER_PBDESC_SIZE / 4;
+	case SGXFIVE_KPOKE_KW:
+		return SGXFIVE_KPOKE_KW_WORDS;
 	}
 	return 0;
 }
@@ -103,14 +119,36 @@ unsigned int sgxfive_kpoke_take(struct sgxfive_kpokes *k, u8 *img, bool render,
 		u8 *w;
 		u32 v;
 
-		if (render == (p.space == SGXFIVE_KPOKE_TQ)) {
-			k->p[kept++] = p;		/* the other kind's */
+		if (sgxfive_kpoke_at_run(p.space) || render == (p.space == SGXFIVE_KPOKE_TQ)) {
+			k->p[kept++] = p;		/* another kind's */
 			continue;
 		}
 		w = img + (p.space == SGXFIVE_KPOKE_RD ? SGXFIVE_RENDER_IMG_RD : 0) +
 		    4 * p.index;
 		v = get_unaligned_le32(w);
 		put_unaligned_le32(p.flip ? v ^ p.value : p.value, w);
+		done[n++] = p;
+	}
+	k->n = kept;
+	return n;
+}
+
+unsigned int sgxfive_kpoke_take_run(struct sgxfive_kpokes *k,
+				    u32 *const words[SGXFIVE_KPOKE_SPACES],
+				    struct sgxfive_kpoke *done)
+{
+	unsigned int i, kept = 0, n = 0;
+
+	for (i = 0; i < k->n; i++) {
+		const struct sgxfive_kpoke p = k->p[i];
+		u32 *w;
+
+		if (!sgxfive_kpoke_at_run(p.space) || !words[p.space]) {
+			k->p[kept++] = p;
+			continue;
+		}
+		w = words[p.space] + p.index;
+		*w = p.flip ? *w ^ p.value : p.value;
 		done[n++] = p;
 	}
 	k->n = kept;
@@ -155,20 +193,40 @@ int sgxfive_kpoke_write(struct sgxfive *sgx, char *buf)
 	return ret;
 }
 
+static void sgxfive_kpoke_log(struct sgxfive *sgx, const struct sgxfive_kpoke *done,
+			      unsigned int n)
+{
+	char line[SGXFIVE_KPOKE_LINE];
+	unsigned int i;
+
+	for (i = 0; i < n; i++) {
+		sgxfive_kpoke_format(&done[i], line, sizeof(line));
+		drm_info(sgx->dev, "sgxfive: kpoke %s applied\n", line);
+	}
+}
+
 void sgxfive_kpoke_job(struct sgxfive *sgx, u8 *img, bool render)
 {
 	struct sgxfive_kpoke done[SGXFIVE_KPOKE_MAX];
-	char line[SGXFIVE_KPOKE_LINE];
-	unsigned int i, n = 0;
+	unsigned int n = 0;
 
 	spin_lock(&sgx->kpoke_lock);
 	if (sgx->kpokes.n)
 		n = sgxfive_kpoke_take(&sgx->kpokes, img, render, done);
 	spin_unlock(&sgx->kpoke_lock);
-	for (i = 0; i < n; i++) {
-		sgxfive_kpoke_format(&done[i], line, sizeof(line));
-		drm_info(sgx->dev, "sgxfive: kpoke %s applied\n", line);
-	}
+	sgxfive_kpoke_log(sgx, done, n);
+}
+
+void sgxfive_kpoke_run(struct sgxfive *sgx, u32 *const words[SGXFIVE_KPOKE_SPACES])
+{
+	struct sgxfive_kpoke done[SGXFIVE_KPOKE_MAX];
+	unsigned int n = 0;
+
+	spin_lock(&sgx->kpoke_lock);
+	if (sgx->kpokes.n)
+		n = sgxfive_kpoke_take_run(&sgx->kpokes, words, done);
+	spin_unlock(&sgx->kpoke_lock);
+	sgxfive_kpoke_log(sgx, done, n);
 }
 
 /*

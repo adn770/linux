@@ -67,6 +67,7 @@ struct sgxfive_client {
 #define SGXFIVE_RENDER_PARAM_SLOT	SZ_8M
 #define SGXFIVE_RENDER_TD_SLOT		SZ_2M	/* SGX_RENDER_TD_MAX_SIZE, rounded */
 
+struct drm_printer;
 struct sgxfive_render;
 
 struct sgxfive_ctx {
@@ -183,6 +184,7 @@ size_t sgxfive_pages_copy(struct page **pages, unsigned int n, void *dst, size_t
 struct sgxfive_ctx *sgxfive_render_newest(struct sgxfive *sgx);
 size_t sgxfive_render_dump(struct sgxfive_ctx *ctx, bool tadata, void *dst, size_t len,
 			   loff_t off);
+void sgxfive_render_words(struct sgxfive_ctx *ctx, struct drm_printer *p);
 #endif
 
 #endif

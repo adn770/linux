@@ -401,6 +401,10 @@ static inline void sgxfive_kpoke_job(struct sgxfive *sgx, u8 *img, bool render)
 {
 }
 
+static inline void sgxfive_kpoke_run(struct sgxfive *sgx, u32 *const words[])
+{
+}
+
 static inline u32 sgxfive_render_pb_pages(struct sgxfive *sgx)
 {
 	return 0;
