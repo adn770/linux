@@ -817,28 +817,42 @@ static int sgxfive_cleanup(struct sgxfive *sgx, u32 type, u32 addr)
 }
 
 /*
- * A render context goes: make the firmware drop what it keeps of it, its RT
- * data set, the context and the PB descriptor it may still have loaded.
- * Nothing to do with the firmware off.
+ * The CLEANUP commands of a render context that goes, in order: its RT data
+ * set, the context and the PB descriptor it may still have loaded. A zero
+ * pbdesc leaves the PB alone (a context that shares one, debug option).
+ * Returns how many.
+ */
+unsigned int sgxfive_render_cleanup_steps(u32 rtds, u32 ctx, u32 pbdesc,
+					  struct sgxfive_cleanup_step *step)
+{
+	unsigned int n = 0;
+
+	step[n++] = (struct sgxfive_cleanup_step){ CLEANUP_RT, rtds };
+	step[n++] = (struct sgxfive_cleanup_step){ CLEANUP_RC, ctx };
+	if (pbdesc)	/* none: a PB shared with a context that stays */
+		step[n++] = (struct sgxfive_cleanup_step){ CLEANUP_PB, pbdesc };
+	return n;
+}
+
+/*
+ * A render context goes: make the firmware drop what it keeps of it, those
+ * steps. Nothing to do with the firmware off.
  */
 int sgxfive_render_cleanup(struct sgxfive *sgx, u32 rtds, u32 ctx, u32 pbdesc,
 			   u32 flags)
 {
+	struct sgxfive_cleanup_step step[SGXFIVE_CLEANUP_CMDS];
+	const unsigned int n = sgxfive_render_cleanup_steps(rtds, ctx, pbdesc, step);
 	ktime_t start = ktime_get();
+	unsigned int i;
 	int ret = 0;
 
 	mutex_lock(&sgx->lock);
 	if (sgx->live) {
 		sgxfive_cleanup_trace_start(sgx, rtds, ctx, pbdesc, flags);
-		sgxfive_cleanup_trace_note(sgx);
-		ret = sgxfive_cleanup(sgx, CLEANUP_RT, rtds);
-		if (!ret) {
+		for (i = 0; !ret && i < n; i++) {
 			sgxfive_cleanup_trace_note(sgx);
-			ret = sgxfive_cleanup(sgx, CLEANUP_RC, ctx);
-		}
-		if (!ret) {
-			sgxfive_cleanup_trace_note(sgx);
-			ret = sgxfive_cleanup(sgx, CLEANUP_PB, pbdesc);
+			ret = sgxfive_cleanup(sgx, step[i].type, step[i].addr);
 		}
 		if (!ret)
 			sgxfive_cleanup_trace_note(sgx);

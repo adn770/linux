@@ -147,6 +147,7 @@ struct sgxfive {
 	u64 held_suspect;		/* its job, which the next reset blames */
 	enum sgxfive_hang held_why;	/* and the detector that found it */
 	bool rtds_keep;			/* renders: no RT data set rewrite */
+	bool render_share_pb;		/* the next render context shares a PB, once */
 	bool alias_ctx_rw;		/* the next render context's page writable, once */
 	struct sgxfive_tdfill tdfill;	/* the next render's TA data page fill */
 	struct sgxfive_hostirq hostirq;	/* host interrupts, kregnow's enables */
@@ -341,6 +342,16 @@ u32 sgxfive_render_build(u8 *img, const struct sgx_render_addrs *a,
 			 const struct drm_sgxfive_render_cmd *c, u32 seqno, bool first,
 			 bool last);
 int sgxfive_kick_render(struct sgxfive *sgx, u32 hw_ctx_addr);
+/* A render context's CLEANUP commands, in order (sgxfive_render_cleanup_steps). */
+#define SGXFIVE_CLEANUP_CMDS	3
+
+struct sgxfive_cleanup_step {
+	u32 type;			/* CLEANUP_RT, CLEANUP_RC or CLEANUP_PB */
+	u32 addr;
+};
+
+unsigned int sgxfive_render_cleanup_steps(u32 rtds, u32 ctx, u32 pbdesc,
+					  struct sgxfive_cleanup_step *step);
 int sgxfive_render_cleanup(struct sgxfive *sgx, u32 rtds, u32 ctx, u32 pbdesc,
 			   u32 flags);
 int sgxfive_alias_firmware(struct sgxfive *sgx, struct sgx_mmu_pd *pd, bool map);
@@ -378,6 +389,12 @@ static inline bool sgxfive_alias_ta3d_ro(struct sgxfive *sgx)
 static inline bool sgxfive_take_ctx_rw(struct sgxfive *sgx)
 {
 	return sgxfive_oneshot_take(&sgx->alias_ctx_rw);
+}
+
+/* Whether the next render context runs on a sibling's PB: taken once (debugfs render_share_pb). */
+static inline bool sgxfive_take_share_pb(struct sgxfive *sgx)
+{
+	return sgxfive_oneshot_take(&sgx->render_share_pb);
 }
 
 /* 0 or out of range: the default (sgx_render_pb_pages()). */
@@ -477,6 +494,11 @@ static inline u32 sgxfive_render_pb_pages(struct sgxfive *sgx)
 }
 
 static inline bool sgxfive_take_ctx_rw(struct sgxfive *sgx)
+{
+	return false;
+}
+
+static inline bool sgxfive_take_share_pb(struct sgxfive *sgx)
 {
 	return false;
 }

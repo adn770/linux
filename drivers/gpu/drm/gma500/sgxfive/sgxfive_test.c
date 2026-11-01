@@ -34,6 +34,30 @@ static void sgxfive_test_command_needs_live(struct kunit *test)
 			-ENODEV);
 }
 
+/*
+ * A render context's cleanup asks the firmware to drop its RT data set, its
+ * context and its PB, in that order; a zero PB descriptor (a PB shared with a
+ * context that stays) sends no PB command.
+ */
+static void sgxfive_test_cleanup_steps(struct kunit *test)
+{
+	struct sgxfive_cleanup_step s[SGXFIVE_CLEANUP_CMDS];
+
+	memset(s, 0xff, sizeof(s));
+	KUNIT_EXPECT_EQ(test, sgxfive_render_cleanup_steps(0x10, 0x20, 0x30, s), 3u);
+	KUNIT_EXPECT_EQ(test, s[0].type, (u32)CLEANUP_RT);
+	KUNIT_EXPECT_EQ(test, s[0].addr, 0x10u);
+	KUNIT_EXPECT_EQ(test, s[1].type, (u32)CLEANUP_RC);
+	KUNIT_EXPECT_EQ(test, s[1].addr, 0x20u);
+	KUNIT_EXPECT_EQ(test, s[2].type, (u32)CLEANUP_PB);
+	KUNIT_EXPECT_EQ(test, s[2].addr, 0x30u);
+	memset(s, 0xff, sizeof(s));
+	KUNIT_EXPECT_EQ(test, sgxfive_render_cleanup_steps(0x10, 0x20, 0, s), 2u);
+	KUNIT_EXPECT_EQ(test, s[0].type, (u32)CLEANUP_RT);
+	KUNIT_EXPECT_EQ(test, s[1].type, (u32)CLEANUP_RC);
+	KUNIT_EXPECT_EQ(test, s[2].type, 0xffffffffu);	/* no third command */
+}
+
 /* A device that read these from its registers, and a reply that agrees. */
 #define TEST_CORE_ID	0x01150000
 #define TEST_CORE_REV	0x00010001
@@ -183,6 +207,7 @@ static struct kunit_case sgxfive_test_cases[] = {
 	KUNIT_CASE(sgxfive_test_ident_needs_live),
 	KUNIT_CASE(sgxfive_test_power_needs_live),
 	KUNIT_CASE(sgxfive_test_command_needs_live),
+	KUNIT_CASE(sgxfive_test_cleanup_steps),
 	{}
 };
 

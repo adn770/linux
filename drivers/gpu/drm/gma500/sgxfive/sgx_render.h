@@ -252,6 +252,13 @@ void sgx_render_ctx(u32 *ctx, const struct sgx_render_addrs *a);
 void sgx_render_pb(u32 *desc, u32 *block, u32 *pt, const struct sgx_render_addrs *a,
 		   u32 pages);
 u32 sgx_render_pb_pages(u32 want);
+/*
+ * Run a context on another's parameter buffer (debugfs render_share_pb; built without
+ * the debug option too, so that KUnit checks it): its HW context and TA command then
+ * name the donor's PB descriptor and block. Only for a donor in the same page
+ * directory, which maps them: false (nothing changed) otherwise or with no donor.
+ */
+bool sgx_render_share_pb(struct sgx_render_addrs *a, const struct sgx_render_addrs *donor);
 void sgx_render_layout(struct sgx_render_layout *l, u32 width, u32 height);
 int sgx_render_check_max(u32 max_w, u32 max_h);
 int sgx_render_tadata_layout(struct sgx_render_tadata *t, u32 max_w, u32 max_h);

@@ -94,6 +94,15 @@ void sgx_render_pb(u32 *desc, u32 *block, u32 *pt, const struct sgx_render_addrs
 	block[3] = 0;
 }
 
+bool sgx_render_share_pb(struct sgx_render_addrs *a, const struct sgx_render_addrs *donor)
+{
+	if (!donor || donor->pd_phys != a->pd_phys)
+		return false;
+	a->pbdesc = donor->pbdesc;
+	a->pbblock = donor->pbblock;
+	return true;
+}
+
 /*
  * The layout of a target of 32 x 16 to 4096 x 4096 pixels: n = 4 macrotiles
  * across and down from 640 x 480 pixels on, else 2; a macrotile spans the

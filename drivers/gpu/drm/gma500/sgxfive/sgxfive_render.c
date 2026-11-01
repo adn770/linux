@@ -45,6 +45,8 @@ struct sgxfive_render {
 	u8 *tdva;			/* the RT data's buffers */
 	bool mapped;			/* in the VM */
 	u32 pb_pages;			/* its PB, as set at creation */
+	bool pb_shared;			/* it runs on a sibling's PB (debug option) */
+	struct sgxfive_ctx *donor;	/* that PB's context, referenced until this is freed */
 	struct sgxfive_deferred release;
 };
 
@@ -69,6 +71,8 @@ static void render_spaces(struct sgxfive_ctx *ctx, u32 *w[SGXFIVE_KPOKE_SPACES])
 	w[SGXFIVE_KPOKE_RD] = rctx(ctx, SGXFIVE_RCTX_RD_OFF);
 }
 #endif
+
+static bool sgxfive_render_share_pb(struct sgxfive_ctx *ctx, struct sgxfive_render *r);
 
 static u32 *render_bg(struct sgxfive_render *r)
 {
@@ -173,9 +177,15 @@ static int sgxfive_render_map(struct sgxfive_render *r)
 	return ret;
 }
 
-/* Everything but the VM's slot, which the caller still holds. */
+/*
+ * Everything but the VM's slot, which the caller still holds. The context
+ * whose PB this one ran on (debug option) is let go last: its memory and PB
+ * stay until nothing of this context can name them.
+ */
 static void sgxfive_render_free(struct sgxfive_render *r)
 {
+	struct sgxfive_ctx *donor = r->donor;
+
 	if (r->cpu)
 		vunmap(r->cpu);
 	if (r->tdva)
@@ -184,6 +194,8 @@ static void sgxfive_render_free(struct sgxfive_render *r)
 	free_pages_wc(r->td, r->td_pages);
 	kfree(r->td);
 	kfree(r);
+	if (donor)
+		sgxfive_ctx_put(donor);
 }
 
 /*
@@ -220,6 +232,7 @@ int sgxfive_render_init(struct sgxfive_ctx *ctx)
 	}
 	sgxfive_render_addrs(&r->a, ctx->mem.addr, sgxfive_vm_pd_phys(ctx->vm), r->slot,
 			     &td);
+	r->pb_shared = sgxfive_render_share_pb(ctx, r);
 	r->pb_pages = sgxfive_render_pb_pages(ctx->sgx);
 	r->a.ctx_flags = sgxfive_render_ctx_flags(ctx->sgx);
 	ret = alloc_pages_wc(r->param, PARAM_PAGES);
@@ -289,7 +302,7 @@ void sgxfive_render_fini(struct sgxfive_ctx *ctx)
 	struct sgxfive_render *r = ctx->render;
 	struct sgxfive *sgx = ctx->sgx;
 
-	if (sgxfive_render_cleanup(sgx, r->a.rtds, r->a.ctx, r->a.pbdesc,
+	if (sgxfive_render_cleanup(sgx, r->a.rtds, r->a.ctx, r->pb_shared ? 0 : r->a.pbdesc,
 				   *rctx(ctx, SGXFIVE_CTX_HW_OFF)))
 		sgxfive_cleanup_reset(sgx);
 	sgxfive_render_unmap(r);
@@ -412,9 +425,70 @@ static void sgxfive_render_poke(struct sgxfive_ctx *ctx)
 	w[SGXFIVE_KPOKE_RD] = NULL;	/* poked in the job's image instead */
 	sgxfive_kpoke_run(ctx->sgx, w);
 }
+
+/*
+ * The newest render context of ctx's VM, the one a sharing context takes its
+ * PB from, with a reference: the sharer keeps it until its own memory is
+ * freed, so that a donor closed first keeps its context page and PB. A
+ * context whose last reference is gone (its release has begun) is skipped.
+ * NULL when there is none.
+ */
+struct sgxfive_ctx *sgxfive_render_donor(struct sgxfive_ctx *ctx)
+{
+	struct sgxfive *sgx = ctx->sgx;
+	struct sgxfive_ctx *d, *found = NULL;
+
+	spin_lock_irq(&sgx->ctx_lock);
+	list_for_each_entry_reverse(d, &sgx->ctx_list, link) {
+		if (d == ctx || d->type != DRM_SGXFIVE_CTX_TYPE_RENDER || d->vm != ctx->vm ||
+		    !READ_ONCE(d->render))
+			continue;
+		if (kref_get_unless_zero(&d->ref)) {
+			found = d;
+			break;
+		}
+	}
+	spin_unlock_irq(&sgx->ctx_lock);
+	return found;
+}
+
+/*
+ * With debugfs render_share_pb armed, the next render context runs on the PB of
+ * the newest render context of its VM, whose directory maps that context's page (the
+ * PB descriptor) and parameter slot: the HW context and the TA commands name the
+ * donor's descriptor. The context keeps its own, unused, and a reference on the
+ * donor until it is freed (sgxfive_render_free), whichever is closed first; it
+ * sends no CLEANUP for the PB, the donor does when it goes. Returns whether it
+ * shares.
+ */
+static bool sgxfive_render_share_pb(struct sgxfive_ctx *ctx, struct sgxfive_render *r)
+{
+	struct sgxfive *sgx = ctx->sgx;
+	struct sgxfive_ctx *d;
+
+	if (!sgxfive_take_share_pb(sgx))
+		return false;
+	d = sgxfive_render_donor(ctx);
+	if (!d || !sgx_render_share_pb(&r->a, &d->render->a)) {
+		if (d)
+			sgxfive_ctx_put(d);
+		drm_warn(sgx->dev,
+			 "sgxfive: render_share_pb: no render context in this VM to share with\n");
+		return false;
+	}
+	r->donor = d;
+	drm_info(sgx->dev, "sgxfive: render context shares the PB descriptor at %#x\n",
+		 r->a.pbdesc);
+	return true;
+}
 #else
 static void sgxfive_render_poke(struct sgxfive_ctx *ctx)
 {
+}
+
+static bool sgxfive_render_share_pb(struct sgxfive_ctx *ctx, struct sgxfive_render *r)
+{
+	return false;
 }
 #endif
 

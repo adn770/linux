@@ -752,8 +752,10 @@ static void sgxfive_kpoke_test_reset_disarms(struct kunit *test)
 	KUNIT_ASSERT_TRUE(test, sgx->hostirq.armed);
 	sgx->alias_ctx_rw = true;
 	sgx->tdfill.armed = true;
+	sgx->render_share_pb = true;
 	KUNIT_EXPECT_FALSE(test, sgxfive_debug_reset(sgx));
 	KUNIT_EXPECT_FALSE(test, sgx->tdfill.armed);
+	KUNIT_EXPECT_FALSE(test, sgx->render_share_pb);
 	KUNIT_EXPECT_FALSE(test, sgx->hostirq.armed);
 	KUNIT_EXPECT_FALSE(test, sgx->alias_ctx_rw);
 	KUNIT_EXPECT_EQ(test, atomic_read(&sgx->hostirq.irqs), 0);

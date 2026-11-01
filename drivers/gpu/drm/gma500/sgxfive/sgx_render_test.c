@@ -907,9 +907,48 @@ static void sgx_render_test_check_max_size(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, sgx_render_check_size(&c, 4096, 4095), -EINVAL);
 }
 
+/*
+ * A second context on another's parameter buffer: its HW context and its TA
+ * command name the donor's PB descriptor, which the donor's directory (and
+ * so this one, the same) maps; another directory's context takes nothing.
+ */
+static void sgx_render_test_share_pb(struct kunit *test)
+{
+	struct sgx_render_addrs a = addrs, other = addrs;
+	struct drm_sgxfive_render_cmd c = cmd64;
+	struct sgx_render_kick k = { };
+	u32 *ctx = kunit_kzalloc(test, SGX_RENDER_CTX_SIZE, GFP_KERNEL);
+	u8 *cmd = kunit_kzalloc(test, SGX_RENDER_CMD_STRIDE, GFP_KERNEL);
+	const u32 kd2 = 0x32153000;
+
+	KUNIT_ASSERT_NOT_NULL(test, ctx);
+	KUNIT_ASSERT_NOT_NULL(test, cmd);
+	a.ctx = kd2 + 0x100;
+	a.pbdesc = kd2 + 0x300;
+	a.pbblock = kd2 + 0x340;
+	KUNIT_EXPECT_TRUE(test, sgx_render_share_pb(&a, &addrs));
+	KUNIT_EXPECT_EQ(test, a.pbdesc, addrs.pbdesc);
+	KUNIT_EXPECT_EQ(test, a.pbblock, addrs.pbblock);
+	KUNIT_EXPECT_EQ(test, a.ctx, kd2 + 0x100);	/* the rest is its own */
+	KUNIT_EXPECT_EQ(test, a.rtds, addrs.rtds);
+	sgx_render_ctx(ctx, &a);
+	KUNIT_EXPECT_EQ(test, dw(ctx, 0x18), addrs.pbdesc);
+	sgx_render_cmd(cmd, &a, &c, &k);
+	KUNIT_EXPECT_EQ(test, dw(cmd, SGX_RENDER_CMD_PBDESC), addrs.pbdesc);
+	/* Another page directory: nothing taken. */
+	other.pd_phys += 0x1000;
+	other.pbdesc = kd2 + 0x300;
+	other.pbblock = kd2 + 0x340;
+	KUNIT_EXPECT_FALSE(test, sgx_render_share_pb(&other, &addrs));
+	KUNIT_EXPECT_EQ(test, other.pbdesc, kd2 + 0x300);
+	KUNIT_EXPECT_EQ(test, other.pbblock, kd2 + 0x340);
+	KUNIT_EXPECT_FALSE(test, sgx_render_share_pb(&other, NULL));
+}
+
 static struct kunit_case sgx_render_test_cases[] = {
 	KUNIT_CASE(sgx_render_test_offsets),
 	KUNIT_CASE(sgx_render_test_ctx),
+	KUNIT_CASE(sgx_render_test_share_pb),
 	KUNIT_CASE(sgx_render_test_pb),
 	KUNIT_CASE(sgx_render_test_rtds),
 	KUNIT_CASE(sgx_render_test_rtds_resize),

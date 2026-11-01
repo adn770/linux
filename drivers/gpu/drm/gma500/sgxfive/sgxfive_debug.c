@@ -74,6 +74,7 @@ static void sgxfive_debug_disarm(struct sgxfive *sgx)
 {
 	sgxfive_hostirq_reset(&sgx->hostirq);
 	WRITE_ONCE(sgx->alias_ctx_rw, false);
+	WRITE_ONCE(sgx->render_share_pb, false);
 	spin_lock(&sgx->kpoke_lock);
 	sgx->tdfill.armed = false;
 	spin_unlock(&sgx->kpoke_lock);
@@ -1532,6 +1533,7 @@ void sgxfive_debug_init(struct sgxfive *sgx, struct dentry *dir)
 	debugfs_create_file("reset", 0200, dir, sgx, &sgxfive_reset_fops);
 	debugfs_create_bool("alias_ta3d_ro", 0600, dir, &sgx->alias_ta3d_ro);
 	debugfs_create_bool("alias_ctx_rw", 0600, dir, &sgx->alias_ctx_rw);
+	debugfs_create_bool("render_share_pb", 0600, dir, &sgx->render_share_pb);
 	spin_lock_init(&sgx->kpoke_lock);
 	sgxfive_hostirq_init(&sgx->hostirq);
 	debugfs_create_file("kpoke", 0600, dir, sgx, &sgxfive_kpoke_fops);

@@ -147,6 +147,74 @@ static void sgxfive_debug_test_render_newest(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, kref_read(&c[1]->ref), 2u);
 }
 
+/* What the last put of a context runs, as a mark: the context's release. */
+static void donor_release(struct kref *ref)
+{
+	container_of(ref, struct sgxfive_ctx, ref)->closed = true;
+}
+
+/*
+ * debugfs render_share_pb: the donor is the newest render context of the
+ * sharing context's VM that has its render state (not another VM's, not a
+ * transfer context), taken with a reference. The sharer's reference keeps a
+ * donor that is closed first: its last put runs only when the sharer's does,
+ * and a donor whose release has begun is not taken.
+ */
+static void sgxfive_debug_test_render_donor(struct kunit *test)
+{
+	struct sgxfive *sgx = kunit_kzalloc(test, sizeof(*sgx), GFP_KERNEL);
+	void *vm_a = kunit_kzalloc(test, 8, GFP_KERNEL);
+	void *vm_b = kunit_kzalloc(test, 8, GFP_KERNEL);
+	void *render = kunit_kzalloc(test, 8, GFP_KERNEL);	/* only its address is used */
+	struct sgxfive_ctx *c[5], *sharer, *d;
+	unsigned int i;
+
+	KUNIT_ASSERT_NOT_NULL(test, sgx);
+	spin_lock_init(&sgx->ctx_lock);
+	INIT_LIST_HEAD(&sgx->ctx_list);
+	for (i = 0; i < ARRAY_SIZE(c); i++) {
+		c[i] = fake_ctx(test);
+		c[i]->sgx = sgx;
+		c[i]->type = DRM_SGXFIVE_CTX_TYPE_RENDER;
+		c[i]->vm = vm_a;
+		c[i]->render = render;
+		kref_init(&c[i]->ref);
+		list_add_tail(&c[i]->link, &sgx->ctx_list);
+	}
+	c[2]->type = DRM_SGXFIVE_CTX_TYPE_TRANSFER;
+	c[3]->vm = vm_b;
+	c[4]->render = NULL;		/* no render state yet */
+	sharer = fake_ctx(test);
+	sharer->sgx = sgx;
+	sharer->type = DRM_SGXFIVE_CTX_TYPE_RENDER;
+	sharer->vm = vm_a;
+
+	/* Not itself, not another VM's, not a transfer context: the newest of the rest. */
+	d = sgxfive_render_donor(sharer);
+	KUNIT_ASSERT_PTR_EQ(test, d, c[1]);
+	KUNIT_EXPECT_EQ(test, kref_read(&c[1]->ref), 2u);
+	KUNIT_EXPECT_EQ(test, kref_read(&c[0]->ref), 1u);
+
+	/* The donor is closed first: its release waits for the sharer's put. */
+	KUNIT_EXPECT_FALSE(test, kref_put(&c[1]->ref, donor_release));
+	KUNIT_EXPECT_FALSE(test, c[1]->closed);
+	KUNIT_EXPECT_EQ(test, kref_read(&c[1]->ref), 1u);
+	KUNIT_EXPECT_TRUE(test, kref_put(&d->ref, donor_release));
+	KUNIT_EXPECT_TRUE(test, c[1]->closed);
+
+	/* A donor whose release has begun is skipped, the next older one taken. */
+	d = sgxfive_render_donor(sharer);
+	KUNIT_EXPECT_PTR_EQ(test, d, c[0]);
+	KUNIT_EXPECT_EQ(test, kref_read(&c[0]->ref), 2u);
+	KUNIT_EXPECT_EQ(test, kref_read(&c[1]->ref), 0u);
+
+	/* None: the other contexts are in no usable state. */
+	refcount_set(&c[0]->ref.refcount, 0);
+	KUNIT_EXPECT_NULL(test, sgxfive_render_donor(sharer));
+	sharer->vm = vm_b;
+	KUNIT_EXPECT_PTR_EQ(test, sgxfive_render_donor(sharer), c[3]);
+}
+
 /* debugfs vm_low: the first MiB, page 0 excepted, opened to VM_MAP. */
 static void sgxfive_debug_test_vm_low(struct kunit *test)
 {
@@ -597,6 +665,7 @@ static struct kunit_case sgxfive_debug_test_cases[] = {
 	KUNIT_CASE(sgxfive_debug_test_pb_pages),
 	KUNIT_CASE(sgxfive_debug_test_pages_copy),
 	KUNIT_CASE(sgxfive_debug_test_render_newest),
+	KUNIT_CASE(sgxfive_debug_test_render_donor),
 	KUNIT_CASE(sgxfive_debug_test_vm_low),
 	KUNIT_CASE(sgxfive_debug_test_ctx_flags),
 	KUNIT_CASE(sgxfive_debug_test_cleanup),
