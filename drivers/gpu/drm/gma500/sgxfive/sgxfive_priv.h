@@ -146,6 +146,7 @@ struct sgxfive {
 	u64 held_suspect;		/* its job, which the next reset blames */
 	enum sgxfive_hang held_why;	/* and the detector that found it */
 	bool rtds_keep;			/* renders: no RT data set rewrite */
+	struct sgxfive_hostirq hostirq;	/* host interrupts, kregnow's enables */
 #endif
 };
 
@@ -363,6 +364,7 @@ void sgxfive_debug_init(struct sgxfive *sgx, struct dentry *dir);
 int sgxfive_debug_load(struct sgxfive *sgx);
 void sgxfive_debug_unload(struct sgxfive *sgx);
 bool sgxfive_debug_reset(struct sgxfive *sgx);
+void sgxfive_debug_irq(struct sgxfive *sgx, u32 stat_1, u32 stat_2);
 
 static inline bool sgxfive_alias_ta3d_ro(struct sgxfive *sgx)
 {
@@ -441,6 +443,10 @@ static inline void sgxfive_debug_unload(struct sgxfive *sgx)
 static inline bool sgxfive_debug_reset(struct sgxfive *sgx)
 {
 	return false;
+}
+
+static inline void sgxfive_debug_irq(struct sgxfive *sgx, u32 stat_1, u32 stat_2)
+{
 }
 
 static inline bool sgxfive_alias_ta3d_ro(struct sgxfive *sgx)

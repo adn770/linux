@@ -13,6 +13,7 @@
 #include <drm/drm_print.h>
 
 #include "sgx_render.h"
+#include "sgx_seq.h"
 #include "sgx_xfer.h"
 #include "sgxfive_ctx.h"
 #include "sgxfive_kpoke.h"
@@ -283,7 +284,8 @@ bool sgxfive_kreg_ok(u32 off)
 	return false;
 }
 
-int sgxfive_kreg_parse(const char *s, u32 *off, bool *flip, u32 *value)
+/* OFFSET=VALUE or OFFSET^=VALUE, the offset not yet checked against a list. */
+static int sgxfive_kreg_split(const char *s, u32 *off, bool *flip, u32 *value)
 {
 	char buf[SGXFIVE_KPOKE_LINE];
 	char *eq;
@@ -301,8 +303,69 @@ int sgxfive_kreg_parse(const char *s, u32 *off, bool *flip, u32 *value)
 	*eq = '\0';
 	if (kstrtou32(buf, 0, off) || kstrtou32(eq + 1, 0, value))
 		return -EINVAL;
-	if (!sgxfive_kreg_ok(*off))
-		return -EPERM;
 	*flip = x;
 	return 0;
+}
+
+int sgxfive_kreg_parse(const char *s, u32 *off, bool *flip, u32 *value)
+{
+	int ret = sgxfive_kreg_split(s, off, flip, value);
+
+	return ret ? ret : sgxfive_kreg_ok(*off) ? 0 : -EPERM;
+}
+
+/* CR_CLKGATECTL2, CR_EVENT_HOST_ENABLE2, CR_EVENT_HOST_ENABLE. */
+const u32 sgxfive_kregnow_allowed[SGXFIVE_KREGNOW_COUNT] = { 0x0004, 0x0110, 0x0130 };
+
+bool sgxfive_kregnow_ok(u32 off)
+{
+	unsigned int i;
+
+	for (i = 0; i < SGXFIVE_KREGNOW_COUNT; i++)
+		if (sgxfive_kregnow_allowed[i] == off)
+			return true;
+	return false;
+}
+
+int sgxfive_kregnow_parse(const char *s, u32 *off, bool *flip, u32 *value)
+{
+	int ret = sgxfive_kreg_split(s, off, flip, value);
+
+	return ret ? ret : sgxfive_kregnow_ok(*off) ? 0 : -EPERM;
+}
+
+void sgxfive_hostirq_init(struct sgxfive_hostirq *h)
+{
+	spin_lock_init(&h->lock);
+	sgxfive_hostirq_reset(h);
+}
+
+void sgxfive_hostirq_arm(struct sgxfive_hostirq *h, u32 enable, u32 enable2)
+{
+	h->saved[0] = enable;
+	h->saved[1] = enable2;
+	h->armed = true;
+}
+
+bool sgxfive_hostirq_note(struct sgxfive_hostirq *h, u32 stat_1, u32 stat_2)
+{
+	atomic_inc(&h->irqs);
+	if (!h->armed || (stat_1 & SGX_EVENT_SW))
+		return false;
+	atomic_inc(&h->extra);
+	h->last[0] = stat_1;
+	h->last[1] = stat_2;
+	h->armed = false;
+	return true;
+}
+
+void sgxfive_hostirq_reset(struct sgxfive_hostirq *h)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&h->lock, flags);
+	h->armed = false;
+	spin_unlock_irqrestore(&h->lock, flags);
+	atomic_set(&h->irqs, 0);
+	atomic_set(&h->extra, 0);
 }

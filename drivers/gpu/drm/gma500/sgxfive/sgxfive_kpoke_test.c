@@ -8,11 +8,15 @@
  */
 #include <kunit/test.h>
 #include <linux/module.h>
+#include <linux/sizes.h>
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/unaligned.h>
 
+#include <drm/drm_device.h>
+
 #include "sgx_render.h"
+#include "sgx_seq.h"
 #include "sgx_xfer.h"
 #include "sgxfive_ctx.h"
 #include "sgxfive_kpoke.h"
@@ -456,6 +460,231 @@ static void sgxfive_kpoke_test_hwperf_needs_live(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, sgxfive_hwperf_set(sgx, 5, 0x11), -ENODEV);
 }
 
+/*
+ * The registers kregnow may write while a job runs: the clock gates' second
+ * control and the two host event enables, which the firmware never writes
+ * after its boot; none is on kreg's list.
+ */
+static void sgxfive_kpoke_test_kregnow_allowed(struct kunit *test)
+{
+	static const u32 want[] = { 0x0004, 0x0110, 0x0130 };
+	unsigned int i;
+
+	KUNIT_ASSERT_EQ(test, ARRAY_SIZE(want), (size_t)SGXFIVE_KREGNOW_COUNT);
+	for (i = 0; i < SGXFIVE_KREGNOW_COUNT; i++) {
+		KUNIT_EXPECT_EQ(test, sgxfive_kregnow_allowed[i], want[i]);
+		KUNIT_EXPECT_TRUE(test, sgxfive_kregnow_ok(want[i]));
+		KUNIT_EXPECT_FALSE(test, sgxfive_kreg_ok(want[i]));
+	}
+	KUNIT_EXPECT_FALSE(test, sgxfive_kregnow_ok(0x0000));
+	KUNIT_EXPECT_FALSE(test, sgxfive_kregnow_ok(0x0008));
+	KUNIT_EXPECT_FALSE(test, sgxfive_kregnow_ok(0x0134));
+	KUNIT_EXPECT_FALSE(test, sgxfive_kregnow_ok(0x0810));
+}
+
+static void sgxfive_kpoke_test_kregnow_parse(struct kunit *test)
+{
+	static const char *const bad[] = {
+		"", "0x0004", "0x0004=", "=1", "0x0004~=1", "0x0004=0x100000000", "0x0004==1",
+	};
+	u32 off, val;
+	bool flip;
+	unsigned int i;
+
+	KUNIT_EXPECT_EQ(test, sgxfive_kregnow_parse("0x0004=0x2222", &off, &flip, &val), 0);
+	KUNIT_EXPECT_EQ(test, off, 0x0004u);
+	KUNIT_EXPECT_EQ(test, val, 0x2222u);
+	KUNIT_EXPECT_FALSE(test, flip);
+	KUNIT_EXPECT_EQ(test, sgxfive_kregnow_parse("0x0130^=0x4", &off, &flip, &val), 0);
+	KUNIT_EXPECT_EQ(test, off, 0x0130u);
+	KUNIT_EXPECT_TRUE(test, flip);
+	/* kreg's own registers are not kregnow's, nor the status. */
+	KUNIT_EXPECT_EQ(test, sgxfive_kregnow_parse("0x0810=1", &off, &flip, &val), -EPERM);
+	KUNIT_EXPECT_EQ(test, sgxfive_kregnow_parse("0x0008=1", &off, &flip, &val), -EPERM);
+	KUNIT_EXPECT_EQ(test, sgxfive_kreg_parse("0x0004=1", &off, &flip, &val), -EPERM);
+	for (i = 0; i < ARRAY_SIZE(bad); i++)
+		KUNIT_EXPECT_EQ_MSG(test, sgxfive_kregnow_parse(bad[i], &off, &flip, &val),
+				    -EINVAL, "\"%s\"", bad[i]);
+}
+
+/* No write before the firmware runs; unlike kreg's, none waits for a job to end. */
+static void sgxfive_kpoke_test_kregnow_needs_live(struct kunit *test)
+{
+	struct sgxfive *sgx = kunit_kzalloc(test, sizeof(*sgx), GFP_KERNEL);
+
+	KUNIT_ASSERT_NOT_NULL(test, sgx);
+	KUNIT_EXPECT_EQ(test, sgxfive_kregnow_write(sgx, 0x0004, false, 0), -ENODEV);
+	KUNIT_EXPECT_EQ(test, sgxfive_kregnow_write(sgx, 0x0810, false, 0), -ENODEV);
+}
+
+/*
+ * The host interrupts: every one is counted; one that no SW_EVENT came with
+ * while extra host events are enabled is the extra event's, is kept
+ * (with the status it came with) and disarms the enables once.
+ */
+static void sgxfive_kpoke_test_hostirq(struct kunit *test)
+{
+	struct sgxfive_hostirq h = { };
+
+	sgxfive_hostirq_init(&h);
+	/* Nothing armed: counted, never restored. */
+	KUNIT_EXPECT_FALSE(test, sgxfive_hostirq_note(&h, 0x4000, 0x80));
+	KUNIT_EXPECT_FALSE(test, sgxfive_hostirq_note(&h, 0x0020, 0x80));
+	KUNIT_EXPECT_EQ(test, atomic_read(&h.irqs), 2);
+	KUNIT_EXPECT_EQ(test, atomic_read(&h.extra), 0);
+	sgxfive_hostirq_arm(&h, 0x4000, 0x0100);
+	KUNIT_EXPECT_TRUE(test, h.armed);
+	KUNIT_EXPECT_EQ(test, h.saved[0], 0x4000u);
+	KUNIT_EXPECT_EQ(test, h.saved[1], 0x0100u);
+	/* The EDM's own event: not ours. */
+	KUNIT_EXPECT_FALSE(test, sgxfive_hostirq_note(&h, 0x4000, 0x80));
+	KUNIT_EXPECT_TRUE(test, h.armed);
+	/* Another: restore the enables, remember the status. */
+	KUNIT_EXPECT_TRUE(test, sgxfive_hostirq_note(&h, 0x0020, 0x88));
+	KUNIT_EXPECT_FALSE(test, h.armed);
+	KUNIT_EXPECT_EQ(test, atomic_read(&h.irqs), 4);
+	KUNIT_EXPECT_EQ(test, atomic_read(&h.extra), 1);
+	KUNIT_EXPECT_EQ(test, h.last[0], 0x0020u);
+	KUNIT_EXPECT_EQ(test, h.last[1], 0x88u);
+	/* Disarmed: the next one is counted only. */
+	KUNIT_EXPECT_FALSE(test, sgxfive_hostirq_note(&h, 0x0020, 0x88));
+	KUNIT_EXPECT_EQ(test, atomic_read(&h.irqs), 5);
+	KUNIT_EXPECT_EQ(test, atomic_read(&h.extra), 1);
+	/* A reset starts the counts over. */
+	sgxfive_hostirq_arm(&h, 1, 2);
+	sgxfive_hostirq_reset(&h);
+	KUNIT_EXPECT_FALSE(test, h.armed);
+	KUNIT_EXPECT_EQ(test, atomic_read(&h.irqs), 0);
+	KUNIT_EXPECT_EQ(test, atomic_read(&h.extra), 0);
+}
+
+/*
+ * A device whose registers are a plain buffer (the offsets index it), its
+ * firmware running and its interrupt state ready: what kregnow's write and
+ * the host interrupt need.
+ */
+static struct sgxfive *fake_regs_sgx(struct kunit *test, u32 **regs)
+{
+	struct sgxfive *sgx = kunit_kzalloc(test, sizeof(*sgx), GFP_KERNEL);
+
+	KUNIT_ASSERT_NOT_NULL(test, sgx);
+	*regs = kunit_kzalloc(test, SZ_4K, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, *regs);
+	sgx->dev = kunit_kzalloc(test, sizeof(*sgx->dev), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, sgx->dev);
+	sgx->regs = (void __iomem *)*regs;
+	mutex_init(&sgx->lock);
+	sgxfive_hostirq_init(&sgx->hostirq);
+	sgx->live = true;
+	return sgx;
+}
+
+/*
+ * A write to CR_CLKGATECTL2 only writes; the first write of an enable keeps
+ * what both held and the next keeps that; a flip changes the bits of the
+ * value; a register off the list is refused and not touched. The interrupt
+ * lock is free again after each.
+ */
+static void sgxfive_kpoke_test_kregnow_write(struct kunit *test)
+{
+	struct sgxfive_hostirq *h;
+	struct sgxfive *sgx;
+	u32 *regs;
+
+	sgx = fake_regs_sgx(test, &regs);
+	h = &sgx->hostirq;
+	regs[SGX_EVENT_HOST_ENABLE / 4] = 0x4000;
+	regs[SGX_EVENT_HOST_ENABLE2 / 4] = 0x0100;
+
+	KUNIT_EXPECT_EQ(test, sgxfive_kregnow_write(sgx, SGX_CLKGATECTL2, false, 0x15), 0);
+	KUNIT_EXPECT_EQ(test, regs[SGX_CLKGATECTL2 / 4], 0x15u);
+	KUNIT_EXPECT_FALSE(test, h->armed);
+	KUNIT_EXPECT_EQ(test, sgxfive_kregnow_write(sgx, SGX_CLKGATECTL2, true, 0x3), 0);
+	KUNIT_EXPECT_EQ(test, regs[SGX_CLKGATECTL2 / 4], 0x16u);
+	KUNIT_EXPECT_FALSE(test, h->armed);
+
+	KUNIT_EXPECT_EQ(test, sgxfive_kregnow_write(sgx, SGX_EVENT_HOST_ENABLE, false, 0x4020), 0);
+	KUNIT_EXPECT_EQ(test, regs[SGX_EVENT_HOST_ENABLE / 4], 0x4020u);
+	KUNIT_EXPECT_EQ(test, regs[SGX_EVENT_HOST_ENABLE2 / 4], 0x0100u);
+	KUNIT_EXPECT_TRUE(test, h->armed);
+	KUNIT_EXPECT_EQ(test, h->saved[0], 0x4000u);
+	KUNIT_EXPECT_EQ(test, h->saved[1], 0x0100u);
+	KUNIT_EXPECT_EQ(test, sgxfive_kregnow_write(sgx, SGX_EVENT_HOST_ENABLE2, false, 0x88), 0);
+	KUNIT_EXPECT_EQ(test, regs[SGX_EVENT_HOST_ENABLE2 / 4], 0x88u);
+	KUNIT_EXPECT_EQ(test, h->saved[0], 0x4000u);	/* the first write's */
+	KUNIT_EXPECT_EQ(test, h->saved[1], 0x0100u);
+	KUNIT_EXPECT_EQ(test, sgxfive_kregnow_write(sgx, SGX_EVENT_HOST_ENABLE, true, 0x4000), 0);
+	KUNIT_EXPECT_EQ(test, regs[SGX_EVENT_HOST_ENABLE / 4], 0x0020u);
+
+	KUNIT_EXPECT_EQ(test, sgxfive_kregnow_write(sgx, 0x0810, false, 1), -EPERM);
+	KUNIT_EXPECT_EQ(test, regs[0x0810 / 4], 0u);
+	KUNIT_EXPECT_TRUE(test, spin_trylock(&h->lock));
+	spin_unlock(&h->lock);
+}
+
+/*
+ * The host interrupt with the enables written: the EDM's own event leaves
+ * them, another puts both back once (and keeps its status), a later one only
+ * counts.
+ */
+static void sgxfive_kpoke_test_debug_irq(struct kunit *test)
+{
+	struct sgxfive_hostirq *h;
+	struct sgxfive *sgx;
+	u32 *regs;
+
+	sgx = fake_regs_sgx(test, &regs);
+	h = &sgx->hostirq;
+	regs[SGX_EVENT_HOST_ENABLE / 4] = 0x4000;
+	regs[SGX_EVENT_HOST_ENABLE2 / 4] = 0x0100;
+	sgxfive_debug_irq(sgx, 0x0020, 0x88);		/* nothing armed: counted only */
+	KUNIT_EXPECT_EQ(test, atomic_read(&h->irqs), 1);
+	KUNIT_EXPECT_EQ(test, atomic_read(&h->extra), 0);
+	KUNIT_ASSERT_EQ(test, sgxfive_kregnow_write(sgx, SGX_EVENT_HOST_ENABLE, false, 0x4020), 0);
+	KUNIT_ASSERT_EQ(test, sgxfive_kregnow_write(sgx, SGX_EVENT_HOST_ENABLE2, false, 0x88), 0);
+
+	sgxfive_debug_irq(sgx, 0x4000, 0x80);		/* the EDM's event */
+	KUNIT_EXPECT_EQ(test, regs[SGX_EVENT_HOST_ENABLE / 4], 0x4020u);
+	KUNIT_EXPECT_EQ(test, regs[SGX_EVENT_HOST_ENABLE2 / 4], 0x88u);
+	KUNIT_EXPECT_TRUE(test, h->armed);
+
+	sgxfive_debug_irq(sgx, 0x0020, 0x88);		/* another: put back */
+	KUNIT_EXPECT_EQ(test, regs[SGX_EVENT_HOST_ENABLE / 4], 0x4000u);
+	KUNIT_EXPECT_EQ(test, regs[SGX_EVENT_HOST_ENABLE2 / 4], 0x0100u);
+	KUNIT_EXPECT_FALSE(test, h->armed);
+	KUNIT_EXPECT_EQ(test, atomic_read(&h->irqs), 3);
+	KUNIT_EXPECT_EQ(test, atomic_read(&h->extra), 1);
+	KUNIT_EXPECT_EQ(test, h->last[0], 0x0020u);
+	KUNIT_EXPECT_EQ(test, h->last[1], 0x88u);
+
+	regs[SGX_EVENT_HOST_ENABLE / 4] = 0x777;	/* a later one: not again */
+	sgxfive_debug_irq(sgx, 0x0020, 0x88);
+	KUNIT_EXPECT_EQ(test, regs[SGX_EVENT_HOST_ENABLE / 4], 0x777u);
+	KUNIT_EXPECT_EQ(test, atomic_read(&h->irqs), 4);
+	KUNIT_EXPECT_EQ(test, atomic_read(&h->extra), 1);
+	KUNIT_EXPECT_TRUE(test, spin_trylock(&h->lock));
+	spin_unlock(&h->lock);
+}
+
+/* A recovery reset (and a boot) leaves nothing of what a tester armed. */
+static void sgxfive_kpoke_test_reset_disarms(struct kunit *test)
+{
+	struct sgxfive *sgx;
+	u32 *regs;
+
+	sgx = fake_regs_sgx(test, &regs);
+	spin_lock_init(&sgx->kpoke_lock);
+	KUNIT_ASSERT_EQ(test, sgxfive_kregnow_write(sgx, SGX_EVENT_HOST_ENABLE, false, 0x20), 0);
+	sgxfive_debug_irq(sgx, 0x0020, 0);
+	KUNIT_ASSERT_TRUE(test, atomic_read(&sgx->hostirq.irqs) > 0);
+	KUNIT_ASSERT_EQ(test, sgxfive_kregnow_write(sgx, SGX_EVENT_HOST_ENABLE, false, 0x20), 0);
+	KUNIT_ASSERT_TRUE(test, sgx->hostirq.armed);
+	KUNIT_EXPECT_FALSE(test, sgxfive_debug_reset(sgx));
+	KUNIT_EXPECT_FALSE(test, sgx->hostirq.armed);
+	KUNIT_EXPECT_EQ(test, atomic_read(&sgx->hostirq.irqs), 0);
+	KUNIT_EXPECT_EQ(test, atomic_read(&sgx->hostirq.extra), 0);
+}
+
 static struct kunit_case sgxfive_kpoke_test_cases[] = {
 	KUNIT_CASE(sgxfive_kpoke_test_words),
 	KUNIT_CASE(sgxfive_kpoke_test_parse),
@@ -472,6 +701,13 @@ static struct kunit_case sgxfive_kpoke_test_cases[] = {
 	KUNIT_CASE(sgxfive_kpoke_test_hwperf_regs),
 	KUNIT_CASE(sgxfive_kpoke_test_hwperf_parse),
 	KUNIT_CASE(sgxfive_kpoke_test_hwperf_needs_live),
+	KUNIT_CASE(sgxfive_kpoke_test_kregnow_allowed),
+	KUNIT_CASE(sgxfive_kpoke_test_kregnow_parse),
+	KUNIT_CASE(sgxfive_kpoke_test_kregnow_needs_live),
+	KUNIT_CASE(sgxfive_kpoke_test_hostirq),
+	KUNIT_CASE(sgxfive_kpoke_test_kregnow_write),
+	KUNIT_CASE(sgxfive_kpoke_test_debug_irq),
+	KUNIT_CASE(sgxfive_kpoke_test_reset_disarms),
 	{}
 };
 

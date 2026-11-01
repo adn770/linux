@@ -66,11 +66,21 @@ static const struct {
 
 static_assert(XB_COUNT <= SGXFIVE_XBUFS);
 
+/*
+ * What a tester armed for the firmware that ran does not outlive it: a boot,
+ * a firmware reload or a recovery reset starts with nothing armed.
+ */
+static void sgxfive_debug_disarm(struct sgxfive *sgx)
+{
+	sgxfive_hostirq_reset(&sgx->hostirq);
+}
+
 int sgxfive_debug_load(struct sgxfive *sgx)
 {
 	unsigned int i;
 	int ret;
 
+	sgxfive_debug_disarm(sgx);
 	for (i = 0; i < XB_COUNT; i++) {
 		ret = sgxfive_map_pd(sgx, sgx->pd, &sgx->xt.buf[i],
 				     sgx->layout.heap_base[sgxfive_xbuf[i].heap] +
@@ -958,6 +968,7 @@ bool sgxfive_debug_reset(struct sgxfive *sgx)
 	unsigned int i;
 
 	WRITE_ONCE(sgx->recovery_held, false);
+	sgxfive_debug_disarm(sgx);
 	for (i = 0; i < XB_COUNT; i++)
 		if (sgx->xt.buf[i].va)
 			memset(sgx->xt.buf[i].va, 0, sgxfive_xbuf[i].size);
@@ -1100,6 +1111,133 @@ static ssize_t sgxfive_kreg_fwrite(struct file *f, const char __user *ubuf,
 static const struct file_operations sgxfive_kreg_fops = {
 	.owner = THIS_MODULE, .open = sgxfive_kreg_open, .read = seq_read,
 	.write = sgxfive_kreg_fwrite, .llseek = seq_lseek, .release = single_release,
+};
+
+/*
+ * debugfs kregnow: a write to CR_CLKGATECTL2 or a host event enable
+ * (sgxfive_kregnow_allowed) at any time, while a job runs or is held. The
+ * firmware writes none of them after its boot, so there is nothing to race
+ * with; the device lock only keeps a boot or stop from running meanwhile.
+ * The first write of an enable keeps what both held (sgxfive_hostirq): the
+ * interrupt of an event the firmware did not enable puts them back, since
+ * only the EDM's SW_EVENT is acknowledged here. That arm, the read and the
+ * write are one step under the interrupt lock, so that the interrupt's
+ * restore cannot land between them. Every write is logged. The value stays
+ * until the next write or the next reset of the SGX.
+ */
+int sgxfive_kregnow_write(struct sgxfive *sgx, u32 off, bool flip, u32 value)
+{
+	struct sgxfive_hostirq *h = &sgx->hostirq;
+	unsigned long flags;
+	u32 old, val;
+	int ret = 0;
+
+	if (!READ_ONCE(sgx->live))
+		return -ENODEV;
+	if (!sgxfive_kregnow_ok(off))
+		return -EPERM;
+	mutex_lock(&sgx->lock);
+	if (!sgx->live) {
+		ret = -ENODEV;
+	} else {
+		bool enable = off != SGX_CLKGATECTL2;
+
+		spin_lock_irqsave(&h->lock, flags);
+		if (enable && !h->armed)
+			sgxfive_hostirq_arm(h, sgxfive_rd(sgx, SGX_EVENT_HOST_ENABLE),
+					    sgxfive_rd(sgx, SGX_EVENT_HOST_ENABLE2));
+		old = sgxfive_rd(sgx, off);
+		val = flip ? old ^ value : value;
+		iowrite32(val, sgx->regs + off);
+		spin_unlock_irqrestore(&h->lock, flags);
+		drm_info(sgx->dev, "sgxfive: kregnow 0x%04x: 0x%08x -> 0x%08x, reads 0x%08x\n",
+			 off, old, val, sgxfive_rd(sgx, off));
+	}
+	mutex_unlock(&sgx->lock);
+	return ret;
+}
+
+/* From the host's SGX interrupt, before the driver acts on it. */
+void sgxfive_debug_irq(struct sgxfive *sgx, u32 stat_1, u32 stat_2)
+{
+	struct sgxfive_hostirq *h = &sgx->hostirq;
+	unsigned long flags;
+	bool restore;
+
+	spin_lock_irqsave(&h->lock, flags);
+	restore = sgxfive_hostirq_note(h, stat_1, stat_2);
+	if (restore) {
+		iowrite32(h->saved[0], sgx->regs + SGX_EVENT_HOST_ENABLE);
+		iowrite32(h->saved[1], sgx->regs + SGX_EVENT_HOST_ENABLE2);
+	}
+	spin_unlock_irqrestore(&h->lock, flags);
+	if (!restore)
+		return;
+	dev_info_ratelimited(sgx->dev->dev,
+			     "sgxfive: host interrupt with no SW_EVENT: status %#x/%#x\n",
+			     stat_1, stat_2);
+}
+
+/* The three registers, then the host interrupt counts. */
+static int sgxfive_kregnow_show(struct seq_file *m, void *unused)
+{
+	struct sgxfive *sgx = m->private;
+	struct sgxfive_hostirq *h = &sgx->hostirq;
+	unsigned long flags;
+	unsigned int i;
+	int ret = 0;
+	u32 last[2], saved[2];
+	bool armed;
+
+	mutex_lock(&sgx->lock);
+	if (!sgx->live)
+		ret = -ENODEV;
+	for (i = 0; !ret && i < SGXFIVE_KREGNOW_COUNT; i++)
+		seq_printf(m, "0x%04x 0x%08x\n", sgxfive_kregnow_allowed[i],
+			   sgxfive_rd(sgx, sgxfive_kregnow_allowed[i]));
+	if (!ret) {
+		spin_lock_irqsave(&h->lock, flags);
+		armed = h->armed;
+		memcpy(last, h->last, sizeof(last));
+		memcpy(saved, h->saved, sizeof(saved));
+		spin_unlock_irqrestore(&h->lock, flags);
+		seq_printf(m, "host_irqs %d extra %d last 0x%08x 0x%08x "
+			   "armed %d saved 0x%08x 0x%08x\n",
+			   atomic_read(&h->irqs), atomic_read(&h->extra), last[0], last[1],
+			   armed, saved[0], saved[1]);
+	}
+	mutex_unlock(&sgx->lock);
+	return ret;
+}
+
+static int sgxfive_kregnow_open(struct inode *inode, struct file *f)
+{
+	return single_open(f, sgxfive_kregnow_show, inode->i_private);
+}
+
+static ssize_t sgxfive_kregnow_fwrite(struct file *f, const char __user *ubuf,
+				      size_t len, loff_t *ppos)
+{
+	struct sgxfive *sgx = file_inode(f)->i_private;
+	char buf[SGXFIVE_KPOKE_LINE];
+	u32 off, value;
+	bool flip;
+	int ret;
+
+	if (!len || len >= sizeof(buf))
+		return -EINVAL;
+	if (copy_from_user(buf, ubuf, len))
+		return -EFAULT;
+	buf[len] = '\0';
+	ret = sgxfive_kregnow_parse(strim(buf), &off, &flip, &value);
+	if (!ret)
+		ret = sgxfive_kregnow_write(sgx, off, flip, value);
+	return ret ? ret : len;
+}
+
+static const struct file_operations sgxfive_kregnow_fops = {
+	.owner = THIS_MODULE, .open = sgxfive_kregnow_open, .read = seq_read,
+	.write = sgxfive_kregnow_fwrite, .llseek = seq_lseek, .release = single_release,
 };
 
 /*
@@ -1346,8 +1484,10 @@ void sgxfive_debug_init(struct sgxfive *sgx, struct dentry *dir)
 	debugfs_create_file("reset", 0200, dir, sgx, &sgxfive_reset_fops);
 	debugfs_create_bool("alias_ta3d_ro", 0600, dir, &sgx->alias_ta3d_ro);
 	spin_lock_init(&sgx->kpoke_lock);
+	sgxfive_hostirq_init(&sgx->hostirq);
 	debugfs_create_file("kpoke", 0600, dir, sgx, &sgxfive_kpoke_fops);
 	debugfs_create_file("kreg", 0600, dir, sgx, &sgxfive_kreg_fops);
+	debugfs_create_file("kregnow", 0600, dir, sgx, &sgxfive_kregnow_fops);
 	/* Pages of the PB of render contexts created from now on. */
 	sgx->render_pb_pages = SGX_RENDER_PB_PAGES;
 	debugfs_create_x32("render_pb_pages", 0600, dir, &sgx->render_pb_pages);

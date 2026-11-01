@@ -88,8 +88,6 @@ static_assert(HC_DWORDS == SGXFIVE_HC_DWORDS);
 static_assert(TA3D_CTL_DWORDS == SGXFIVE_TA3D_CTL_DWORDS);
 #define EDM_INIT_COMPLETE	0x1
 #define SGX_CLOCK_HZ		400000000	/* SYS_SGX_CLOCK_SPEED */
-#define SGX_EVENT_SW		0x00004000
-#define SGX_EVENT_MASTER	0x80000000
 
 void sgxfive_unmap(struct sgxfive *sgx, struct sgxfive_buf *b)
 {
@@ -1211,6 +1209,7 @@ bool sgxfive_irq(struct sgxfive *sgx, u32 stat_1, u32 stat_2)
 
 	if (!sgx || !READ_ONCE(sgx->live))
 		return false;
+	sgxfive_debug_irq(sgx, stat_1, stat_2);
 	fault = sgx_rd(sgx, SGX_BIF_INT_STAT) & SGX_BIF_FAULT_REQ;
 	if (fault) {
 		atomic_inc(&sgx->bif_faults);

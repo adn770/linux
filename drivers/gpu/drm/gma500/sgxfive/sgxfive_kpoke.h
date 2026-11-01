@@ -33,6 +33,8 @@
 #ifndef _SGXFIVE_KPOKE_H_
 #define _SGXFIVE_KPOKE_H_
 
+#include <linux/atomic.h>
+#include <linux/spinlock.h>
 #include <linux/types.h>
 
 struct sgxfive;
@@ -110,6 +112,54 @@ int sgxfive_kreg_parse(const char *s, u32 *off, bool *flip, u32 *value);
 
 /* Write one allowed register (sgxfive_debug.c): -ENODEV, -EPERM, -EBUSY. */
 int sgxfive_kreg_write(struct sgxfive *sgx, u32 off, bool flip, u32 value);
+
+/*
+ * The registers debugfs kregnow may write at any time, also while a job runs
+ * or is held: CR_CLKGATECTL2 and the two host event enables
+ * (CR_EVENT_HOST_ENABLE2, CR_EVENT_HOST_ENABLE), none of which the firmware
+ * writes after its boot. Sorted; none is on kreg's list. Same lines as kreg:
+ * OFFSET=VALUE or OFFSET^=VALUE (-EPERM off the list).
+ */
+#define SGXFIVE_KREGNOW_COUNT	3
+extern const u32 sgxfive_kregnow_allowed[SGXFIVE_KREGNOW_COUNT];
+bool sgxfive_kregnow_ok(u32 off);
+int sgxfive_kregnow_parse(const char *s, u32 *off, bool *flip, u32 *value);
+
+/* Write one of them (sgxfive_debug.c): -ENODEV, -EPERM. The write is logged. */
+int sgxfive_kregnow_write(struct sgxfive *sgx, u32 off, bool flip, u32 value);
+
+/*
+ * The host's SGX interrupts, counted (debugfs kregnow): every one, and the
+ * ones no EDM SW_EVENT came with while the host event enables were written
+ * (an event the firmware did not enable raised them). That event's status
+ * is kept and the enables are put back at once, so that an event the host
+ * does not clear cannot storm. saved is what the enables held before the
+ * first write of them since the load or reset.
+ *
+ * lock makes the write of an enable (the arm before it, the register read and
+ * the write) and the interrupt's note and restore each one step, so that the
+ * restore cannot land between the arm and the write. It guards armed, last
+ * and saved; arm and note run with it held (irqsave), reset takes it.
+ */
+struct sgxfive_hostirq {
+	spinlock_t lock;
+	atomic_t irqs;		/* host interrupts of the live firmware */
+	atomic_t extra;		/* of them, the extra events' */
+	u32 last[2];		/* the status registers (EVENT_STATUS, 2) at the last */
+	u32 saved[2];		/* CR_EVENT_HOST_ENABLE and ..2 before the writes */
+	bool armed;		/* the enables were written */
+};
+
+void sgxfive_hostirq_init(struct sgxfive_hostirq *h);
+/* With h->lock held: remember the enables as they were before the first write. */
+void sgxfive_hostirq_arm(struct sgxfive_hostirq *h, u32 enable, u32 enable2);
+/*
+ * With h->lock held: count one interrupt; true when the caller must put saved[]
+ * back (and has).
+ */
+bool sgxfive_hostirq_note(struct sgxfive_hostirq *h, u32 stat_1, u32 stat_2);
+/* Start the counts over and disarm (takes the lock). */
+void sgxfive_hostirq_reset(struct sgxfive_hostirq *h);
 
 /*
  * debugfs hwperf: the counter group (HostCtl dword 15, which the firmware
