@@ -865,25 +865,43 @@ int sgxfive_render_cleanup(struct sgxfive *sgx, u32 rtds, u32 ctx, u32 pbdesc,
 }
 
 /*
+ * How buffer id is aliased: the map flags, or -ENOENT when skip (a mask of
+ * buffer ids, debugfs alias_skip) leaves it out.
+ */
+int sgxfive_alias_flags(unsigned int id, bool ta3d_ro, u32 skip)
+{
+	if (id < 32 && skip & BIT(id))
+		return -ENOENT;
+	return id == BUF_TA3D_CTL && !ta3d_ro ? 0 : SGX_MMU_RO;
+}
+
+/*
  * Map (or unmap) every firmware buffer into a render VM's page directory at
  * its own address: the EDM runs through the context's directory while it
  * loads a parameter buffer. Read-only, except the TA/3D control block, which
  * the EDM writes in that window (TA3DCtl dwords 46 and 47, the loaded PB):
  * read-only, the write faults and the render stalls (debugfs alias_ta3d_ro
  * reproduces it).
+ *
+ * The buffers alias_skip names are left out when the alias is made, which is
+ * when a render context joins a VM that has none; the VM keeps that alias
+ * until its last render context goes, and the next one makes it again with
+ * the mask of then. Unmapping takes every buffer, so that a change of the
+ * mask in between leaves nothing mapped.
  */
 int sgxfive_alias_firmware(struct sgxfive *sgx, struct sgx_mmu_pd *pd, bool map)
 {
 	const bool ta3d_ro = sgxfive_alias_ta3d_ro(sgx);
+	const u32 skip = map ? sgxfive_alias_skip(sgx) : 0;
 	unsigned int id;
 	int ret = 0;
 
 	mutex_lock(&sgx->lock);
 	for (id = 0; id < SGX_FW_MAX_BUFFERS && !ret; id++) {
 		const struct sgxfive_buf *b = &sgx->buf[id];
-		u32 flags = id == BUF_TA3D_CTL && !ta3d_ro ? 0 : SGX_MMU_RO;
+		const int flags = sgxfive_alias_flags(id, ta3d_ro, skip);
 
-		if (!b->pd)
+		if (!b->pd || flags < 0)
 			continue;
 		if (map)
 			ret = sgx_mmu_map(pd, b->addr, b->pages, b->npages, flags);

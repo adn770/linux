@@ -135,6 +135,7 @@ struct sgxfive {
 #if IS_ENABLED(CONFIG_DRM_GMA500_SGXFIVE_DEBUG)
 	struct sgxfive_xtest xt;
 	bool alias_ta3d_ro;		/* render VMs: TA3DCtl read-only */
+	u32 alias_skip;			/* render VMs: firmware buffers (by id) left out */
 	spinlock_t kpoke_lock;		/* pokes for the next jobs' commands */
 	struct sgxfive_kpokes kpokes;
 	u32 render_pb_pages;		/* PB of new render contexts */
@@ -357,6 +358,7 @@ unsigned int sgxfive_render_cleanup_steps(u32 rtds, u32 ctx, u32 pbdesc,
 int sgxfive_render_cleanup(struct sgxfive *sgx, u32 rtds, u32 ctx, u32 pbdesc,
 			   u32 flags);
 int sgxfive_alias_firmware(struct sgxfive *sgx, struct sgx_mmu_pd *pd, bool map);
+int sgxfive_alias_flags(unsigned int id, bool ta3d_ro, u32 skip);
 
 int sgxfive_vm_check_range(const struct drm_sgxfive_heap *heaps, unsigned int n,
 			   u64 addr, u64 size);
@@ -381,10 +383,20 @@ int sgxfive_debug_load(struct sgxfive *sgx);
 void sgxfive_debug_unload(struct sgxfive *sgx);
 bool sgxfive_debug_reset(struct sgxfive *sgx);
 void sgxfive_debug_irq(struct sgxfive *sgx, u32 stat_1, u32 stat_2);
+int sgxfive_alias_skip_set(void *data, u64 val);
 
 static inline bool sgxfive_alias_ta3d_ro(struct sgxfive *sgx)
 {
 	return READ_ONCE(sgx->alias_ta3d_ro);
+}
+
+/*
+ * The firmware buffers a new render VM's alias leaves out, by id (debugfs
+ * alias_skip).
+ */
+static inline u32 sgxfive_alias_skip(struct sgxfive *sgx)
+{
+	return READ_ONCE(sgx->alias_skip);
 }
 
 /* Whether the next render context maps its page writable: taken once (debugfs alias_ctx_rw). */
@@ -480,6 +492,11 @@ static inline void sgxfive_debug_irq(struct sgxfive *sgx, u32 stat_1, u32 stat_2
 static inline bool sgxfive_alias_ta3d_ro(struct sgxfive *sgx)
 {
 	return false;
+}
+
+static inline u32 sgxfive_alias_skip(struct sgxfive *sgx)
+{
+	return 0;
 }
 
 static inline void sgxfive_kpoke_job(struct sgxfive *sgx, u8 *img, bool render)

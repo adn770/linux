@@ -18,6 +18,7 @@
 
 #include <drm/drm_print.h>
 
+#include "sgx_mmu.h"
 #include "sgx_render.h"
 #include "sgxfive_ctx.h"
 #include "sgxfive_kpoke.h"
@@ -660,6 +661,143 @@ static void sgxfive_debug_test_render_words(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, strcmp(buf + strlen(buf) - strlen(tail), tail), 0);
 }
 
+/*
+ * How a render VM's alias treats each firmware buffer: read-only, the TA/3D
+ * control block writable unless alias_ta3d_ro, and a buffer whose bit is set
+ * in alias_skip left out.
+ */
+static void sgxfive_debug_test_alias_flags(struct kunit *test)
+{
+	const u32 skip = BIT(BUF_TA3D_CTL) | BIT(BUF_MISC) | BIT(0);
+	unsigned int id;
+
+	for (id = 0; id < SGX_FW_MAX_BUFFERS; id++) {
+		const int plain = id == BUF_TA3D_CTL ? 0 : SGX_MMU_RO;
+		const bool left_out = skip & BIT(id);
+
+		KUNIT_EXPECT_EQ_MSG(test, sgxfive_alias_flags(id, false, 0), plain, "id %u", id);
+		KUNIT_EXPECT_EQ_MSG(test, sgxfive_alias_flags(id, true, 0), (int)SGX_MMU_RO,
+				    "id %u", id);
+		KUNIT_EXPECT_EQ_MSG(test, sgxfive_alias_flags(id, false, skip),
+				    left_out ? -ENOENT : plain, "id %u", id);
+		KUNIT_EXPECT_EQ_MSG(test, sgxfive_alias_flags(id, true, skip),
+				    left_out ? -ENOENT : (int)SGX_MMU_RO, "id %u", id);
+	}
+	KUNIT_EXPECT_EQ(test, sgxfive_alias_flags(BUF_CCB, false, ~0u), -ENOENT);
+}
+
+static void sgxfive_debug_test_free_page(void *page)
+{
+	__free_page(page);
+}
+
+static void sgxfive_debug_test_destroy_pd(void *pd)
+{
+	sgx_mmu_pd_destroy(pd);
+}
+
+/*
+ * The alias of the firmware's buffers in a VM's page directory: all of them
+ * without alias_skip, all but the ones it names with it, and the unmap takes
+ * every one that was mapped whatever alias_skip says by then. The pages and
+ * the directory go when the test ends, a failed assertion included.
+ */
+static void sgxfive_debug_test_alias_skip(struct kunit *test)
+{
+	static const unsigned int ids[] = { BUF_CCB, BUF_CCB_CTL, BUF_KICKER, BUF_TA3D_CTL,
+					    BUF_HOST_CTL, BUF_MISC };
+	struct sgxfive *sgx = kunit_kzalloc(test, sizeof(*sgx), GFP_KERNEL);
+	struct sgx_mmu_pd *pd = sgx_mmu_pd_create();
+	unsigned int i;
+
+	KUNIT_ASSERT_NOT_NULL(test, sgx);
+	KUNIT_ASSERT_NOT_NULL(test, pd);
+	KUNIT_ASSERT_EQ(test, kunit_add_action_or_reset(test, sgxfive_debug_test_destroy_pd, pd),
+			0);
+	mutex_init(&sgx->lock);
+	for (i = 0; i < ARRAY_SIZE(ids); i++) {
+		struct sgxfive_buf *b = &sgx->buf[ids[i]];
+
+		b->pages = kunit_kcalloc(test, 1, sizeof(*b->pages), GFP_KERNEL);
+		KUNIT_ASSERT_NOT_NULL(test, b->pages);
+		b->pages[0] = alloc_page(GFP_KERNEL);
+		KUNIT_ASSERT_NOT_NULL(test, b->pages[0]);
+		KUNIT_ASSERT_EQ(test, kunit_add_action_or_reset(test, sgxfive_debug_test_free_page,
+								b->pages[0]), 0);
+		b->npages = 1;
+		b->addr = 0x30000000 + 0x1000 * ids[i];
+		b->pd = pd;
+	}
+
+	KUNIT_ASSERT_EQ(test, sgxfive_alias_firmware(sgx, pd, true), 0);
+	for (i = 0; i < ARRAY_SIZE(ids); i++)
+		KUNIT_EXPECT_NE_MSG(test, sgx_mmu_lookup(pd, sgx->buf[ids[i]].addr), 0u,
+				    "id %u", ids[i]);
+	KUNIT_ASSERT_EQ(test, sgxfive_alias_firmware(sgx, pd, false), 0);
+	for (i = 0; i < ARRAY_SIZE(ids); i++)
+		KUNIT_EXPECT_EQ(test, sgx_mmu_lookup(pd, sgx->buf[ids[i]].addr), 0u);
+
+	sgx->alias_skip = BIT(BUF_TA3D_CTL) | BIT(BUF_KICKER);
+	KUNIT_ASSERT_EQ(test, sgxfive_alias_firmware(sgx, pd, true), 0);
+	for (i = 0; i < ARRAY_SIZE(ids); i++) {
+		const bool left_out = sgx->alias_skip & BIT(ids[i]);
+
+		KUNIT_EXPECT_EQ_MSG(test, sgx_mmu_lookup(pd, sgx->buf[ids[i]].addr) != 0, !left_out,
+				    "id %u", ids[i]);
+	}
+	sgx->alias_skip = 0;			/* changed since the map: all the same unmapped */
+	KUNIT_ASSERT_EQ(test, sgxfive_alias_firmware(sgx, pd, false), 0);
+	for (i = 0; i < ARRAY_SIZE(ids); i++)
+		KUNIT_EXPECT_EQ(test, sgx_mmu_lookup(pd, sgx->buf[ids[i]].addr), 0u);
+
+	sgx->alias_skip = ~0u;			/* all left out */
+	KUNIT_ASSERT_EQ(test, sgxfive_alias_firmware(sgx, pd, true), 0);
+	for (i = 0; i < ARRAY_SIZE(ids); i++)
+		KUNIT_EXPECT_EQ(test, sgx_mmu_lookup(pd, sgx->buf[ids[i]].addr), 0u);
+}
+
+/*
+ * debugfs alias_skip takes the ids that exist (0-15) and refuses a bit past
+ * them, leaving the mask as it was.
+ */
+static void sgxfive_debug_test_alias_skip_set(struct kunit *test)
+{
+	struct sgxfive *sgx = kunit_kzalloc(test, sizeof(*sgx), GFP_KERNEL);
+
+	KUNIT_ASSERT_NOT_NULL(test, sgx);
+	KUNIT_EXPECT_EQ(test, sgxfive_alias_skip_set(sgx, 0x28), 0);
+	KUNIT_EXPECT_EQ(test, sgx->alias_skip, 0x28u);
+	KUNIT_EXPECT_EQ(test, sgxfive_alias_skip_set(sgx, 0xffff), 0);
+	KUNIT_EXPECT_EQ(test, sgx->alias_skip, 0xffffu);
+	KUNIT_EXPECT_EQ(test, sgxfive_alias_skip_set(sgx, BIT(16)), -EINVAL);
+	KUNIT_EXPECT_EQ(test, sgxfive_alias_skip_set(sgx, 0x80000001), -EINVAL);
+	KUNIT_EXPECT_EQ(test, sgxfive_alias_skip_set(sgx, BIT_ULL(32)), -EINVAL);
+	KUNIT_EXPECT_EQ(test, sgxfive_alias_skip_set(sgx, ~0ull), -EINVAL);
+	KUNIT_EXPECT_EQ(test, sgx->alias_skip, 0xffffu);
+	KUNIT_EXPECT_EQ(test, sgxfive_alias_skip_set(sgx, 0), 0);
+	KUNIT_EXPECT_EQ(test, sgx->alias_skip, 0u);
+}
+
+/*
+ * A recovery reset (and a boot) leave alias_skip and alias_ta3d_ro as they
+ * were: they are modes that stay until written, not one-shot controls.
+ */
+static void sgxfive_debug_test_alias_skip_reset(struct kunit *test)
+{
+	struct sgxfive *sgx = kunit_kzalloc(test, sizeof(*sgx), GFP_KERNEL);
+
+	KUNIT_ASSERT_NOT_NULL(test, sgx);
+	spin_lock_init(&sgx->kpoke_lock);
+	sgxfive_hostirq_init(&sgx->hostirq);
+	sgx->alias_skip = 0x28;
+	sgx->alias_ta3d_ro = true;
+	sgx->alias_ctx_rw = true;
+	KUNIT_EXPECT_FALSE(test, sgxfive_debug_reset(sgx));
+	KUNIT_EXPECT_EQ(test, sgx->alias_skip, 0x28u);
+	KUNIT_EXPECT_TRUE(test, sgx->alias_ta3d_ro);
+	KUNIT_EXPECT_FALSE(test, sgx->alias_ctx_rw);	/* the one-shot is dropped */
+}
+
 static struct kunit_case sgxfive_debug_test_cases[] = {
 	KUNIT_CASE(sgxfive_debug_test_pb_small),
 	KUNIT_CASE(sgxfive_debug_test_pb_pages),
@@ -676,6 +814,10 @@ static struct kunit_case sgxfive_debug_test_cases[] = {
 	KUNIT_CASE(sgxfive_debug_test_cleanup_reset),
 	KUNIT_CASE(sgxfive_debug_test_render_run),
 	KUNIT_CASE(sgxfive_debug_test_render_words),
+	KUNIT_CASE(sgxfive_debug_test_alias_flags),
+	KUNIT_CASE(sgxfive_debug_test_alias_skip),
+	KUNIT_CASE(sgxfive_debug_test_alias_skip_set),
+	KUNIT_CASE(sgxfive_debug_test_alias_skip_reset),
 	{}
 };
 

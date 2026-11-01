@@ -1520,6 +1520,30 @@ static int sgxfive_render_cleanup_show(struct seq_file *m, void *unused)
 }
 DEFINE_SHOW_ATTRIBUTE(sgxfive_render_cleanup);
 
+/*
+ * debugfs alias_skip (sgxfive_alias_firmware): a mask of firmware buffer ids.
+ * A bit past the last id (SGX_FW_MAX_BUFFERS) names nothing: refused.
+ */
+static int sgxfive_alias_skip_get(void *data, u64 *val)
+{
+	struct sgxfive *sgx = data;
+
+	*val = READ_ONCE(sgx->alias_skip);
+	return 0;
+}
+
+int sgxfive_alias_skip_set(void *data, u64 val)
+{
+	struct sgxfive *sgx = data;
+
+	if (val & ~GENMASK_ULL(SGX_FW_MAX_BUFFERS - 1, 0))
+		return -EINVAL;
+	WRITE_ONCE(sgx->alias_skip, val);
+	return 0;
+}
+DEFINE_DEBUGFS_ATTRIBUTE(sgxfive_alias_skip_fops, sgxfive_alias_skip_get,
+			 sgxfive_alias_skip_set, "0x%08llx\n");
+
 void sgxfive_debug_init(struct sgxfive *sgx, struct dentry *dir)
 {
 	debugfs_create_file("miscinfo", 0400, dir, sgx, &sgxfive_miscinfo_fops);
@@ -1535,6 +1559,12 @@ void sgxfive_debug_init(struct sgxfive *sgx, struct dentry *dir)
 	debugfs_create_file("xfer_ro", 0400, dir, sgx, &sgxfive_xfer_ro_fops);
 	debugfs_create_file("reset", 0200, dir, sgx, &sgxfive_reset_fops);
 	debugfs_create_bool("alias_ta3d_ro", 0600, dir, &sgx->alias_ta3d_ro);
+	/*
+	 * Firmware buffers (ids 0-15) left out of the alias of the render VMs
+	 * made from now on, until written again: a reset leaves the mask
+	 * alone, like alias_ta3d_ro. Bits 16-31 name no buffer: -EINVAL.
+	 */
+	debugfs_create_file_unsafe("alias_skip", 0600, dir, sgx, &sgxfive_alias_skip_fops);
 	debugfs_create_bool("alias_ctx_rw", 0600, dir, &sgx->alias_ctx_rw);
 	debugfs_create_bool("render_share_pb", 0600, dir, &sgx->render_share_pb);
 	spin_lock_init(&sgx->kpoke_lock);
