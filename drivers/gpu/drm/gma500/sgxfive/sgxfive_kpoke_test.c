@@ -15,6 +15,7 @@
 
 #include <drm/drm_device.h>
 
+#include "sgx_mmu.h"
 #include "sgx_render.h"
 #include "sgx_seq.h"
 #include "sgx_xfer.h"
@@ -558,6 +559,20 @@ static void sgxfive_kpoke_test_hostirq(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, atomic_read(&h.extra), 0);
 }
 
+/* A flag armed from debugfs is taken once; the page is read-only unless it was. */
+static void sgxfive_kpoke_test_oneshot(struct kunit *test)
+{
+	bool armed = false;
+
+	KUNIT_EXPECT_FALSE(test, sgxfive_oneshot_take(&armed));
+	armed = true;
+	KUNIT_EXPECT_TRUE(test, sgxfive_oneshot_take(&armed));
+	KUNIT_EXPECT_FALSE(test, armed);
+	KUNIT_EXPECT_FALSE(test, sgxfive_oneshot_take(&armed));
+	KUNIT_EXPECT_EQ(test, sgxfive_ctx_page_flags(false), (u32)SGX_MMU_RO);
+	KUNIT_EXPECT_EQ(test, sgxfive_ctx_page_flags(true), 0u);
+}
+
 /*
  * A device whose registers are a plain buffer (the offsets index it), its
  * firmware running and its interrupt state ready: what kregnow's write and
@@ -679,8 +694,10 @@ static void sgxfive_kpoke_test_reset_disarms(struct kunit *test)
 	KUNIT_ASSERT_TRUE(test, atomic_read(&sgx->hostirq.irqs) > 0);
 	KUNIT_ASSERT_EQ(test, sgxfive_kregnow_write(sgx, SGX_EVENT_HOST_ENABLE, false, 0x20), 0);
 	KUNIT_ASSERT_TRUE(test, sgx->hostirq.armed);
+	sgx->alias_ctx_rw = true;
 	KUNIT_EXPECT_FALSE(test, sgxfive_debug_reset(sgx));
 	KUNIT_EXPECT_FALSE(test, sgx->hostirq.armed);
+	KUNIT_EXPECT_FALSE(test, sgx->alias_ctx_rw);
 	KUNIT_EXPECT_EQ(test, atomic_read(&sgx->hostirq.irqs), 0);
 	KUNIT_EXPECT_EQ(test, atomic_read(&sgx->hostirq.extra), 0);
 }
@@ -708,6 +725,7 @@ static struct kunit_case sgxfive_kpoke_test_cases[] = {
 	KUNIT_CASE(sgxfive_kpoke_test_kregnow_write),
 	KUNIT_CASE(sgxfive_kpoke_test_debug_irq),
 	KUNIT_CASE(sgxfive_kpoke_test_reset_disarms),
+	KUNIT_CASE(sgxfive_kpoke_test_oneshot),
 	{}
 };
 

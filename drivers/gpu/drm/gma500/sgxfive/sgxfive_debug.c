@@ -73,6 +73,7 @@ static_assert(XB_COUNT <= SGXFIVE_XBUFS);
 static void sgxfive_debug_disarm(struct sgxfive *sgx)
 {
 	sgxfive_hostirq_reset(&sgx->hostirq);
+	WRITE_ONCE(sgx->alias_ctx_rw, false);
 }
 
 int sgxfive_debug_load(struct sgxfive *sgx)
@@ -1483,6 +1484,7 @@ void sgxfive_debug_init(struct sgxfive *sgx, struct dentry *dir)
 	debugfs_create_file("xfer_ro", 0400, dir, sgx, &sgxfive_xfer_ro_fops);
 	debugfs_create_file("reset", 0200, dir, sgx, &sgxfive_reset_fops);
 	debugfs_create_bool("alias_ta3d_ro", 0600, dir, &sgx->alias_ta3d_ro);
+	debugfs_create_bool("alias_ctx_rw", 0600, dir, &sgx->alias_ctx_rw);
 	spin_lock_init(&sgx->kpoke_lock);
 	sgxfive_hostirq_init(&sgx->hostirq);
 	debugfs_create_file("kpoke", 0600, dir, sgx, &sgxfive_kpoke_fops);

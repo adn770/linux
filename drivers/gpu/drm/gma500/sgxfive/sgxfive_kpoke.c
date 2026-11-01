@@ -12,6 +12,7 @@
 
 #include <drm/drm_print.h>
 
+#include "sgx_mmu.h"
 #include "sgx_render.h"
 #include "sgx_seq.h"
 #include "sgx_xfer.h"
@@ -368,4 +369,14 @@ void sgxfive_hostirq_reset(struct sgxfive_hostirq *h)
 	spin_unlock_irqrestore(&h->lock, flags);
 	atomic_set(&h->irqs, 0);
 	atomic_set(&h->extra, 0);
+}
+
+bool sgxfive_oneshot_take(bool *armed)
+{
+	return xchg(armed, false);
+}
+
+u32 sgxfive_ctx_page_flags(bool rw)
+{
+	return rw ? 0 : SGX_MMU_RO;
 }

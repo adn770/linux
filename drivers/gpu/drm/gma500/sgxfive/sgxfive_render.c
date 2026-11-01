@@ -159,10 +159,15 @@ static int sgxfive_render_map(struct sgxfive_render *r)
 				   r->param, PARAM_PAGES, 0);
 	if (!ret)
 		ret = sgxfive_vm_map_pages(ctx->vm, r->a.tadata, r->td, r->td_pages, 0);
-	/* The EDM reads the PB descriptor here through the context's directory. */
+	/*
+	 * The EDM reads the PB descriptor here through the context's directory.
+	 * Read-only, but for the context a tester asked a writable page for
+	 * (debugfs alias_ctx_rw): the EDM's own writes there then do not fault.
+	 */
 	if (!ret)
 		ret = sgxfive_vm_map_pages(ctx->vm, ctx->mem.addr, ctx->mem.pages,
-					   ctx->mem.npages, SGX_MMU_RO);
+					   ctx->mem.npages,
+					   sgxfive_ctx_page_flags(sgxfive_take_ctx_rw(ctx->sgx)));
 	if (ret)
 		sgxfive_render_unmap(r);
 	return ret;

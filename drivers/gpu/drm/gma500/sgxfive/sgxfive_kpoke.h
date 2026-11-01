@@ -162,6 +162,15 @@ bool sgxfive_hostirq_note(struct sgxfive_hostirq *h, u32 stat_1, u32 stat_2);
 void sgxfive_hostirq_reset(struct sgxfive_hostirq *h);
 
 /*
+ * Switches a tester arms from debugfs for the next thing that reads them
+ * (alias_ctx_rw, render_share_pb): taken once, whoever reads them first.
+ */
+bool sgxfive_oneshot_take(bool *armed);
+
+/* The VM flags of a render context's page, writable when rw (debugfs alias_ctx_rw). */
+u32 sgxfive_ctx_page_flags(bool rw);
+
+/*
  * debugfs hwperf: the counter group (HostCtl dword 15, which the firmware
  * puts in the HWPerf control register's bits 12:9) and the data word of the
  * firmware's SETHWPERFSTATUS command (bit 0: apply; the rest becomes its
