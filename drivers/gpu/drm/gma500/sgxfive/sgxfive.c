@@ -29,6 +29,7 @@
 
 #include "sgxfive.h"
 #include "sgxfive_priv.h"
+#include "sgxfive_regdump.h"
 #include "sgx_fw.h"
 #include "sgx_mmu.h"
 #include "sgx_seq.h"
@@ -569,6 +570,48 @@ static int sgxfive_status_show(struct seq_file *m, void *unused)
 }
 DEFINE_SHOW_ATTRIBUTE(sgxfive_status);
 
+#if IS_ENABLED(CONFIG_DRM_GMA500_SGXFIVE_DEBUG)
+/*
+ * Every register of the snapshot table and the firmware control blocks, one
+ * value a line, to diff before and after a step (sgxfive_regdump.c). Reads
+ * only; the registers whose write starts work are not read.
+ */
+static int sgxfive_regs_show(struct seq_file *m, void *unused)
+{
+	struct sgxfive *sgx = m->private;
+	struct drm_printer p = drm_seq_file_printer(m);
+	struct sgxfive_devstate *d;
+	struct sgxfive_regdump *rd;
+
+	d = kzalloc_obj(*d);
+	rd = kzalloc_obj(*rd);
+	if (!d || !rd) {
+		kfree(d);
+		kfree(rd);
+		return -ENOMEM;
+	}
+	mutex_lock(&sgx->lock);
+	sgxfive_devstate(sgx, d);
+	sgxfive_regdump_capture(rd, seq_rd, sgx);
+	mutex_unlock(&sgx->lock);
+	sgxfive_regdump_print(&p, rd, d);
+	kfree(rd);
+	kfree(d);
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(sgxfive_regs);
+
+/* The debug group (CONFIG_DRM_GMA500_SGXFIVE_DEBUG). */
+static void sgxfive_debugfs_debug(struct sgxfive *sgx, struct dentry *dir)
+{
+	debugfs_create_file("regs", 0400, dir, sgx, &sgxfive_regs_fops);
+}
+#else
+static void sgxfive_debugfs_debug(struct sgxfive *sgx, struct dentry *dir)
+{
+}
+#endif
+
 /*
  * Create the SGX device for a host: the DRM device, the register block and
  * the page directory the host keeps in BIF directory list 0. Nothing touches
@@ -597,6 +640,7 @@ void sgxfive_debugfs_init(struct sgxfive *sgx, struct dentry *root)
 	debugfs_create_file("boot", 0200, dir, sgx, &sgxfive_boot_fops);
 	debugfs_create_file("stop", 0200, dir, sgx, &sgxfive_stop_fops);
 	debugfs_create_file("status", 0400, dir, sgx, &sgxfive_status_fops);
+	sgxfive_debugfs_debug(sgx, dir);
 	debugfs_create_x32("heap_start", 0600, dir, &sgx->heap_start);
 	for (i = 0; i < SGX_FW_MAX_BUFFERS; i++) {
 		char name[8];

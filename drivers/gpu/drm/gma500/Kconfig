@@ -29,3 +29,15 @@ config DRM_GMA500_KUNIT_TEST
 	  into gma500_gfx and run when it is loaded with KUnit available.
 
 	  If unsure, say N.
+
+config DRM_GMA500_SGXFIVE_DEBUG
+	bool "Debug files for the GMA3600 SGX545 support"
+	depends on DRM_GMA500 && DEBUG_FS
+	help
+	  Extra debugfs files in dri/N/sgx/ for work on the SGX545 firmware
+	  interface, such as a snapshot of every register the firmware uses
+	  (dri/N/sgx/regs). They expose hardware and firmware state the
+	  driver does not need, for development only. Their KUnit tests are
+	  built only with this option.
+
+	  If unsure, say N.
