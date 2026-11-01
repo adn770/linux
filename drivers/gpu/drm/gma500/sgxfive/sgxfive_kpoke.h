@@ -85,4 +85,21 @@ int sgxfive_kreg_parse(const char *s, u32 *off, bool *flip, u32 *value);
 /* Write one allowed register (sgxfive_debug.c): -ENODEV, -EPERM, -EBUSY. */
 int sgxfive_kreg_write(struct sgxfive *sgx, u32 off, bool flip, u32 value);
 
+/*
+ * debugfs hwperf: the counter group (HostCtl dword 15, which the firmware
+ * puts in the HWPerf control register's bits 12:9) and the data word of the
+ * firmware's SETHWPERFSTATUS command (bit 0: apply; the rest becomes its
+ * HWPerf status; any status but 0 selects the group, bits 1-3 also record
+ * events). Reading shows the control register and the registers the
+ * firmware's HWPerf routine reads.
+ */
+#define SGXFIVE_HWPERF_NREGS	18
+extern const u32 sgxfive_hwperf_regs[SGXFIVE_HWPERF_NREGS];
+
+/* "GROUP WORD" (numbers as kstrtou32 base 0): -EINVAL, -ERANGE past group 15. */
+int sgxfive_hwperf_parse(const char *s, u32 *group, u32 *word);
+
+/* Set the group and send the command (sgxfive_debug.c): -ENODEV, -EBUSY, -ENXIO, -ETIMEDOUT. */
+int sgxfive_hwperf_set(struct sgxfive *sgx, u32 group, u32 word);
+
 #endif

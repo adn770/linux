@@ -184,6 +184,37 @@ const u32 sgxfive_kreg_allowed[SGXFIVE_KREG_COUNT] = {
 	0x0810, 0x0814, 0x0818, 0x0a78, 0x0abc,
 };
 
+/*
+ * The HWPerf control register, then what the firmware's HWPerf routine copies
+ * to its buffer: 0x0044-0x0064 by an indexed loop, 0x0e84-0x0e90 and
+ * 0x0eb4-0x0ec0 one by one. Reading them is plain MMIO; 0x0e80, which the firmware pulses
+ * after it sets the control, is left out.
+ */
+const u32 sgxfive_hwperf_regs[SGXFIVE_HWPERF_NREGS] = {
+	0x0040, 0x0044, 0x0048, 0x004c, 0x0050, 0x0054, 0x0058, 0x005c, 0x0060,
+	0x0064, 0x0e84, 0x0e88, 0x0e8c, 0x0e90, 0x0eb4, 0x0eb8, 0x0ebc, 0x0ec0,
+};
+
+int sgxfive_hwperf_parse(const char *s, u32 *group, u32 *word)
+{
+	char buf[SGXFIVE_KPOKE_LINE];
+	char *a, *b;
+
+	if (strscpy(buf, s, sizeof(buf)) < 0)
+		return -EINVAL;
+	a = skip_spaces(buf);
+	b = strpbrk(a, " \t");
+	if (!b)
+		return -EINVAL;
+	*b = '\0';
+	b = skip_spaces(b + 1);
+	if (!*b || strpbrk(b, " \t"))
+		return -EINVAL;
+	if (kstrtou32(a, 0, group) || kstrtou32(b, 0, word))
+		return -EINVAL;
+	return *group > 15 ? -ERANGE : 0;
+}
+
 bool sgxfive_kreg_ok(u32 off)
 {
 	unsigned int i;

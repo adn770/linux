@@ -1126,6 +1126,114 @@ static const struct file_operations sgxfive_render_tadata_fops = {
 	.llseek = default_llseek,
 };
 
+/* The firmware buffer at a device address, or NULL. */
+static struct sgxfive_buf *sgxfive_buf_at(struct sgxfive *sgx, u32 addr)
+{
+	unsigned int i;
+
+	for (i = 0; addr && i < SGX_FW_MAX_BUFFERS; i++)
+		if (sgx->buf[i].va && sgx->buf[i].addr == addr)
+			return &sgx->buf[i];
+	return NULL;
+}
+
+/*
+ * debugfs hwperf: set HostCtl's counter group, then send the firmware's
+ * SETHWPERFSTATUS command with word as its status. The firmware's handler
+ * first writes 0xffffffff to word 2 of the HWPerf buffer TA3DCtl dword 43
+ * points at, which is the acknowledgement waited for here; with no such
+ * buffer mapped the command is not sent. Only while the firmware runs and has
+ * no render-node job; logged with what the HWPerf control register reads
+ * after.
+ */
+int sgxfive_hwperf_set(struct sgxfive *sgx, u32 group, u32 word)
+{
+	const u32 data[] = { word };
+	struct sgxfive_buf *cb;
+	u32 *hc, *ack;
+	int ret;
+
+	if (!READ_ONCE(sgx->live))
+		return -ENODEV;
+	mutex_lock(&sgx->lock);
+	if (!sgx->live) {
+		ret = -ENODEV;
+		goto out;
+	}
+	if (sgxfive_oldest(sgx) != U64_MAX) {
+		ret = -EBUSY;
+		goto out;
+	}
+	cb = sgxfive_buf_at(sgx, READ_ONCE(sgxfive_words(sgx, BUF_TA3D_CTL)[43]));
+	if (!cb) {
+		ret = -ENXIO;
+		goto out;
+	}
+	hc = sgxfive_words(sgx, BUF_HOST_CTL);
+	ack = (u32 *)cb->va + 2;
+	WRITE_ONCE(*ack, 0);
+	WRITE_ONCE(hc[HC_PERF_GROUP], group);
+	wmb(); /* the group and the cleared ack, before the command */
+	ret = sgxfive_command(sgx, SGX_CMD_SETHWPERFSTATUS, data, ARRAY_SIZE(data));
+	if (!ret)
+		ret = sgxfive_wait_mem(ack, ~0u, ~0u);
+	drm_info(sgx->dev, "sgxfive: hwperf group %u word 0x%08x: %d, control 0x%08x\n",
+		 group, word, ret, sgxfive_rd(sgx, sgxfive_hwperf_regs[0]));
+out:
+	mutex_unlock(&sgx->lock);
+	return ret;
+}
+
+/* Reading shows HostCtl's group and the HWPerf registers, "0xOFFS 0xVALUE" a line. */
+static int sgxfive_hwperf_show(struct seq_file *m, void *unused)
+{
+	struct sgxfive *sgx = m->private;
+	unsigned int i;
+	int ret = 0;
+
+	mutex_lock(&sgx->lock);
+	if (!sgx->live)
+		ret = -ENODEV;
+	if (!ret)
+		seq_printf(m, "group %u\n",
+			   READ_ONCE(sgxfive_words(sgx, BUF_HOST_CTL)[HC_PERF_GROUP]));
+	for (i = 0; !ret && i < SGXFIVE_HWPERF_NREGS; i++)
+		seq_printf(m, "0x%04x 0x%08x\n", sgxfive_hwperf_regs[i],
+			   sgxfive_rd(sgx, sgxfive_hwperf_regs[i]));
+	mutex_unlock(&sgx->lock);
+	return ret;
+}
+
+static int sgxfive_hwperf_open(struct inode *inode, struct file *f)
+{
+	return single_open(f, sgxfive_hwperf_show, inode->i_private);
+}
+
+/* One line: GROUP WORD. */
+static ssize_t sgxfive_hwperf_fwrite(struct file *f, const char __user *ubuf,
+				     size_t len, loff_t *ppos)
+{
+	struct sgxfive *sgx = file_inode(f)->i_private;
+	char buf[SGXFIVE_KPOKE_LINE];
+	u32 group, word;
+	int ret;
+
+	if (!len || len >= sizeof(buf))
+		return -EINVAL;
+	if (copy_from_user(buf, ubuf, len))
+		return -EFAULT;
+	buf[len] = '\0';
+	ret = sgxfive_hwperf_parse(strim(buf), &group, &word);
+	if (!ret)
+		ret = sgxfive_hwperf_set(sgx, group, word);
+	return ret ? ret : len;
+}
+
+static const struct file_operations sgxfive_hwperf_fops = {
+	.owner = THIS_MODULE, .open = sgxfive_hwperf_open, .read = seq_read,
+	.write = sgxfive_hwperf_fwrite, .llseek = seq_lseek, .release = single_release,
+};
+
 void sgxfive_debug_init(struct sgxfive *sgx, struct dentry *dir)
 {
 	debugfs_create_file("miscinfo", 0400, dir, sgx, &sgxfive_miscinfo_fops);
@@ -1150,4 +1258,5 @@ void sgxfive_debug_init(struct sgxfive *sgx, struct dentry *dir)
 	debugfs_create_file("render_param", 0400, dir, sgx, &sgxfive_render_param_fops);
 	debugfs_create_file("render_tadata", 0400, dir, sgx, &sgxfive_render_tadata_fops);
 	debugfs_create_bool("vm_low", 0600, dir, &sgx->vm_low);
+	debugfs_create_file("hwperf", 0600, dir, sgx, &sgxfive_hwperf_fops);
 }

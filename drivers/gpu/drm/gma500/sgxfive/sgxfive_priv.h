@@ -157,6 +157,7 @@ enum {
 	HC_INIT_STATUS = 0, HC_POWER_STATUS = 1, HC_CLEANUP_STATUS = 2,
 	HC_HWR_SAMPLE_RATE = 5,
 	HC_UKERNEL_TIMER_CLOCK = 6, HC_APM_SAMPLE_RATE = 7, HC_HOST_CLOCK = 13,
+	HC_PERF_GROUP = 15,
 	HC_DWORDS = 17,
 };
 
@@ -167,6 +168,7 @@ enum {
 #define SGX_CMD_CLEANUP		5
 #define SGX_CMD_GETMISCINFO	6
 #define SGX_CMD_PROCESS_QUEUES	7
+#define SGX_CMD_SETHWPERFSTATUS	9
 
 /* Cache control bits a command carries: SGXMKIF_CC_INVAL_*. */
 #define SGX_CC_INVAL_BIF	0x3		/* page tables and directory */

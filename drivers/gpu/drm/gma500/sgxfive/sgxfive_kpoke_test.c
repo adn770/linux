@@ -326,6 +326,58 @@ static void sgxfive_kpoke_test_kreg_needs_live(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, sgxfive_kreg_write(sgx, 0x0a78, true, 1), -ENODEV);
 }
 
+/* debugfs hwperf: the registers the firmware's HWPerf routine reads, and its control. */
+static void sgxfive_kpoke_test_hwperf_regs(struct kunit *test)
+{
+	unsigned int i;
+	u32 off;
+
+	KUNIT_EXPECT_EQ(test, sgxfive_hwperf_regs[0], 0x0040u);	/* the control register */
+	for (off = 0x0044; off <= 0x0064; off += 4)
+		KUNIT_EXPECT_EQ(test, sgxfive_hwperf_regs[1 + (off - 0x0044) / 4], off);
+	KUNIT_EXPECT_EQ(test, sgxfive_hwperf_regs[10], 0x0e84u);
+	KUNIT_EXPECT_EQ(test, sgxfive_hwperf_regs[13], 0x0e90u);
+	KUNIT_EXPECT_EQ(test, sgxfive_hwperf_regs[14], 0x0eb4u);
+	KUNIT_EXPECT_EQ(test, sgxfive_hwperf_regs[SGXFIVE_HWPERF_NREGS - 1], 0x0ec0u);
+	for (i = 1; i < SGXFIVE_HWPERF_NREGS; i++) {
+		KUNIT_EXPECT_LT(test, sgxfive_hwperf_regs[i - 1], sgxfive_hwperf_regs[i]);
+		/* Never the soft reset nor the pulse, whose write starts something. */
+		KUNIT_EXPECT_NE(test, sgxfive_hwperf_regs[i], 0x0080u);
+		KUNIT_EXPECT_NE(test, sgxfive_hwperf_regs[i], 0x0e80u);
+	}
+}
+
+static void sgxfive_kpoke_test_hwperf_parse(struct kunit *test)
+{
+	static const char *const bad[] = {
+		"", "5", "5 ", "x 0x10", "5 y", "5 0x10 1", "-1 0x10",
+	};
+	u32 group, word;
+	unsigned int i;
+
+	KUNIT_EXPECT_EQ(test, sgxfive_hwperf_parse("5 0x11", &group, &word), 0);
+	KUNIT_EXPECT_EQ(test, group, 5u);
+	KUNIT_EXPECT_EQ(test, word, 0x11u);
+	KUNIT_EXPECT_EQ(test, sgxfive_hwperf_parse("0  1", &group, &word), 0);
+	KUNIT_EXPECT_EQ(test, group, 0u);
+	KUNIT_EXPECT_EQ(test, word, 1u);
+	KUNIT_EXPECT_EQ(test, sgxfive_hwperf_parse("15 0xffffffff", &group, &word), 0);
+	/* The firmware keeps four bits of the group (control bits 12:9). */
+	KUNIT_EXPECT_EQ(test, sgxfive_hwperf_parse("16 0x11", &group, &word), -ERANGE);
+	for (i = 0; i < ARRAY_SIZE(bad); i++)
+		KUNIT_EXPECT_EQ_MSG(test, sgxfive_hwperf_parse(bad[i], &group, &word),
+				    -EINVAL, "\"%s\"", bad[i]);
+}
+
+/* No command before the firmware runs. */
+static void sgxfive_kpoke_test_hwperf_needs_live(struct kunit *test)
+{
+	struct sgxfive *sgx = kunit_kzalloc(test, sizeof(*sgx), GFP_KERNEL);
+
+	KUNIT_ASSERT_NOT_NULL(test, sgx);
+	KUNIT_EXPECT_EQ(test, sgxfive_hwperf_set(sgx, 5, 0x11), -ENODEV);
+}
+
 static struct kunit_case sgxfive_kpoke_test_cases[] = {
 	KUNIT_CASE(sgxfive_kpoke_test_words),
 	KUNIT_CASE(sgxfive_kpoke_test_parse),
@@ -338,6 +390,9 @@ static struct kunit_case sgxfive_kpoke_test_cases[] = {
 	KUNIT_CASE(sgxfive_kpoke_test_kreg_allowed),
 	KUNIT_CASE(sgxfive_kpoke_test_kreg_parse),
 	KUNIT_CASE(sgxfive_kpoke_test_kreg_needs_live),
+	KUNIT_CASE(sgxfive_kpoke_test_hwperf_regs),
+	KUNIT_CASE(sgxfive_kpoke_test_hwperf_parse),
+	KUNIT_CASE(sgxfive_kpoke_test_hwperf_needs_live),
 	{}
 };
 
