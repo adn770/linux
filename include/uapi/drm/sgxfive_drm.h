@@ -106,6 +106,8 @@ struct drm_sgxfive_obj_array {
 	SGXFIVE_IOCTL(CREATE_CONTEXT, DRM_IOWR, create_context)
 #define DRM_IOCTL_SGXFIVE_DESTROY_CONTEXT \
 	SGXFIVE_IOCTL(DESTROY_CONTEXT, DRM_IOW, destroy_context)
+#define DRM_IOCTL_SGXFIVE_SUBMIT_JOBS \
+	SGXFIVE_IOCTL(SUBMIT_JOBS, DRM_IOWR, submit_jobs)
 
 /**
  * DOC: sgxfive DEV_QUERY
@@ -495,6 +497,9 @@ struct drm_sgxfive_vm_unmap_args {
  * jobs in submission order; the firmware arbitrates between contexts. An
  * open file has at most %DRM_SGXFIVE_FILE_MAX_CONTEXTS contexts at a time;
  * CREATE_CONTEXT beyond that fails with -ENOSPC.
+ * DESTROY_CONTEXT waits for the context's queued jobs; a SUBMIT_JOBS call
+ * that reaches the context after it has been destroyed fails at that job
+ * with -EINVAL.
  * A context whose job hung is lost: its pending jobs complete with an error
  * and further submissions fail with -ECANCELED.
  */
@@ -562,6 +567,207 @@ struct drm_sgxfive_destroy_context_args {
 
 	/** @_padding_4: Reserved, zero. */
 	__u32 _padding_4;
+};
+
+/**
+ * DOC: sgxfive SUBMIT_JOBS
+ *
+ * An array of jobs, validated together before any of them is queued: the
+ * jobs, their commands, their contexts and every sync op. A signal syncobj
+ * must exist. A wait names a syncobj (a timeline point) that has a fence at
+ * the call, or one that an earlier job of the same call signals (a timeline
+ * at the same point or a later one); the job then waits for that earlier
+ * job. On a validation error no job of the call is queued and
+ * &drm_sgxfive_submit_jobs_args.jobs.count is set to the index of the
+ * failing job. Only an error while queuing (-ENOMEM, or a context destroyed
+ * by another thread meanwhile) leaves the jobs before that index queued.
+ * Dependencies are explicit (sync ops on DRM syncobjs); there is no BO list,
+ * since every mapped BO of the VM is resident.
+ *
+ * A job's out-fence signals once the firmware reports completion, after the
+ * job's memory writes are visible to write-combined CPU mappings.
+ *
+ * A job that has not completed within the 500 ms job timeout loses its
+ * context: its fence and those of the context's unfinished jobs signal
+ * -ETIMEDOUT.
+ */
+
+/* Sync op encoding, as in pvr_drm.h. */
+#define DRM_SGXFIVE_SYNC_OP_FLAG_HANDLE_TYPE_MASK		0xfU
+#define DRM_SGXFIVE_SYNC_OP_FLAG_HANDLE_TYPE_SYNCOBJ		0x0U
+#define DRM_SGXFIVE_SYNC_OP_FLAG_HANDLE_TYPE_TIMELINE_SYNCOBJ	0x1U
+#define DRM_SGXFIVE_SYNC_OP_FLAG_SIGNAL				(1U << 31)
+#define DRM_SGXFIVE_SYNC_OP_FLAG_WAIT				0x0U
+#define DRM_SGXFIVE_SYNC_OP_FLAGS_MASK \
+	(DRM_SGXFIVE_SYNC_OP_FLAG_HANDLE_TYPE_MASK | DRM_SGXFIVE_SYNC_OP_FLAG_SIGNAL)
+
+/**
+ * struct drm_sgxfive_sync_op - One wait or signal operation.
+ */
+struct drm_sgxfive_sync_op {
+	/** @handle: DRM syncobj handle. */
+	__u32 handle;
+
+	/** @flags: ``DRM_SGXFIVE_SYNC_OP_FLAG_*``; handle types above 1 are -EINVAL. */
+	__u32 flags;
+
+	/** @value: Timeline point; zero for a binary syncobj. */
+	__u64 value;
+};
+
+/**
+ * struct drm_sgxfive_mem_update - Reserved: one firmware memory update.
+ *
+ * The extension point for the firmware's per-command update list: a 32-bit
+ * value the firmware writes to a GPU address of the job's VM before the job
+ * starts. No kernel accepts updates yet
+ * (&drm_sgxfive_dev_query_job_info.max_updates is 0); the struct is defined
+ * so that the layout of &drm_sgxfive_job does not change when one does. A
+ * future kernel will require each target to lie in a writable mapping of the
+ * job's VM.
+ */
+struct drm_sgxfive_mem_update {
+	/** @device_addr: GPU address, 4-byte aligned. */
+	__u64 device_addr;
+
+	/** @value: Value to write. */
+	__u32 value;
+
+	/** @_padding_c: Reserved, zero. */
+	__u32 _padding_c;
+};
+
+/**
+ * enum drm_sgxfive_job_type - Values for &drm_sgxfive_job.type.
+ */
+enum drm_sgxfive_job_type {
+	/** @DRM_SGXFIVE_JOB_TYPE_TRANSFER: A transfer; @cmd_stream is a transfer cmd. */
+	DRM_SGXFIVE_JOB_TYPE_TRANSFER = 0,
+	/* DRM_SGXFIVE_JOB_TYPE_RENDER (TA + 3D) later. */
+};
+
+/*
+ * DRM_SGXFIVE_SUBMIT_JOB_TRANSFER_DUMMY: the firmware queues and completes the
+ * job without rendering; signal-only. cmd_stream and cmd_stream_len must be 0.
+ */
+#define DRM_SGXFIVE_SUBMIT_JOB_TRANSFER_DUMMY		(1U << 0)
+#define DRM_SGXFIVE_SUBMIT_JOB_TRANSFER_FLAGS_MASK	DRM_SGXFIVE_SUBMIT_JOB_TRANSFER_DUMMY
+
+/* Which optional register groups of the transfer command the firmware loads. */
+#define DRM_SGXFIVE_TRANSFER_LOAD_YUV			(1U << 0)
+#define DRM_SGXFIVE_TRANSFER_LOAD_LUMAKEY		(1U << 1)
+#define DRM_SGXFIVE_TRANSFER_LOAD_FIR			(1U << 2)
+#define DRM_SGXFIVE_TRANSFER_LOAD_FLAGS_MASK \
+	(DRM_SGXFIVE_TRANSFER_LOAD_YUV | DRM_SGXFIVE_TRANSFER_LOAD_LUMAKEY | \
+	 DRM_SGXFIVE_TRANSFER_LOAD_FIR)
+
+/**
+ * struct drm_sgxfive_transfer_cmd - The register words of one transfer.
+ *
+ * Each field is the value of one SGX register, with GPU addresses of the
+ * job's VM encoded as that register wants them. The kernel builds the
+ * firmware command from it and fills in what it owns (size, flags, fence
+ * status, pixel partitions, fence id, updates). It checks that the addresses
+ * that make the pixel pipe fetch or execute (@event_pixel_pds_exec,
+ * @bif_3d_req_base, a non-zero @isp_rgn_base) lie in a user heap, that
+ * @pds_exec_base is the PDS_PIXEL heap base, and masks the fields with global
+ * side effects.
+ *
+ * Version 1 is 0xa8 bytes; a later, longer version keeps this prefix, and a
+ * kernel accepts a longer struct than it knows only if the tail is zero.
+ */
+struct drm_sgxfive_transfer_cmd {
+	/** @isp_bgobjtag: ISP_BGOBJTAG: VERTEXPTR (16-byte units from req base), TSPDATASIZE. */
+	__u32 isp_bgobjtag;
+	/** @isp_bgobj: ISP_BGOBJ. */
+	__u32 isp_bgobj;
+	/** @isp_bgobjdepth: ISP_BGOBJDEPTH (IEEE single). */
+	__u32 isp_bgobjdepth;
+	/** @isp_render: ISP_RENDER: render type and scan direction. */
+	__u32 isp_render;
+	/** @isp_rgn_base: ISP_RGN_BASE; 0 for FASTSCALE renders. */
+	__u32 isp_rgn_base;
+	/** @isp_ipfmisc: ISP_IPFMISC. */
+	__u32 isp_ipfmisc;
+	/** @bif_3d_req_base: BIF_3D_REQ_BASE, 1 MiB aligned. */
+	__u32 bif_3d_req_base;
+	/** @aa_mode_3d: 3D_AA_MODE. */
+	__u32 aa_mode_3d;
+	/** @isp_multisamplectl: ISP_MULTISAMPLECTL. */
+	__u32 isp_multisamplectl;
+	/** @event_pixel_pds_exec: EVENT_PIXEL_PDS_EXEC, 16-byte aligned address. */
+	__u32 event_pixel_pds_exec;
+	/** @event_pixel_pds_data: EVENT_PIXEL_PDS_DATA, data size in 16-byte rows. */
+	__u32 event_pixel_pds_data;
+	/** @event_pixel_pds_info: EVENT_PIXEL_PDS_INFO. */
+	__u32 event_pixel_pds_info;
+	/** @isp_render_box1: ISP_RENDBOX1, first tile. */
+	__u32 isp_render_box1;
+	/** @isp_render_box2: ISP_RENDBOX2, last tile. */
+	__u32 isp_render_box2;
+	/** @pixelbe: PIXELBE. */
+	__u32 pixelbe;
+	/**
+	 * @pds_exec_base: PDS_EXEC_BASE: must be the base of the PDS_PIXEL
+	 * heap, the value render jobs rely on (the 3D pipe never sets it).
+	 */
+	__u32 pds_exec_base;
+	/** @double_pixel_partitions: DOUBLE_PIXEL_PARTITIONS; must be 0 for now. */
+	__u32 double_pixel_partitions;
+	/** @load_flags: ``DRM_SGXFIVE_TRANSFER_LOAD_*`` bits. */
+	__u32 load_flags;
+	/** @csc0_coeff: TPU_YUV00..04, with %DRM_SGXFIVE_TRANSFER_LOAD_YUV. */
+	__u32 csc0_coeff[5];
+	/** @csc1_coeff: TPU_YUV10..14, with %DRM_SGXFIVE_TRANSFER_LOAD_YUV. */
+	__u32 csc1_coeff[5];
+	/** @csc_scale: TPU_YUVSCALE, with %DRM_SGXFIVE_TRANSFER_LOAD_YUV. */
+	__u32 csc_scale;
+	/** @lumakey_coeff: TPU_LUMA0..2, with %DRM_SGXFIVE_TRANSFER_LOAD_LUMAKEY. */
+	__u32 lumakey_coeff[3];
+	/** @fir_htable: USE_FILTER_TABLE, with %DRM_SGXFIVE_TRANSFER_LOAD_FIR. */
+	__u32 fir_htable;
+	/** @fir_hfilter: USE_FILTER0/1/2 left/right/extra, with LOAD_FIR. */
+	__u32 fir_hfilter[9];
+};
+
+#define DRM_SGXFIVE_TRANSFER_CMD_SIZE_V1	0xa8
+
+/**
+ * struct drm_sgxfive_job - One job of %DRM_IOCTL_SGXFIVE_SUBMIT_JOBS.
+ */
+struct drm_sgxfive_job {
+	/** @type: [IN] &enum drm_sgxfive_job_type. */
+	__u32 type;
+
+	/** @context_handle: [IN] A context of the matching type. */
+	__u32 context_handle;
+
+	/** @flags: [IN] Job-type specific, e.g. ``DRM_SGXFIVE_SUBMIT_JOB_TRANSFER_*``. */
+	__u32 flags;
+
+	/** @cmd_stream_len: [IN] Bytes at @cmd_stream, at most one page. */
+	__u32 cmd_stream_len;
+
+	/** @cmd_stream: [IN] User pointer, 8-byte aligned, to the job-type command. */
+	__u64 cmd_stream;
+
+	/** @sync_ops: [IN] Array of &struct drm_sgxfive_sync_op. */
+	struct drm_sgxfive_obj_array sync_ops;
+
+	/**
+	 * @updates: [IN] Reserved: array of &struct drm_sgxfive_mem_update.
+	 * Must be all zero while &drm_sgxfive_dev_query_job_info.max_updates
+	 * is 0; a non-zero count, stride or pointer is -EINVAL.
+	 */
+	struct drm_sgxfive_obj_array updates;
+};
+
+/**
+ * struct drm_sgxfive_submit_jobs_args - Arguments for %DRM_IOCTL_SGXFIVE_SUBMIT_JOBS.
+ */
+struct drm_sgxfive_submit_jobs_args {
+	/** @jobs: [IN] Array of &struct drm_sgxfive_job. [OUT] On error, count = failing index. */
+	struct drm_sgxfive_obj_array jobs;
 };
 
 #if defined(__cplusplus)

@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-only OR MIT
 /*
  * The sgxfive render-node interface (include/uapi/drm/sgxfive_drm.h): device
- * queries and buffer objects.
+ * queries and buffer objects here, and the routing of the address-space,
+ * context and job ioctls to the files that implement them.
  */
 #include <linux/minmax.h>
 #include <linux/pagemap.h>
@@ -129,8 +130,13 @@ static int sgxfive_ioctl_dev_query(struct sgxfive *sgx, void *data)
 	case DRM_SGXFIVE_DEV_QUERY_HEAP_INFO:
 		return sgxfive_query_heaps(a);
 	case DRM_SGXFIVE_DEV_QUERY_JOB_INFO: {
-		/* No job types yet. */
-		struct drm_sgxfive_dev_query_job_info j = { 0 };
+		struct drm_sgxfive_dev_query_job_info j = {
+			.job_types = DRM_SGXFIVE_JOB_TYPE_TRANSFER_BIT,
+			.max_jobs = SGXFIVE_MAX_JOBS,
+			.max_sync_ops = SGXFIVE_MAX_SYNC_OPS,
+			.transfer_cmd_size = DRM_SGXFIVE_TRANSFER_CMD_SIZE_V1,
+			.max_updates = 0,
+		};
 
 		return sgxfive_query_out(a, &j, sizeof(j));
 	}
@@ -287,6 +293,8 @@ int sgxfive_ioctl(struct sgxfive *sgx, unsigned int nr, void *data,
 		return sgxfive_ioctl_create_ctx(sgx, data, file);
 	case DRM_SGXFIVE_DESTROY_CONTEXT:
 		return sgxfive_ioctl_destroy_ctx(sgx, data, file);
+	case DRM_SGXFIVE_SUBMIT_JOBS:
+		return sgxfive_ioctl_submit(sgx, data, file);
 	default:
 		return -EINVAL;
 	}

@@ -18,6 +18,7 @@
 #include <linux/xarray.h>
 
 #include <drm/drm_mm.h>
+#include <drm/gpu_scheduler.h>
 #include <drm/sgxfive_drm.h>
 
 #include "sgx_fw.h"
@@ -90,6 +91,12 @@ struct sgxfive {
 	/* Kernel memory for render-node contexts (sgxfive_kmem_alloc). */
 	struct drm_mm kmem;		/* offsets in the kernel data heap */
 	unsigned int kmem_users;	/* live allocations: no reload */
+
+	/* Render-node contexts, walked by the SW_EVENT interrupt. */
+	spinlock_t ctx_lock;
+	struct list_head ctx_list;
+	struct drm_gpu_scheduler sched;	/* render-node jobs */
+	u64 kicks;			/* jobs given to the firmware, under lock */
 #if IS_ENABLED(CONFIG_DRM_GMA500_SGXFIVE_DEBUG)
 	struct sgxfive_xtest xt;
 #endif
@@ -213,6 +220,14 @@ int sgxfive_kmem_alloc(struct sgxfive *sgx, struct drm_mm_node *node,
 void sgxfive_kmem_free(struct sgxfive *sgx, struct drm_mm_node *node,
 		       struct sgxfive_buf *b);
 int sgxfive_ensure_live(struct sgxfive *sgx);
+void sgxfive_fences_irq(struct sgxfive *sgx);
+int sgxfive_kick_transfer(struct sgxfive *sgx, u32 hw_ctx_addr);
+int sgxfive_sched_init(struct sgxfive *sgx);
+void sgxfive_sched_fini(struct sgxfive *sgx);
+
+u32 sgxfive_job_build(u8 *cmd, const struct drm_sgxfive_transfer_cmd *regs,
+		      bool dummy, u32 status_addr, u32 value);
+int sgxfive_job_check(const struct drm_sgxfive_transfer_cmd *regs);
 int sgxfive_ctx_check_args(const struct drm_sgxfive_create_context_args *a);
 
 int sgxfive_vm_check_range(const struct drm_sgxfive_heap *heaps, unsigned int n,

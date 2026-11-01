@@ -503,7 +503,8 @@ static const struct file_operations psb_gem_fops = {
 
 /* Not const: psb_init() drops DRIVER_RENDER unless sgx_render is set. */
 static struct drm_driver driver = {
-	.driver_features = DRIVER_MODESET | DRIVER_GEM | DRIVER_RENDER,
+	.driver_features = DRIVER_MODESET | DRIVER_GEM | DRIVER_RENDER |
+			   DRIVER_SYNCOBJ | DRIVER_SYNCOBJ_TIMELINE,
 
 	.num_ioctls = GMA_SGX_NUM_IOCTLS,
 	.gem_create_object = gma_sgx_gem_create_object,

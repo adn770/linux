@@ -34,11 +34,13 @@
 #include <drm/drm_print.h>
 
 #include "sgxfive.h"
+#include "sgxfive_ctx.h"
 #include "sgxfive_priv.h"
 #include "sgxfive_regdump.h"
 #include "sgx_fw.h"
 #include "sgx_mmu.h"
 #include "sgx_seq.h"
+#include "sgx_xfer.h"
 
 #define SGX_FW_NAME	"sgx545_ukernel.fw"
 
@@ -548,6 +550,16 @@ void sgxfive_kmem_free(struct sgxfive *sgx, struct drm_mm_node *node,
 	mutex_unlock(&sgx->lock);
 }
 
+/* Queue the firmware's transfer work for one render-node context. */
+int sgxfive_kick_transfer(struct sgxfive *sgx, u32 hw_ctx_addr)
+{
+	const u32 data[] = { 0, hw_ctx_addr };
+
+	lockdep_assert_held(&sgx->lock);
+	sgx->cache_control |= SGX_CC_INVAL_DATA;
+	return sgxfive_command(sgx, SGX_CMD_TRANSFER, data, ARRAY_SIZE(data));
+}
+
 #define SGXFIVE_REAP_MS	10
 
 /*
@@ -724,6 +736,7 @@ bool sgxfive_irq(struct sgxfive *sgx, u32 stat_1, u32 stat_2)
 		sgx_wr(sgx, SGX_EVENT_HOST_CLEAR, SGX_EVENT_SW | SGX_EVENT_MASTER);
 		sgx_wr(sgx, SGX_EVENT_HOST_CLEAR2, 0);
 		(void)sgx_rd(sgx, SGX_EVENT_HOST_CLEAR2);
+		sgxfive_fences_irq(sgx);	/* render-node jobs completed */
 	}
 	return true;
 }
@@ -839,6 +852,14 @@ struct sgxfive *sgxfive_create(const struct sgxfive_host *host)
 	INIT_LIST_HEAD(&sgx->deferred);
 	INIT_DELAYED_WORK(&sgx->reaper, sgxfive_reaper);
 	drm_mm_init(&sgx->kmem, KMEM_START, KMEM_END - KMEM_START);
+	spin_lock_init(&sgx->ctx_lock);
+	INIT_LIST_HEAD(&sgx->ctx_list);
+	if (sgxfive_sched_init(sgx)) {
+		drm_mm_takedown(&sgx->kmem);
+		mutex_destroy(&sgx->lock);
+		kfree(sgx);
+		return NULL;
+	}
 	return sgx;
 }
 
@@ -872,6 +893,7 @@ void sgxfive_destroy(struct sgxfive *sgx)
 	/* Halted now: whatever is still deferred goes. */
 	cancel_delayed_work_sync(&sgx->reaper);
 	sgxfive_reaper(&sgx->reaper.work);
+	sgxfive_sched_fini(sgx);
 	mutex_destroy(&sgx->lock);
 	drm_mm_takedown(&sgx->kmem);
 	kfree(sgx);

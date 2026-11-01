@@ -118,6 +118,7 @@ GMA_SGX_IOCTL(VM_MAP)
 GMA_SGX_IOCTL(VM_UNMAP)
 GMA_SGX_IOCTL(CREATE_CONTEXT)
 GMA_SGX_IOCTL(DESTROY_CONTEXT)
+GMA_SGX_IOCTL(SUBMIT_JOBS)
 
 #define GMA_SGX_IOCTL_DEF(name)						\
 	DRM_IOCTL_DEF_DRV(SGXFIVE_##name, gma_sgx_ioctl_##name,		\
@@ -134,9 +135,10 @@ const struct drm_ioctl_desc gma_sgx_ioctls[GMA_SGX_NUM_IOCTLS] = {
 	GMA_SGX_IOCTL_DEF(VM_UNMAP),
 	GMA_SGX_IOCTL_DEF(CREATE_CONTEXT),
 	GMA_SGX_IOCTL_DEF(DESTROY_CONTEXT),
+	GMA_SGX_IOCTL_DEF(SUBMIT_JOBS),
 };
 
-static_assert(DRM_SGXFIVE_DESTROY_CONTEXT + 1 == GMA_SGX_NUM_IOCTLS);
+static_assert(DRM_SGXFIVE_SUBMIT_JOBS + 1 == GMA_SGX_NUM_IOCTLS);
 
 /* gma500's own GEM objects do not use this hook; sgxfive's shmem BOs do. */
 struct drm_gem_object *gma_sgx_gem_create_object(struct drm_device *dev,

@@ -5,6 +5,7 @@
  * directory, bound for its lifetime to one client VM whose directory the
  * firmware gives the context's 3D work.
  */
+#include <linux/dma-fence.h>
 #include <linux/slab.h>
 #include <linux/xarray.h>
 
@@ -33,8 +34,15 @@ static void sgxfive_ctx_release(struct kref *ref)
 {
 	struct sgxfive_ctx *ctx = container_of(ref, struct sgxfive_ctx, ref);
 	struct sgxfive *sgx = ctx->sgx;
+	unsigned long flags;
+
+	spin_lock_irqsave(&sgx->ctx_lock, flags);
+	list_del(&ctx->link);
+	spin_unlock_irqrestore(&sgx->ctx_lock, flags);
+	sgxfive_fence_fail_all(ctx, -ECANCELED);	/* none should be left */
 	sgxfive_kmem_free(sgx, &ctx->node, &ctx->mem);
 	sgxfive_vm_put(ctx->vm);
+	mutex_destroy(&ctx->submit_lock);
 	kfree(ctx);
 }
 
@@ -86,15 +94,42 @@ int sgxfive_ioctl_create_ctx(struct sgxfive *sgx, void *data,
 	ctx->type = a->type;
 	ctx->pd_phys = sgxfive_vm_pd_phys(ctx->vm);
 	kref_init(&ctx->ref);
+	mutex_init(&ctx->submit_lock);
+	ctx->fence_context = dma_fence_context_alloc(1);
+	spin_lock_init(&ctx->fence_lock);
+	INIT_LIST_HEAD(&ctx->pending);
 	/* Priority 0, the client CCB and its control block, the client PD. */
 	sgx_xfer_ctx_init(sgxfive_ctx_cpu(ctx, SGXFIVE_CTX_HW_OFF), ctx->pd_phys,
 			  ctx->mem.addr + SGXFIVE_CTX_CCB_OFF,
 			  ctx->mem.addr + SGXFIVE_CTX_CTL_OFF);
+	spin_lock_irq(&sgx->ctx_lock);
+	list_add_tail(&ctx->link, &sgx->ctx_list);
+	spin_unlock_irq(&sgx->ctx_lock);
+	ret = sgxfive_ctx_entity_init(ctx);
+	if (ret) {
+		sgxfive_ctx_put(ctx);
+		return ret;
+	}
 	ret = xa_alloc(&f->ctxs, &a->handle, ctx,
 		       XA_LIMIT(1, DRM_SGXFIVE_FILE_MAX_CONTEXTS), GFP_KERNEL);
-	if (ret)
+	if (ret) {
+		drm_sched_entity_destroy(&ctx->entity);
 		sgxfive_ctx_put(ctx);
+	}
 	return ret == -EBUSY ? -ENOSPC : ret;
+}
+
+/*
+ * No more jobs: a SUBMIT_JOBS call that already holds the context finds it
+ * closed under the submit lock, and every job queued before waits in the
+ * entity, which this flushes.
+ */
+static void sgxfive_ctx_close(struct sgxfive_ctx *ctx)
+{
+	mutex_lock(&ctx->submit_lock);
+	ctx->closed = true;
+	mutex_unlock(&ctx->submit_lock);
+	drm_sched_entity_destroy(&ctx->entity);	/* waits for its jobs */
 }
 
 int sgxfive_ioctl_destroy_ctx(struct sgxfive *sgx, void *data,
@@ -109,6 +144,7 @@ int sgxfive_ioctl_destroy_ctx(struct sgxfive *sgx, void *data,
 	ctx = xa_erase(&f->ctxs, a->handle);
 	if (!ctx)
 		return -EINVAL;
+	sgxfive_ctx_close(ctx);
 	sgxfive_ctx_put(ctx);
 	return 0;
 }
@@ -119,7 +155,9 @@ void sgxfive_ctx_close_all(struct sgxfive_file *f)
 	struct sgxfive_ctx *ctx;
 	unsigned long i;
 
-	xa_for_each(&f->ctxs, i, ctx)
+	xa_for_each(&f->ctxs, i, ctx) {
+		sgxfive_ctx_close(ctx);
 		sgxfive_ctx_put(ctx);
+	}
 	xa_destroy(&f->ctxs);
 }
