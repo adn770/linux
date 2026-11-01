@@ -1,6 +1,8 @@
 /* SPDX-License-Identifier: GPL-2.0-only OR MIT */
 /*
- * sgxfive internals: the device state the driver's files share.
+ * sgxfive internals: the device state the driver's files share, the device
+ * code (sgxfive.c) and the render-node interface (sgxfive_drv.c and the
+ * files it uses).
  */
 #ifndef _SGXFIVE_PRIV_H_
 #define _SGXFIVE_PRIV_H_
@@ -11,9 +13,13 @@
 #include <linux/mutex.h>
 #include <linux/wait.h>
 
+#include <drm/sgxfive_drm.h>
+
 #include "sgx_fw.h"
 
 struct drm_device;
+struct drm_file;
+struct drm_gem_object;
 struct drm_printer;
 struct firmware;
 struct sgx_mmu_pd;
@@ -63,6 +69,12 @@ struct sgxfive {
 	atomic_t sw_events;		/* EVENT_STATUS.SW_EVENT interrupts */
 	wait_queue_head_t event_wq;	/* woken on each SW_EVENT */
 	atomic_t bif_faults;
+
+	/* What DEV_QUERY reports. */
+	u32 core_id, core_revision;	/* read at probe */
+	u32 host_bridge_rev;
+	bool sw_valid;			/* the firmware's own values, below */
+	u32 core_id_sw, core_revision_sw, ddk_version;
 #if IS_ENABLED(CONFIG_DRM_GMA500_SGXFIVE_DEBUG)
 	struct sgxfive_xtest xt;
 #endif
@@ -144,6 +156,10 @@ int sgxfive_command(struct sgxfive *sgx, unsigned int cmd, const u32 *data,
 int sgxfive_wait_mem(const u32 *w, u32 mask, u32 want);
 void sgxfive_dump(struct sgxfive *sgx, struct drm_printer *p);
 int sgxfive_power(struct sgxfive *sgx, u32 powercmd, u32 done);
+
+/* The client heap layout and its query (sgxfive_drv.c). */
+extern const struct drm_sgxfive_heap sgxfive_rev1_heaps[DRM_SGXFIVE_HEAP_COUNT];
+int sgxfive_query_heaps(struct drm_sgxfive_dev_query_args *a);
 
 /* The debug group's files beyond regs, and its test area (sgxfive_debug.c). */
 #if IS_ENABLED(CONFIG_DRM_GMA500_SGXFIVE_DEBUG)

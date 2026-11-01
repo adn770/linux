@@ -7,12 +7,23 @@
 
 #include <linux/types.h>
 
+#include <drm/drm_ioctl.h>
+
 struct drm_device;
+struct drm_file;
+struct drm_gem_object;
 struct drm_minor;
 
+bool gma_sgx_render_enabled(void);
 void gma_sgx_init(struct drm_device *dev);
 void gma_sgx_fini(struct drm_device *dev);
 void gma_sgx_debugfs_init(struct drm_minor *minor);
 bool gma_sgx_irq(struct drm_device *dev, u32 stat_1, u32 stat_2);
+
+#define GMA_SGX_NUM_IOCTLS	3	/* DRM_SGXFIVE_DEV_QUERY..GET_BO_MMAP_OFFSET */
+extern const struct drm_ioctl_desc gma_sgx_ioctls[GMA_SGX_NUM_IOCTLS];
+
+struct drm_gem_object *gma_sgx_gem_create_object(struct drm_device *dev,
+						 size_t size);
 
 #endif

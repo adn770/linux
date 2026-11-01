@@ -38,7 +38,7 @@
 #include "psb_irq.h"
 #include "psb_reg.h"
 
-static const struct drm_driver driver;
+static struct drm_driver driver;
 static int psb_pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent);
 
 /*
@@ -88,12 +88,6 @@ static const struct pci_device_id pciidlist[] = {
 	{ }
 };
 MODULE_DEVICE_TABLE(pci, pciidlist);
-
-/*
- * Standard IOCTLs.
- */
-static const struct drm_ioctl_desc psb_ioctls[] = {
-};
 
 /**
  *	psb_spank		-	reset the 2D engine
@@ -507,14 +501,16 @@ static const struct file_operations psb_gem_fops = {
 	.fop_flags = FOP_UNSIGNED_OFFSET,
 };
 
-static const struct drm_driver driver = {
-	.driver_features = DRIVER_MODESET | DRIVER_GEM,
+/* Not const: psb_init() drops DRIVER_RENDER unless sgx_render is set. */
+static struct drm_driver driver = {
+	.driver_features = DRIVER_MODESET | DRIVER_GEM | DRIVER_RENDER,
 
-	.num_ioctls = ARRAY_SIZE(psb_ioctls),
+	.num_ioctls = GMA_SGX_NUM_IOCTLS,
+	.gem_create_object = gma_sgx_gem_create_object,
 
 	.dumb_create = psb_gem_dumb_create,
 	PSB_FBDEV_DRIVER_OPS,
-	.ioctls = psb_ioctls,
+	.ioctls = gma_sgx_ioctls,
 	.fops = &psb_gem_fops,
 #if defined(CONFIG_DEBUG_FS)
 	.debugfs_init = gma_sgx_debugfs_init,
@@ -538,6 +534,13 @@ static int __init psb_init(void)
 {
 	if (drm_firmware_drivers_only())
 		return -ENODEV;
+
+	/*
+	 * The render node is opt-in: drm_dev_init() allocates its minor from the
+	 * driver's features, so it must be dropped here, before any device.
+	 */
+	if (!gma_sgx_render_enabled())
+		driver.driver_features &= ~DRIVER_RENDER;
 
 	return pci_register_driver(&psb_pci_driver);
 }

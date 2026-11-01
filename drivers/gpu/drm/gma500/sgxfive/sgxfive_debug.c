@@ -173,6 +173,11 @@ static int sgxfive_miscinfo(struct sgxfive *sgx, struct drm_printer *p)
 			      sgx->fw.meta[SGX_FW_META_STRUCT_SIZES + i], &bad);
 	}
 	drm_printf(p, "%s\n", bad ? "MISMATCHES" : "all values match");
+	/* What DEV_QUERY reports as the firmware's own identity. */
+	sgx->core_id_sw = mi[5];
+	sgx->core_revision_sw = mi[6];
+	sgx->ddk_version = mi[3];
+	sgx->sw_valid = true;
 	return bad ? -EIO : 0;
 }
 

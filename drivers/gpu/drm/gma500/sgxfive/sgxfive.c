@@ -688,6 +688,10 @@ struct sgxfive *sgxfive_create(const struct sgxfive_host *host)
 	sgx->dev = host->drm;
 	sgx->regs = host->regs;
 	sgx->reset_pd = host->reset_pd;
+	sgx->host_bridge_rev = host->host_bridge_rev;
+	/* gma500 powers the SGX island at probe, so the identity reads. */
+	sgx->core_id = sgx_rd(sgx, SGX_CORE_ID);
+	sgx->core_revision = sgx_rd(sgx, SGX_CORE_REVISION);
 	mutex_init(&sgx->lock);
 	init_waitqueue_head(&sgx->event_wq);
 	return sgx;
