@@ -315,6 +315,8 @@ static void sgxfive_render_drop(struct sgxfive_render *r)
  */
 static void sgxfive_render_park(struct sgxfive_ctx *ctx, struct sgxfive_render *r)
 {
+	r->kept.td = r->td;
+	r->kept.td_pages = r->td_pages;
 	sgxfive_keep_park(&ctx->sgx->kept, &r->kept);
 	drm_info(ctx->sgx->dev,
 		 "sgxfive: render context %#x closed and kept: slot %u, TA data %#x\n",

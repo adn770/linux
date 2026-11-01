@@ -7,6 +7,7 @@
  * the register allow-list.
  */
 #include <kunit/test.h>
+#include <linux/mm.h>
 #include <linux/module.h>
 #include <linux/sizes.h>
 #include <linux/slab.h>
@@ -1016,6 +1017,65 @@ static void sgxfive_kpoke_test_keep(struct kunit *test)
 	KUNIT_EXPECT_PTR_EQ(test, s.node[3], &node[1]);
 }
 
+static void keep_test_free_page(void *page)
+{
+	__free_page(page);
+}
+
+/* A page the test frees at its end, whether it passes or an assertion stops it; NULL on failure. */
+static struct page *keep_test_page(struct kunit *test)
+{
+	struct page *page = alloc_page(GFP_KERNEL);
+
+	if (page && kunit_add_action_or_reset(test, keep_test_free_page, page))
+		return NULL;
+	return page;
+}
+
+/* debugfs render_kept: the newest kept context's TA data, across its pages, nothing past them. */
+static void sgxfive_kpoke_test_keep_read(struct kunit *test)
+{
+	struct sgxfive_keep *k = kunit_kzalloc(test, sizeof(*k), GFP_KERNEL);
+	struct sgxfive_kept old = { }, new = { };
+	struct page *op[2], *np[3];
+	u8 *buf = kunit_kzalloc(test, 32, GFP_KERNEL);
+	unsigned int i;
+
+	KUNIT_ASSERT_NOT_NULL(test, k);
+	KUNIT_ASSERT_NOT_NULL(test, buf);
+	sgxfive_keep_init(k);
+	KUNIT_EXPECT_EQ(test, sgxfive_keep_read(k, buf, 16, 0), 0u);
+	for (i = 0; i < ARRAY_SIZE(op); i++) {
+		op[i] = keep_test_page(test);
+		KUNIT_ASSERT_NOT_NULL(test, op[i]);
+		memset(page_address(op[i]), 0x11, PAGE_SIZE);
+	}
+	for (i = 0; i < ARRAY_SIZE(np); i++) {
+		np[i] = keep_test_page(test);
+		KUNIT_ASSERT_NOT_NULL(test, np[i]);
+		memset(page_address(np[i]), 0x22 + 0x11 * i, PAGE_SIZE);
+	}
+	old.td = op;
+	old.td_pages = ARRAY_SIZE(op);
+	new.td = np;
+	new.td_pages = ARRAY_SIZE(np);
+	sgxfive_keep_park(k, &old);
+	KUNIT_EXPECT_EQ(test, sgxfive_keep_read(k, buf, 4, 0), 4u);
+	KUNIT_EXPECT_EQ(test, buf[0], 0x11);
+	sgxfive_keep_park(k, &new);
+	/* The newest, across a page boundary. */
+	KUNIT_EXPECT_EQ(test, sgxfive_keep_read(k, buf, 16, PAGE_SIZE - 8), 16u);
+	KUNIT_EXPECT_EQ(test, buf[7], 0x22);
+	KUNIT_EXPECT_EQ(test, buf[8], 0x33);
+	/* Short at the end of its pages, none past them. */
+	KUNIT_EXPECT_EQ(test, sgxfive_keep_read(k, buf, 16, 3 * PAGE_SIZE - 4), 4u);
+	KUNIT_EXPECT_EQ(test, buf[3], 0x44);
+	KUNIT_EXPECT_EQ(test, sgxfive_keep_read(k, buf, 16, 3 * PAGE_SIZE), 0u);
+	/* Drained, nothing is left to read. */
+	sgxfive_keep_drain(k, keep_seen_fn, &(struct keep_seen){ .k = k });
+	KUNIT_EXPECT_EQ(test, sgxfive_keep_read(k, buf, 16, 0), 0u);
+}
+
 /* The switch is taken once, by the first render context closed, and reset drops it. */
 static void sgxfive_kpoke_test_keep_switch(struct kunit *test)
 {
@@ -1090,6 +1150,7 @@ static struct kunit_case sgxfive_kpoke_test_cases[] = {
 	KUNIT_CASE(sgxfive_kpoke_test_oneshot),
 	KUNIT_CASE(sgxfive_kpoke_test_keep),
 	KUNIT_CASE(sgxfive_kpoke_test_keep_switch),
+	KUNIT_CASE(sgxfive_kpoke_test_keep_read),
 	KUNIT_CASE(sgxfive_kpoke_test_tdfill),
 	KUNIT_CASE(sgxfive_kpoke_test_tdfill_take),
 	KUNIT_CASE(sgxfive_kpoke_test_tdfill_place),

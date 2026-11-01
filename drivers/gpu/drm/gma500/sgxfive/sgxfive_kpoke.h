@@ -226,6 +226,8 @@ bool sgxfive_tdfill_place(const struct sgxfive_tdfill *f, u8 *td, unsigned int t
  */
 struct sgxfive_kept {
 	struct list_head link;
+	struct page **td;		/* its TA data pages, for debugfs render_kept */
+	unsigned int td_pages;
 };
 
 struct sgxfive_keep {
@@ -242,6 +244,12 @@ void sgxfive_keep_park(struct sgxfive_keep *k, struct sgxfive_kept *kept);
  */
 unsigned int sgxfive_keep_drain(struct sgxfive_keep *k,
 				void (*fn)(struct sgxfive_kept *kept, void *arg), void *arg);
+/*
+ * Copy len bytes from off in the TA data of the context parked last (the newest
+ * kept) to dst (debugfs render_kept, which a closed context's pages are read
+ * through); returns how many, none past its end or with nothing parked.
+ */
+size_t sgxfive_keep_read(struct sgxfive_keep *k, void *dst, size_t len, loff_t off);
 
 /*
  * Switches a tester arms from debugfs for the next thing that reads them

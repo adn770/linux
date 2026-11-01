@@ -1359,6 +1359,34 @@ static ssize_t sgxfive_render_tadata_read(struct file *f, char __user *ubuf, siz
 	return sgxfive_render_dump_read(f, ubuf, len, ppos, true);
 }
 
+/* debugfs render_kept: the TA data of the newest kept render context (render_keep). */
+static ssize_t sgxfive_render_kept_read(struct file *f, char __user *ubuf, size_t len,
+					loff_t *ppos)
+{
+	struct sgxfive *sgx = file_inode(f)->i_private;
+	ssize_t ret;
+	size_t n;
+	void *buf;
+
+	len = min_t(size_t, len, SZ_64K);
+	buf = kvmalloc(len, GFP_KERNEL);
+	if (!buf)
+		return -ENOMEM;
+	n = sgxfive_keep_read(&sgx->kept, buf, len, *ppos);
+	ret = n;
+	if (n && copy_to_user(ubuf, buf, n))
+		ret = -EFAULT;
+	else
+		*ppos += n;
+	kvfree(buf);
+	return ret;
+}
+
+static const struct file_operations sgxfive_render_kept_fops = {
+	.owner = THIS_MODULE, .open = simple_open, .read = sgxfive_render_kept_read,
+	.llseek = default_llseek,
+};
+
 static const struct file_operations sgxfive_render_param_fops = {
 	.owner = THIS_MODULE, .open = simple_open, .read = sgxfive_render_param_read,
 	.llseek = default_llseek,
@@ -1801,6 +1829,7 @@ void sgxfive_debug_init(struct sgxfive *sgx, struct dentry *dir)
 	debugfs_create_file("render_param", 0400, dir, sgx, &sgxfive_render_param_fops);
 	debugfs_create_file("render_tadata", 0400, dir, sgx, &sgxfive_render_tadata_fops);
 	debugfs_create_file("render_words", 0400, dir, sgx, &sgxfive_render_words_fops);
+	debugfs_create_file("render_kept", 0400, dir, sgx, &sgxfive_render_kept_fops);
 	debugfs_create_bool("vm_low", 0600, dir, &sgx->vm_low);
 	debugfs_create_file("hwperf", 0600, dir, sgx, &sgxfive_hwperf_fops);
 	/* Flags besides NEW of render contexts created from now on. */

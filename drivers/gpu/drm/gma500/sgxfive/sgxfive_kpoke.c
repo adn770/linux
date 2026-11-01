@@ -514,3 +514,16 @@ unsigned int sgxfive_keep_drain(struct sgxfive_keep *k,
 		fn(kept, arg);
 	return n;
 }
+
+size_t sgxfive_keep_read(struct sgxfive_keep *k, void *dst, size_t len, loff_t off)
+{
+	struct sgxfive_kept *kept;
+	size_t n = 0;
+
+	spin_lock(&k->lock);
+	kept = list_last_entry_or_null(&k->list, struct sgxfive_kept, link);
+	if (kept)
+		n = sgxfive_pages_copy(kept->td, kept->td_pages, dst, len, off);
+	spin_unlock(&k->lock);
+	return n;
+}
