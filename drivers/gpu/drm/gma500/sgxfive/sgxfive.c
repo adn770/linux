@@ -793,13 +793,20 @@ int sgxfive_render_cleanup(struct sgxfive *sgx, u32 rtds, u32 ctx, u32 pbdesc,
 
 	mutex_lock(&sgx->lock);
 	if (sgx->live) {
+		sgxfive_cleanup_trace_start(sgx, rtds, ctx, pbdesc, flags);
+		sgxfive_cleanup_trace_note(sgx);
 		ret = sgxfive_cleanup(sgx, CLEANUP_RT, rtds);
 		if (!ret) {
+			sgxfive_cleanup_trace_note(sgx);
 			ret = sgxfive_cleanup(sgx, CLEANUP_RC, ctx);
 		}
 		if (!ret) {
+			sgxfive_cleanup_trace_note(sgx);
 			ret = sgxfive_cleanup(sgx, CLEANUP_PB, pbdesc);
 		}
+		if (!ret)
+			sgxfive_cleanup_trace_note(sgx);
+		sgxfive_cleanup_trace_end(sgx, ret);
 		drm_dbg(sgx->dev, "sgxfive: render context cleanup %d after %lld us\n",
 			ret, ktime_us_delta(ktime_get(), start));
 	}

@@ -27,7 +27,7 @@ static void put32(u8 *p, unsigned int off, u32 v)
 void sgx_render_ctx(u32 *ctx, const struct sgx_render_addrs *a)
 {
 	memset(ctx, 0, SGX_RENDER_CTX_SIZE);
-	ctx[SGX_RENDER_CTX_FLAGS / 4] = SGX_RENDER_CTX_NEW;
+	ctx[SGX_RENDER_CTX_FLAGS / 4] = SGX_RENDER_CTX_NEW | a->ctx_flags;
 	ctx[SGX_RENDER_CTX_PD / 4] = a->pd_phys;
 	ctx[SGX_RENDER_CTX_CCB / 4] = a->ccb;
 	ctx[SGX_RENDER_CTX_CCB_CTL / 4] = a->ccb_ctl;

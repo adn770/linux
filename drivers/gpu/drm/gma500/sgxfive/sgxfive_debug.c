@@ -1234,6 +1234,49 @@ static const struct file_operations sgxfive_hwperf_fops = {
 	.write = sgxfive_hwperf_fwrite, .llseek = seq_lseek, .release = single_release,
 };
 
+void sgxfive_cleanup_start(struct sgxfive_cleanup_trace *t, u32 rtds, u32 ctx,
+			   u32 pbdesc, u32 flags)
+{
+	*t = (struct sgxfive_cleanup_trace){
+		.rtds = rtds, .ctx = ctx, .pbdesc = pbdesc, .flags = flags,
+	};
+}
+
+/* The slots now; past the last step nothing more is kept. */
+void sgxfive_cleanup_note(struct sgxfive_cleanup_trace *t, const u32 *ta3dctl)
+{
+	if (t->steps >= SGXFIVE_CLEANUP_STEPS)
+		return;
+	t->slots[t->steps][0] = READ_ONCE(ta3dctl[SGXFIVE_TA3D_PB_TA]);
+	t->slots[t->steps][1] = READ_ONCE(ta3dctl[SGXFIVE_TA3D_PB_3D]);
+	t->steps++;
+}
+
+void sgxfive_cleanup_print(struct drm_printer *p, const struct sgxfive_cleanup_trace *t)
+{
+	static const char *const step[SGXFIVE_CLEANUP_STEPS] = { "before", "rt", "rc", "pb" };
+	unsigned int i;
+
+	drm_printf(p, "rtds %#010x ctx %#010x pbdesc %#010x flags %#010x ret %d\n",
+		   t->rtds, t->ctx, t->pbdesc, t->flags, t->ret);
+	for (i = 0; i < t->steps; i++)
+		drm_printf(p, "%s ta %#010x 3d %#010x\n", step[i], t->slots[i][0],
+			   t->slots[i][1]);
+}
+
+/* The last render-context cleanup: the loaded-PB slots around its steps. */
+static int sgxfive_render_cleanup_show(struct seq_file *m, void *unused)
+{
+	struct sgxfive *sgx = m->private;
+	struct drm_printer p = drm_seq_file_printer(m);
+
+	mutex_lock(&sgx->lock);
+	sgxfive_cleanup_print(&p, &sgx->cleanup);
+	mutex_unlock(&sgx->lock);
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(sgxfive_render_cleanup);
+
 void sgxfive_debug_init(struct sgxfive *sgx, struct dentry *dir)
 {
 	debugfs_create_file("miscinfo", 0400, dir, sgx, &sgxfive_miscinfo_fops);
@@ -1259,4 +1302,7 @@ void sgxfive_debug_init(struct sgxfive *sgx, struct dentry *dir)
 	debugfs_create_file("render_tadata", 0400, dir, sgx, &sgxfive_render_tadata_fops);
 	debugfs_create_bool("vm_low", 0600, dir, &sgx->vm_low);
 	debugfs_create_file("hwperf", 0600, dir, sgx, &sgxfive_hwperf_fops);
+	/* Flags besides NEW of render contexts created from now on. */
+	debugfs_create_x32("render_ctx_flags", 0600, dir, &sgx->render_ctx_flags);
+	debugfs_create_file("render_cleanup", 0400, dir, sgx, &sgxfive_render_cleanup_fops);
 }

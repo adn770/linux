@@ -199,6 +199,7 @@ int sgxfive_render_init(struct sgxfive_ctx *ctx)
 	sgxfive_render_addrs(&r->a, ctx->mem.addr, sgxfive_vm_pd_phys(ctx->vm), r->slot,
 			     &td);
 	r->pb_pages = sgxfive_render_pb_pages(ctx->sgx);
+	r->a.ctx_flags = sgxfive_render_ctx_flags(ctx->sgx);
 	ret = alloc_pages_wc(r->param, PARAM_PAGES);
 	if (!ret)
 		ret = alloc_pages_wc(r->td, r->td_pages);

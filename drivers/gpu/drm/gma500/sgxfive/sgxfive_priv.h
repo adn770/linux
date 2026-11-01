@@ -61,6 +61,23 @@ struct sgxfive_xtest {
 	bool no_alias;		/* ...or not at all */
 };
 
+/*
+ * The last render-context cleanup (debugfs render_cleanup): the TA and 3D
+ * loaded-PB slots of TA3DCtl (dwords 46 and 47) before it and after each of
+ * its RT, RC and PB steps, to see which step unloads the context's PB.
+ */
+#define SGXFIVE_TA3D_PB_TA	46
+#define SGXFIVE_TA3D_PB_3D	47
+#define SGXFIVE_CLEANUP_STEPS	4	/* before, after RT, RC, PB */
+
+struct sgxfive_cleanup_trace {
+	u32 rtds, ctx, pbdesc;		/* what was cleaned up */
+	u32 flags;			/* the context's flags word at the start */
+	int ret;
+	unsigned int steps;		/* how many of slots[] were taken */
+	u32 slots[SGXFIVE_CLEANUP_STEPS][2];
+};
+
 struct sgxfive {
 	struct drm_device *dev;		/* for messages and debugfs */
 	void __iomem *regs;		/* the SGX register block */
@@ -112,6 +129,8 @@ struct sgxfive {
 	struct sgxfive_kpokes kpokes;
 	u32 render_pb_pages;		/* PB of new render contexts */
 	bool vm_low;			/* VM_MAP also takes the first MiB */
+	u32 render_ctx_flags;		/* new render contexts' extra flags */
+	struct sgxfive_cleanup_trace cleanup;	/* the last one's, under lock */
 #endif
 };
 
@@ -323,6 +342,33 @@ static inline bool sgxfive_vm_low(struct sgxfive *sgx)
 {
 	return READ_ONCE(sgx->vm_low);
 }
+
+static inline u32 sgxfive_render_ctx_flags(struct sgxfive *sgx)
+{
+	return READ_ONCE(sgx->render_ctx_flags);
+}
+
+void sgxfive_cleanup_start(struct sgxfive_cleanup_trace *t, u32 rtds, u32 ctx,
+			   u32 pbdesc, u32 flags);
+void sgxfive_cleanup_note(struct sgxfive_cleanup_trace *t, const u32 *ta3dctl);
+void sgxfive_cleanup_print(struct drm_printer *p, const struct sgxfive_cleanup_trace *t);
+
+/* Under the device lock, around a render-context cleanup's steps. */
+static inline void sgxfive_cleanup_trace_start(struct sgxfive *sgx, u32 rtds,
+					       u32 ctx, u32 pbdesc, u32 flags)
+{
+	sgxfive_cleanup_start(&sgx->cleanup, rtds, ctx, pbdesc, flags);
+}
+
+static inline void sgxfive_cleanup_trace_note(struct sgxfive *sgx)
+{
+	sgxfive_cleanup_note(&sgx->cleanup, sgxfive_words(sgx, BUF_TA3D_CTL));
+}
+
+static inline void sgxfive_cleanup_trace_end(struct sgxfive *sgx, int ret)
+{
+	sgx->cleanup.ret = ret;
+}
 #else
 static inline int sgxfive_debug_load(struct sgxfive *sgx)
 {
@@ -354,6 +400,24 @@ static inline u32 sgxfive_render_pb_pages(struct sgxfive *sgx)
 static inline bool sgxfive_vm_low(struct sgxfive *sgx)
 {
 	return false;
+}
+
+static inline u32 sgxfive_render_ctx_flags(struct sgxfive *sgx)
+{
+	return 0;
+}
+
+static inline void sgxfive_cleanup_trace_start(struct sgxfive *sgx, u32 rtds,
+					       u32 ctx, u32 pbdesc, u32 flags)
+{
+}
+
+static inline void sgxfive_cleanup_trace_note(struct sgxfive *sgx)
+{
+}
+
+static inline void sgxfive_cleanup_trace_end(struct sgxfive *sgx, int ret)
+{
 }
 #endif
 

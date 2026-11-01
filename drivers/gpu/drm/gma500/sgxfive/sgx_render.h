@@ -236,6 +236,7 @@ struct sgx_render_addrs {
 	u32 pending;		/* the RT data set's pending count */
 	u32 rt_status;		/* the render target's status word */
 	u32 bgpri;		/* the background primary-PDS update list */
+	u32 ctx_flags;		/* flags besides NEW for the context (debugfs) */
 };
 
 /* What one kick sets in the command besides the user's registers. */

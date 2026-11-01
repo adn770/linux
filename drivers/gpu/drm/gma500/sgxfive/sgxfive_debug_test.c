@@ -5,12 +5,15 @@
  * buffer of new render contexts.
  * The copies of a render context's pages and the context they come from.
  * The first MiB VM_MAP may take.
+ * The extra flags of new render contexts and the trace of their cleanup.
  */
 #include <kunit/test.h>
 #include <linux/module.h>
 #include <linux/string.h>
 #include <linux/dma-fence.h>
 #include <linux/mm.h>
+
+#include <drm/drm_print.h>
 
 #include "sgx_render.h"
 #include "sgxfive_ctx.h"
@@ -154,12 +157,75 @@ static void sgxfive_debug_test_vm_low(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, sgxfive_vm_check_low(0xfffff000, 0x100002000ull), -EINVAL);
 }
 
+/* debugfs render_ctx_flags: extra bits of a new context's flags word, NEW kept. */
+static void sgxfive_debug_test_ctx_flags(struct kunit *test)
+{
+	u32 *ctx = kunit_kzalloc(test, SGX_RENDER_CTX_SIZE, GFP_KERNEL);
+	struct sgx_render_addrs a = addrs;
+
+	KUNIT_ASSERT_NOT_NULL(test, ctx);
+	sgx_render_ctx(ctx, &a);
+	KUNIT_EXPECT_EQ(test, ctx[SGX_RENDER_CTX_FLAGS / 4], (u32)SGX_RENDER_CTX_NEW);
+	a.ctx_flags = 0x20;
+	sgx_render_ctx(ctx, &a);
+	KUNIT_EXPECT_EQ(test, ctx[SGX_RENDER_CTX_FLAGS / 4], 0x20u | SGX_RENDER_CTX_NEW);
+	KUNIT_EXPECT_EQ(test, ctx[SGX_RENDER_CTX_PBDESC / 4], addrs.pbdesc);
+}
+
+/* debugfs render_cleanup: the loaded-PB slots after each cleanup step. */
+static void sgxfive_debug_test_cleanup(struct kunit *test)
+{
+	struct sgxfive_cleanup_trace *t = kunit_kzalloc(test, sizeof(*t), GFP_KERNEL);
+	u32 *ta3d = kunit_kzalloc(test, SGXFIVE_TA3D_CTL_DWORDS * 4, GFP_KERNEL);
+	char *buf = kunit_kzalloc(test, 512, GFP_KERNEL);
+	struct drm_print_iterator it = { .data = buf, .remain = 511 };
+	struct drm_printer p = drm_coredump_printer(&it);
+	unsigned int i;
+
+	KUNIT_ASSERT_NOT_NULL(test, t);
+	KUNIT_ASSERT_NOT_NULL(test, ta3d);
+	KUNIT_ASSERT_NOT_NULL(test, buf);
+	sgxfive_cleanup_start(t, 0x10, 0x20, 0x30, 0x21);
+	ta3d[SGXFIVE_TA3D_PB_TA] = 0x30;
+	ta3d[SGXFIVE_TA3D_PB_3D] = 0x30;
+	sgxfive_cleanup_note(t, ta3d);			/* before */
+	sgxfive_cleanup_note(t, ta3d);			/* after RT */
+	ta3d[SGXFIVE_TA3D_PB_TA] = 0;
+	ta3d[SGXFIVE_TA3D_PB_3D] = 0;
+	sgxfive_cleanup_note(t, ta3d);			/* after RC */
+	for (i = 0; i < 3; i++)				/* PB, then nothing more */
+		sgxfive_cleanup_note(t, ta3d);
+	t->ret = 0;
+	KUNIT_EXPECT_EQ(test, t->steps, SGXFIVE_CLEANUP_STEPS);
+
+	sgxfive_cleanup_print(&p, t);
+	KUNIT_EXPECT_STREQ(test, buf,
+			   "rtds 0x00000010 ctx 0x00000020 pbdesc 0x00000030 flags 0x00000021 ret 0\n"
+			   "before ta 0x00000030 3d 0x00000030\n"
+			   "rt ta 0x00000030 3d 0x00000030\n"
+			   "rc ta 0x00000000 3d 0x00000000\n"
+			   "pb ta 0x00000000 3d 0x00000000\n");
+
+	/* A cleanup that stopped early shows only the steps it took. */
+	memset(buf, 0, 512);
+	it = (struct drm_print_iterator){ .data = buf, .remain = 511 };
+	sgxfive_cleanup_start(t, 1, 2, 3, 1);
+	sgxfive_cleanup_note(t, ta3d);
+	t->ret = -ETIMEDOUT;
+	sgxfive_cleanup_print(&p, t);
+	KUNIT_EXPECT_STREQ(test, buf,
+			   "rtds 0x00000001 ctx 0x00000002 pbdesc 0x00000003 flags 0x00000001 ret -110\n"
+			   "before ta 0x00000000 3d 0x00000000\n");
+}
+
 static struct kunit_case sgxfive_debug_test_cases[] = {
 	KUNIT_CASE(sgxfive_debug_test_pb_small),
 	KUNIT_CASE(sgxfive_debug_test_pb_pages),
 	KUNIT_CASE(sgxfive_debug_test_pages_copy),
 	KUNIT_CASE(sgxfive_debug_test_render_newest),
 	KUNIT_CASE(sgxfive_debug_test_vm_low),
+	KUNIT_CASE(sgxfive_debug_test_ctx_flags),
+	KUNIT_CASE(sgxfive_debug_test_cleanup),
 	{}
 };
 
