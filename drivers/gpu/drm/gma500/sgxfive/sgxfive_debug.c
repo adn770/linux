@@ -15,6 +15,7 @@
 #include <linux/delay.h>
 #include <linux/fs.h>
 #include <linux/ktime.h>
+#include <linux/lockdep.h>
 #include <linux/seq_file.h>
 #include <linux/sizes.h>
 #include <linux/slab.h>
@@ -30,6 +31,7 @@
 #include "sgx_render.h"
 #include "sgx_seq.h"
 #include "sgx_xfer.h"
+#include "sgxfive_owntask.h"
 
 /*
  * The test area, in KERNEL_DATA above the firmware's buffers so the EDM's
@@ -44,13 +46,14 @@
 enum { SCR_U = 0, SCR_F = 1, SCR_SYNC_READ = 8, SCR_SYNC_WRITE = 9 };
 enum {
 	XB_CCB, XB_CCB_CTL, XB_CTX, XB_SCRATCH, XB_PDS, XB_USE, XB_BG, XB_DST,
-	XB_SRC, XB_COUNT
+	XB_SRC, XB_OWNCODE, XB_OWNRES, XB_COUNT
 };
 
 /* By heap and offset, so the area follows the layout. */
 static const struct {
 	u8 heap;
 	u32 off, size;
+	u32 flags;			/* the EDM's page flags: SGX_MMU_RO, or 0 */
 } sgxfive_xbuf[XB_COUNT] = {
 	[XB_CCB] = { HEAP_KERNEL_DATA, 0x100000,
 		     SGX_XFER_CCB_SIZE + SGX_XFER_CMD_SIZE },
@@ -62,6 +65,14 @@ static const struct {
 	[XB_BG] = { HEAP_KERNEL_DATA, 0x130000, 4 * SGX_XFER_BGOBJ1_DWORDS },
 	[XB_DST] = { HEAP_KERNEL_DATA, 0x200000, 0x3000 },
 	[XB_SRC] = { HEAP_TEXTURE, 0x300000, 0x2000 },
+	/* our own firmware task (sgxfive_owntask.h): its code and its results page */
+	/*
+	 * The code is read-only for the EDM (the CPU alias stays writable): a store of the task
+	 * into its own page could write a word the verifier never saw. What the task can store
+	 * into otherwise is the results page only, by the verifier's base check (sgxfive_owntask.c).
+	 */
+	[XB_OWNCODE] = { HEAP_KERNEL_CODE, SGX_OWN_CODE_OFF, SGX_OWN_CODE_SIZE, SGX_MMU_RO },
+	[XB_OWNRES] = { HEAP_KERNEL_DATA, SGX_OWN_RES_OFF, SGX_OWN_RES_SIZE, 0 },
 };
 
 static_assert(XB_COUNT <= SGXFIVE_XBUFS);
@@ -69,8 +80,10 @@ static_assert(XB_COUNT <= SGXFIVE_XBUFS);
 /*
  * What a tester armed for the firmware that ran does not outlive it: a boot,
  * a firmware reload or a recovery reset starts with nothing armed.
+ * The own task's arming (own_arm) is not among them: it is set before a load and has to
+ * live through the load's disarm; a recovery reset clears it itself (sgxfive_debug_reset).
  */
-static void sgxfive_debug_disarm(struct sgxfive *sgx)
+void sgxfive_debug_disarm(struct sgxfive *sgx)
 {
 	sgxfive_hostirq_reset(&sgx->hostirq);
 	WRITE_ONCE(sgx->alias_ctx_rw, false);
@@ -90,7 +103,8 @@ int sgxfive_debug_load(struct sgxfive *sgx)
 	for (i = 0; i < XB_COUNT; i++) {
 		ret = sgxfive_map_pd(sgx, sgx->pd, &sgx->xt.buf[i],
 				     sgx->layout.heap_base[sgxfive_xbuf[i].heap] +
-				     sgxfive_xbuf[i].off, sgxfive_xbuf[i].size);
+				     sgxfive_xbuf[i].off, sgxfive_xbuf[i].size,
+				     sgxfive_xbuf[i].flags);
 		if (ret)
 			return ret;
 	}
@@ -756,9 +770,9 @@ static int sgxfive_client_pd(struct sgxfive *sgx)
 	xt->cpd = sgx_mmu_pd_create();
 	if (!xt->cpd)
 		return -ENOMEM;
-	ret = sgxfive_map_pd(sgx, xt->cpd, &xt->cbuf[0], CLIENT_DST, 0x3000);
+	ret = sgxfive_map_pd(sgx, xt->cpd, &xt->cbuf[0], CLIENT_DST, 0x3000, 0);
 	if (!ret)
-		ret = sgxfive_map_pd(sgx, xt->cpd, &xt->cbuf[1], CLIENT_UPD, 4);
+		ret = sgxfive_map_pd(sgx, xt->cpd, &xt->cbuf[1], CLIENT_UPD, 4, 0);
 	for (i = 0; i < SGX_FW_MAX_BUFFERS + XB_COUNT && !ret; i++) {
 		struct sgxfive_buf *b = i < SGX_FW_MAX_BUFFERS ? &sgx->buf[i] :
 					&xt->buf[i - SGX_FW_MAX_BUFFERS];
@@ -975,9 +989,13 @@ bool sgxfive_debug_reset(struct sgxfive *sgx)
 
 	WRITE_ONCE(sgx->recovery_held, false);
 	sgxfive_debug_disarm(sgx);
+	/* the stock firmware is back: nothing of ours is armed (the blob stays) */
+	WRITE_ONCE(sgx->own.armed, false);
 	for (i = 0; i < XB_COUNT; i++)
 		if (sgx->xt.buf[i].va)
 			memset(sgx->xt.buf[i].va, 0, sgxfive_xbuf[i].size);
+	if (sgx->xt.buf[XB_OWNRES].va)		/* the header goes with the page: put it back */
+		*(u32 *)sgx->xt.buf[XB_OWNRES].va = SGX_OWN_MAGIC_DWORD;
 	sgx->xt.woff = 0;
 	sgx->xt.runs = 0;	/* the next transfer initialises the context */
 	return held;
@@ -1544,6 +1562,207 @@ int sgxfive_alias_skip_set(void *data, u64 val)
 DEFINE_DEBUGFS_ATTRIBUTE(sgxfive_alias_skip_fops, sgxfive_alias_skip_get,
 			 sgxfive_alias_skip_set, "0x%08llx\n");
 
+/*
+ * debugfs own_code, own_res and own_arm: a firmware task of our own (sgxfive_owntask.h).
+ *
+ * own_code takes a blob of tools/fwtask, once per write, and keeps it only if the verifier
+ * accepts it (-EPERM, or -EINVAL for a malformed one, and nothing stored otherwise). own_arm
+ * names the slots of PDS #13 to point at it at the next load, "slots=<mask> entry=<n>,<n>
+ * trc=<t>", or "0" to take it back; it is 0 at every boot of the module and is cleared by every
+ * recovery reset. own_res is the results page the task and the tester share, in the EDM's page
+ * directory at KERNEL_DATA + 0x140000: pread/pwrite, dword aligned, dword 0 (the header) is the
+ * kernel's. The overlay itself is sgxfive_own_apply(), called from the load and nowhere else.
+ */
+static ssize_t sgxfive_own_code_write(struct file *f, const char __user *ubuf, size_t len,
+				      loff_t *ppos)
+{
+	struct sgxfive *sgx = file_inode(f)->i_private;
+	struct sgx_own_blob b;
+	const char *why = "";
+	u8 *data;
+	int ret;
+
+	if (*ppos || !len || len > SGX_OWN_MAX_BYTES)
+		return -EINVAL;
+	data = memdup_user(ubuf, len);
+	if (IS_ERR(data))
+		return PTR_ERR(data);
+	ret = sgx_own_parse(data, len, &b);
+	if (!ret)
+		ret = sgx_own_verify(&b, &why);
+	if (ret) {
+		drm_info(sgx->dev, "sgxfive: own_code refused (%d): %s\n", ret, why);
+		kfree(data);
+		return ret;
+	}
+	mutex_lock(&sgx->lock);
+	memcpy(sgx->own.blob, data, len);
+	sgx->own.len = len;
+	sgx->own.armed = false;		/* the new blob has to be armed again */
+	mutex_unlock(&sgx->lock);
+	kfree(data);
+	drm_info(sgx->dev, "sgxfive: own_code: %zu bytes accepted\n", len);
+	return len;
+}
+
+static const struct file_operations sgxfive_own_code_fops = {
+	.owner = THIS_MODULE, .write = sgxfive_own_code_write,
+};
+
+static ssize_t sgxfive_own_res_read(struct file *f, char __user *ubuf, size_t len, loff_t *ppos)
+{
+	struct sgxfive *sgx = file_inode(f)->i_private;
+	ssize_t ret;
+
+	mutex_lock(&sgx->lock);
+	if (!sgx->loaded || !sgx->xt.buf[XB_OWNRES].va)
+		ret = -ENODEV;
+	else
+		ret = simple_read_from_buffer(ubuf, len, ppos, sgx->xt.buf[XB_OWNRES].va,
+					      SGX_OWN_RES_SIZE);
+	mutex_unlock(&sgx->lock);
+	return ret;
+}
+
+static ssize_t sgxfive_own_res_write(struct file *f, const char __user *ubuf, size_t len,
+				     loff_t *ppos)
+{
+	struct sgxfive *sgx = file_inode(f)->i_private;
+	ssize_t ret = len;
+	u8 *data;
+
+	if (!sgx_own_res_write_ok(*ppos, len))
+		return *ppos < 4 ? -EPERM : -EINVAL;
+	/* copied from the user before the lock: a page fault must not happen inside the mutex */
+	data = memdup_user(ubuf, len);
+	if (IS_ERR(data))
+		return PTR_ERR(data);
+	mutex_lock(&sgx->lock);
+	if (!sgx->loaded || !sgx->xt.buf[XB_OWNRES].va) {
+		ret = -ENODEV;
+	} else {
+		memcpy((u8 *)sgx->xt.buf[XB_OWNRES].va + *ppos, data, len);
+		wmb();		/* the page is write-combined */
+		*ppos += len;
+	}
+	mutex_unlock(&sgx->lock);
+	kfree(data);
+	return ret;
+}
+
+static const struct file_operations sgxfive_own_res_fops = {
+	.owner = THIS_MODULE, .read = sgxfive_own_res_read, .write = sgxfive_own_res_write,
+	.llseek = default_llseek,
+};
+
+static ssize_t sgxfive_own_arm_write(struct file *f, const char __user *ubuf, size_t len,
+				     loff_t *ppos)
+{
+	struct sgxfive *sgx = file_inode(f)->i_private;
+	struct sgx_own_blob b;
+	struct sgx_own_arm a;
+	char buf[96];
+	int ret;
+
+	if (!len || len >= sizeof(buf))
+		return -EINVAL;
+	if (copy_from_user(buf, ubuf, len))
+		return -EFAULT;
+	buf[len] = '\0';
+	strim(buf);
+	if (!strcmp(buf, "0") || !strcmp(buf, "clear")) {
+		WRITE_ONCE(sgx->own.armed, false);
+		return len;
+	}
+	ret = sgx_own_arm_parse(buf, &a);
+	if (ret)
+		return ret;
+	mutex_lock(&sgx->lock);
+	ret = sgx->own.len ? sgx_own_parse(sgx->own.blob, sgx->own.len, &b) : -ENOENT;
+	if (!ret) {
+		unsigned int i;
+
+		for (i = 0; i < a.nentry; i++)
+			if (a.entry[i] >= b.n_entry)
+				ret = -EINVAL;
+	}
+	if (!ret) {
+		sgx->own.arm = a;
+		sgx->own.armed = true;
+	}
+	mutex_unlock(&sgx->lock);
+	return ret ? ret : len;
+}
+
+static int sgxfive_own_arm_show(struct seq_file *m, void *unused)
+{
+	struct sgxfive *sgx = m->private;
+	struct sgx_own_arm a;
+	bool armed;
+	size_t len;
+	unsigned int i;
+
+	mutex_lock(&sgx->lock);
+	armed = sgx->own.armed;
+	a = sgx->own.arm;
+	len = sgx->own.len;
+	mutex_unlock(&sgx->lock);
+	if (!armed) {
+		seq_printf(m, "off blob=%zu\n", len);
+		return 0;
+	}
+	seq_printf(m, "slots=%#x entry=", a.slots);
+	for (i = 0; i < a.nentry; i++)
+		seq_printf(m, "%s%u", i ? "," : "", a.entry[i]);
+	if (a.trc)
+		seq_printf(m, " trc=%u", a.trc);
+	else
+		seq_puts(m, " trc=stock");
+	seq_printf(m, " trc_hazard=%d blob=%zu\n", a.trc_hazard, len);
+	return 0;
+}
+
+static int sgxfive_own_arm_open(struct inode *inode, struct file *f)
+{
+	return single_open(f, sgxfive_own_arm_show, inode->i_private);
+}
+
+static const struct file_operations sgxfive_own_arm_fops = {
+	.owner = THIS_MODULE, .open = sgxfive_own_arm_open, .read = seq_read,
+	.write = sgxfive_own_arm_write, .llseek = seq_lseek, .release = single_release,
+};
+
+/*
+ * Called from the firmware load, once the buffers are built (not from a recovery reset, which
+ * builds the stock ones): the results page's header, and, when armed, the overlay.
+ */
+int sgxfive_debug_own_apply(struct sgxfive *sgx, u8 *const bufs[])
+{
+	struct sgxfive_own *own = &sgx->own;
+	struct sgx_own_blob b;
+	int ret;
+
+	lockdep_assert_held(&sgx->lock);	/* the blob and the arming are read without more */
+	if (sgx->xt.buf[XB_OWNRES].va)
+		*(u32 *)sgx->xt.buf[XB_OWNRES].va = SGX_OWN_MAGIC_DWORD;
+	if (!READ_ONCE(own->armed))
+		return 0;
+	ret = sgx_own_parse(own->blob, own->len, &b);
+	if (!ret && !sgx_fw_buffer(&sgx->fw, SGXFIVE_OWN_PDS_BUF))
+		ret = -ENOENT;
+	if (!ret)
+		ret = sgx_own_apply(&b, &own->arm, &sgx->fw, &sgx->layout, SGXFIVE_OWN_PDS_BUF,
+				    bufs[SGXFIVE_OWN_PDS_BUF],
+				    sgx_fw_buffer(&sgx->fw, SGXFIVE_OWN_PDS_BUF)->size,
+				    sgx->xt.buf[XB_OWNCODE].va, sgx->xt.buf[XB_OWNRES].addr);
+	if (ret)
+		drm_err(sgx->dev, "sgxfive: own task not armed: %d\n", ret);
+	else
+		drm_info(sgx->dev, "sgxfive: own task armed: slots %#x, trc %u (0: stock) (debugfs own_arm)\n",
+			 own->arm.slots, own->arm.trc);
+	return ret;
+}
+
 void sgxfive_debug_init(struct sgxfive *sgx, struct dentry *dir)
 {
 	debugfs_create_file("miscinfo", 0400, dir, sgx, &sgxfive_miscinfo_fops);
@@ -1590,4 +1809,8 @@ void sgxfive_debug_init(struct sgxfive *sgx, struct dentry *dir)
 	debugfs_create_bool("hold_recovery", 0600, dir, &sgx->hold_recovery);
 	/* Renders leave the RT data set's size words and counters as they are. */
 	debugfs_create_bool("rtds_keep", 0600, dir, &sgx->rtds_keep);
+	/* Our own firmware task: its code, its results page and what is armed (sgxfive_owntask.h). */
+	debugfs_create_file("own_code", 0200, dir, sgx, &sgxfive_own_code_fops);
+	debugfs_create_file("own_res", 0600, dir, sgx, &sgxfive_own_res_fops);
+	debugfs_create_file("own_arm", 0600, dir, sgx, &sgxfive_own_arm_fops);
 }

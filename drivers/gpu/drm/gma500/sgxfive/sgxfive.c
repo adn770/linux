@@ -128,9 +128,12 @@ static void sgxfive_unload(struct sgxfive *sgx)
 	sgx->loaded = false;
 }
 
-/* Allocate a zeroed buffer write-combined, map it for the CPU and in pd. */
+/*
+ * Allocate a zeroed buffer write-combined, map it for the CPU and in pd, with the page flags
+ * (0, or SGX_MMU_RO for a buffer the SGX only reads: the CPU alias stays writable).
+ */
 int sgxfive_map_pd(struct sgxfive *sgx, struct sgx_mmu_pd *pd,
-		   struct sgxfive_buf *b, u32 addr, u32 size)
+		   struct sgxfive_buf *b, u32 addr, u32 size, u32 flags)
 {
 	unsigned int i;
 	int ret;
@@ -149,7 +152,7 @@ int sgxfive_map_pd(struct sgxfive *sgx, struct sgx_mmu_pd *pd,
 	b->va = vmap(b->pages, b->npages, VM_MAP, pgprot_writecombine(PAGE_KERNEL));
 	if (!b->va)
 		return -ENOMEM;
-	ret = sgx_mmu_map(pd, addr, b->pages, b->npages, 0);
+	ret = sgx_mmu_map(pd, addr, b->pages, b->npages, flags);
 	if (ret)
 		return ret;
 	b->addr = addr;
@@ -163,7 +166,7 @@ int sgxfive_map_pd(struct sgxfive *sgx, struct sgx_mmu_pd *pd,
 static int sgxfive_map(struct sgxfive *sgx, struct sgxfive_buf *b, u32 addr,
 		       u32 size)
 {
-	return sgxfive_map_pd(sgx, sgx->pd, b, addr, size);
+	return sgxfive_map_pd(sgx, sgx->pd, b, addr, size, 0);
 }
 
 static int sgxfive_load(struct sgxfive *sgx)
@@ -213,6 +216,9 @@ static int sgxfive_load(struct sgxfive *sgx)
 	if (ret)
 		goto err;
 	ret = sgx_fw_build(&sgx->fw, l, bufs);
+	if (ret)
+		goto err;
+	ret = sgxfive_debug_own_apply(sgx, bufs);
 	if (ret)
 		goto err;
 	/* The buffers are write-combined: drain them before the SGX reads. */
@@ -651,6 +657,11 @@ static int sgxfive_reset(struct sgxfive *sgx, u64 suspect, enum sgxfive_hang why
 
 		bufs[id] = sgx->buf[id].va;
 	}
+	/*
+	 * The stock buffers are built before the debug state is reset: if the build fails the own
+	 * task stays armed and the function returns without a boot; a build that succeeds writes
+	 * every start dword from the records again, so the stock EDM is what boots.
+	 */
 	ret = sgx_fw_build(&sgx->fw, &sgx->layout, bufs);
 	if (ret)
 		return ret;
@@ -755,7 +766,7 @@ int sgxfive_kmem_alloc(struct sgxfive *sgx, struct drm_mm_node *node,
 	if (!ret) {
 		ret = sgxfive_map_pd(sgx, sgx->pd, b,
 				     sgx_heap_base[HEAP_KERNEL_DATA] + node->start,
-				     size);
+				     size, 0);
 		if (ret) {
 			sgxfive_unmap(sgx, b);
 			drm_mm_remove_node(node);

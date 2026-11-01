@@ -798,6 +798,31 @@ static void sgxfive_debug_test_alias_skip_reset(struct kunit *test)
 	KUNIT_EXPECT_FALSE(test, sgx->alias_ctx_rw);	/* the one-shot is dropped */
 }
 
+/*
+ * Our own firmware task (sgxfive_owntask.h): a recovery reset ends what own_arm armed, and the
+ * load's own disarm does not, so arming before a load works.
+ */
+static void sgxfive_debug_test_own_arm(struct kunit *test)
+{
+	struct sgxfive *sgx = kunit_kzalloc(test, sizeof(*sgx), GFP_KERNEL);
+
+	KUNIT_ASSERT_NOT_NULL(test, sgx);
+	sgx->own.len = 40;
+	sgx->own.armed = true;
+	sgx->own.arm.slots = 1;
+	sgxfive_debug_disarm(sgx);		/* what a load and a boot run */
+	KUNIT_EXPECT_TRUE(test, sgx->own.armed);
+	KUNIT_EXPECT_EQ(test, sgx->own.arm.slots, 1u);
+	sgxfive_debug_reset(sgx);		/* a recovery reset: the stock firmware is back */
+	KUNIT_EXPECT_FALSE(test, sgx->own.armed);
+	KUNIT_EXPECT_EQ(test, sgx->own.len, 40ul);	/* the blob stays: only the arming ends */
+	/* the overlay does nothing, and touches no buffer, when nothing is armed */
+	mutex_init(&sgx->lock);
+	mutex_lock(&sgx->lock);			/* the overlay asserts it is held */
+	KUNIT_EXPECT_EQ(test, sgxfive_debug_own_apply(sgx, NULL), 0);
+	mutex_unlock(&sgx->lock);
+}
+
 static struct kunit_case sgxfive_debug_test_cases[] = {
 	KUNIT_CASE(sgxfive_debug_test_pb_small),
 	KUNIT_CASE(sgxfive_debug_test_pb_pages),
@@ -818,6 +843,7 @@ static struct kunit_case sgxfive_debug_test_cases[] = {
 	KUNIT_CASE(sgxfive_debug_test_alias_skip),
 	KUNIT_CASE(sgxfive_debug_test_alias_skip_set),
 	KUNIT_CASE(sgxfive_debug_test_alias_skip_reset),
+	KUNIT_CASE(sgxfive_debug_test_own_arm),
 	{}
 };
 

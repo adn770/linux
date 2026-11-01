@@ -25,6 +25,7 @@
 #include "sgx_mmu.h"
 #if IS_ENABLED(CONFIG_DRM_GMA500_SGXFIVE_DEBUG)
 #include "sgxfive_kpoke.h"
+#include "sgxfive_owntask.h"
 #endif
 
 struct drm_device;
@@ -50,7 +51,7 @@ struct sgxfive_buf {
  * transfers queued since the load; a client page directory with buffers of
  * its own, and how it maps the EDM's buffers.
  */
-#define SGXFIVE_XBUFS	10
+#define SGXFIVE_XBUFS	12
 
 struct sgxfive_xtest {
 	struct sgxfive_buf buf[SGXFIVE_XBUFS];
@@ -152,6 +153,7 @@ struct sgxfive {
 	bool alias_ctx_rw;		/* the next render context's page writable, once */
 	struct sgxfive_tdfill tdfill;	/* the next render's TA data page fill */
 	struct sgxfive_hostirq hostirq;	/* host interrupts, kregnow's enables */
+	struct sgxfive_own own;		/* our own firmware task: blob and arming */
 #endif
 };
 
@@ -259,7 +261,7 @@ static inline u32 sgxfive_rd(struct sgxfive *sgx, u32 reg)
 
 void sgxfive_unmap(struct sgxfive *sgx, struct sgxfive_buf *b);
 int sgxfive_map_pd(struct sgxfive *sgx, struct sgx_mmu_pd *pd,
-		   struct sgxfive_buf *b, u32 addr, u32 size);
+		   struct sgxfive_buf *b, u32 addr, u32 size, u32 flags);
 int sgxfive_command(struct sgxfive *sgx, unsigned int cmd, const u32 *data,
 		    unsigned int ndata);
 int sgxfive_wait_mem(const u32 *w, u32 mask, u32 want);
@@ -382,6 +384,8 @@ void sgxfive_debug_init(struct sgxfive *sgx, struct dentry *dir);
 int sgxfive_debug_load(struct sgxfive *sgx);
 void sgxfive_debug_unload(struct sgxfive *sgx);
 bool sgxfive_debug_reset(struct sgxfive *sgx);
+void sgxfive_debug_disarm(struct sgxfive *sgx);
+int sgxfive_debug_own_apply(struct sgxfive *sgx, u8 *const bufs[]);
 void sgxfive_debug_irq(struct sgxfive *sgx, u32 stat_1, u32 stat_2);
 int sgxfive_alias_skip_set(void *data, u64 val);
 
@@ -483,6 +487,11 @@ static inline void sgxfive_debug_unload(struct sgxfive *sgx)
 static inline bool sgxfive_debug_reset(struct sgxfive *sgx)
 {
 	return false;
+}
+
+static inline int sgxfive_debug_own_apply(struct sgxfive *sgx, u8 *const bufs[])
+{
+	return 0;
 }
 
 static inline void sgxfive_debug_irq(struct sgxfive *sgx, u32 stat_1, u32 stat_2)

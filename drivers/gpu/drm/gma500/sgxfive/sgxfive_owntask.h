@@ -51,4 +51,42 @@ void sgx_own_patch_get(const struct sgx_own_blob *b, unsigned int i, u16 *index,
 bool sgx_own_reg_ok(unsigned int index, bool store);
 bool sgx_own_clockgate(unsigned int index);
 
+/*
+ * The overlay: what own_arm asks for, and sgx_own_apply() which puts the code in its page and
+ * retargets the armed slots of PDS #13 (sgxfive_own_apply() in sgxfive_debug.c calls it from the
+ * firmware load, after the buffers are built, and nowhere else: a recovery reset builds the
+ * stock buffers again and the stock EDM runs).
+ */
+#define SGX_OWN_TRC_STOCK	0	/* not given: keep the stock word's TRC byte */
+#define SGX_OWN_TRC_FREE_MAX	31	/* up to here a tester arms freely */
+#define SGX_OWN_SLOTS		4	/* PDS #13 starts one of four tasks */
+#define SGXFIVE_OWN_PDS_BUF	4	/* PDS #13's buffer id (fw_format section 3) */
+
+struct sgx_own_arm {
+	u32 slots;			/* bit k: the k-th closed task, in increasing index order */
+	u8 entry[SGX_OWN_SLOTS];	/* the blob's entry point for each armed slot, ascending */
+	unsigned int nentry;
+	u8 trc;				/* TRC field: units of 4 temporaries; 0: the stock word's */
+	bool trc_hazard;
+};
+
+/* the debug group's own-task state, in struct sgxfive */
+struct sgxfive_own {
+	u8 blob[SGX_OWN_MAX_BYTES];	/* a verified blob */
+	size_t len;			/* 0: none */
+	bool armed;
+	struct sgx_own_arm arm;
+};
+
+struct sgx_fw;
+struct sgx_fw_layout;
+
+/* "slots=<mask> entry=<n>,<n>.. [trc=<t>] [trc_hazard=1]" */
+int sgx_own_arm_parse(const char *line, struct sgx_own_arm *a);
+int sgx_own_apply(const struct sgx_own_blob *b, const struct sgx_own_arm *a,
+		  const struct sgx_fw *fw, const struct sgx_fw_layout *l, unsigned int pds_buf,
+		  u8 *pds_image, u32 pds_size, u8 *code, u32 res_addr);
+/* own_res: a write must be dword aligned and leave dword 0 (the header) alone */
+bool sgx_own_res_write_ok(loff_t pos, size_t len);
+
 #endif

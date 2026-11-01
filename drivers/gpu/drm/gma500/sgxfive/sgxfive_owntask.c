@@ -6,11 +6,14 @@
  * immediate index only on a register of its lists. The clock-gate registers are refused by
  * name, for ldr and str alike, before anything else.
  */
+#include <linux/bitops.h>
 #include <linux/errno.h>
+#include <linux/kstrtox.h>
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/unaligned.h>
 
+#include "sgx_fw.h"
 #include "sgx_own_regs.h"
 #include "sgxfive_owntask.h"
 
@@ -377,4 +380,144 @@ int sgx_own_verify(const struct sgx_own_blob *b, const char **why)
 out:
 	kvfree(s);
 	return ret;
+}
+
+/* ---- the overlay ---------------------------------------------------------------------------- */
+int sgx_own_arm_parse(const char *line, struct sgx_own_arm *a)
+{
+	char buf[96], *tok, *p, *e;
+	bool have_slots = false, have_entry = false;
+	unsigned int v;
+	int ret;
+
+	if (strscpy(buf, line, sizeof(buf)) < 0)
+		return -EINVAL;
+	*a = (struct sgx_own_arm){ .trc = SGX_OWN_TRC_STOCK };
+	p = strim(buf);
+	while ((tok = strsep(&p, " \t")) != NULL) {
+		if (!*tok)
+			continue;
+		if (!strncmp(tok, "slots=", 6)) {
+			ret = kstrtouint(tok + 6, 0, &v);
+			if (ret || !v || v >> SGX_OWN_SLOTS)
+				return -EINVAL;
+			a->slots = v;
+			have_slots = true;
+		} else if (!strncmp(tok, "entry=", 6)) {
+			e = tok + 6;
+			while (e && *e) {
+				char *n = strsep(&e, ",");
+
+				if (a->nentry >= SGX_OWN_SLOTS || kstrtouint(n, 0, &v) ||
+				    v >= SGX_OWN_MAX_ENTRIES)
+					return -EINVAL;
+				a->entry[a->nentry++] = v;
+			}
+			have_entry = true;
+		} else if (!strncmp(tok, "trc=", 4)) {
+			ret = kstrtouint(tok + 4, 0, &v);
+			if (ret || !v || v > 255)
+				return -EINVAL;
+			a->trc = v;
+		} else if (!strncmp(tok, "trc_hazard=", 11)) {
+			ret = kstrtouint(tok + 11, 0, &v);
+			if (ret || v > 1)
+				return -EINVAL;
+			a->trc_hazard = v;
+		} else {
+			return -EINVAL;
+		}
+	}
+	if (!have_slots || !have_entry || a->nentry != hweight32(a->slots))
+		return -EINVAL;
+	if (a->trc > SGX_OWN_TRC_FREE_MAX && !a->trc_hazard)
+		return -EPERM;		/* 32 and up only with trc_hazard=1 */
+	return 0;
+}
+
+bool sgx_own_res_write_ok(loff_t pos, size_t len)
+{
+	/* written as pos <= SIZE && len <= SIZE - pos: pos + len could overflow a loff_t */
+	return pos >= 4 && !(pos & 3) && len && !(len & 3) && pos <= SGX_OWN_RES_SIZE &&
+	       len <= (size_t)(SGX_OWN_RES_SIZE - pos);
+}
+
+int sgx_own_apply(const struct sgx_own_blob *b, const struct sgx_own_arm *a,
+		  const struct sgx_fw *fw, const struct sgx_fw_layout *l, unsigned int pds_buf,
+		  u8 *pds_image, u32 pds_size, u8 *code, u32 res_addr)
+{
+	struct sgx_fw_patched p;
+	u32 tgt[SGX_OWN_SLOTS];
+	u32 index, addend, i, k;
+	const char *why = "";
+	unsigned int n, j;
+	int ret;
+
+	/* the verifier is the last step before the copy: a blob stored without it cannot get in */
+	ret = sgx_own_verify(b, &why);
+	if (ret)
+		return ret;
+	n = sgx_fw_code_targets(fw, pds_buf, tgt, ARRAY_SIZE(tgt));
+	if (n > ARRAY_SIZE(tgt))
+		return -ENOENT;
+	if (!a->slots || a->slots >> n || a->nentry != hweight32(a->slots))
+		return -ENOENT;
+	if (a->trc > SGX_OWN_TRC_FREE_MAX && !a->trc_hazard)
+		return -EPERM;
+	for (j = 0; j < a->nentry; j++)
+		if (a->entry[j] >= b->n_entry)
+			return -EINVAL;
+	/* check every armed slot before anything is written */
+	for (k = 0; k < n; k++) {
+		if (!(a->slots & 1u << k))
+			continue;
+		/* sgx_fw_patch_word() takes the first record of a target: more would leave a start
+		 * dword of the closed task behind */
+		if (sgx_fw_code_records(fw, pds_buf, tgt[k]) != 1)
+			return -EEXIST;
+		ret = sgx_fw_patch_word(fw, l, pds_buf, tgt[k], SGX_OWN_INDEX, 0, &p);
+		if (ret)
+			return ret;
+		if (p.offset + 4 > pds_size)
+			return -ERANGE;
+	}
+	memset(code, 0, SGX_OWN_CODE_SIZE);
+	for (i = 0; i < b->n_insn; i++)
+		put_unaligned_le64(sgx_own_insn(b, i), code + 8 * i);
+	for (i = 0; i < b->n_patch; i++) {
+		u16 pi;
+		u8 pk, slot;
+		u32 add, val;
+
+		sgx_own_patch_get(b, i, &pi, &pk, &slot, &add);	/* verified: cont has no addend */
+		if (pk == SGX_OWN_PATCH_CONT) {
+			if (slot >= n)
+				return -ENOENT;
+			ret = sgx_fw_patch_word(fw, l, pds_buf, tgt[slot], SGX_OWN_INDEX, 0, &p);
+			if (ret)
+				return ret;
+			val = p.old_index;
+		} else {
+			val = res_addr + add;
+		}
+		put_unaligned_le64(sgx_fw_limm_set(sgx_own_insn(b, pi), val), code + 8 * pi);
+	}
+	j = 0;
+	for (k = 0; k < n; k++) {
+		if (!(a->slots & 1u << k))
+			continue;
+		ret = sgx_fw_patch_word(fw, l, pds_buf, tgt[k], SGX_OWN_INDEX, 0, &p);
+		if (ret)
+			return ret;
+		index = SGX_OWN_INDEX + sgx_own_entry(b, a->entry[j++]);
+		/* the old word's addend (its index field, bits 22:4, taken out) with our TRC, or the
+		 * word's own when none was asked for */
+		addend = (p.old_val & ~(0x7ffffu << 4) & 0x00ffffffu) |
+			 (u32)(a->trc ? a->trc : p.old_val >> 24) << 24;
+		ret = sgx_fw_patch_word(fw, l, pds_buf, tgt[k], index, addend, &p);
+		if (ret)
+			return ret;
+		put_unaligned_le32(p.new_val, pds_image + p.offset);
+	}
+	return 0;
 }
