@@ -799,6 +799,115 @@ static void sgx_fw_test_tq_ours(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, sgx_fw_parse(&c->fw, c->file, c->len), -EINVAL);
 }
 
+
+/*
+ * sgx_fw_patch_word(): one CODE_WORD record evaluated again with another code index and addend
+ * (the debug group's own-task overlay, sgxfive_owntask.c). tiny_layout puts the ukernel at
+ * +0x1000 of the code heap (uk_off 0x200), and tiny_patches[1] is a CODE_WORD of buffer 1 at
+ * offset 0, target 0x1ac, addend 0x0800000f.
+ */
+static void sgx_fw_test_patch_word_same_as_build(struct kunit *test)
+{
+	struct ctx *c = test->priv;
+	struct sgx_fw_patched p;
+
+	KUNIT_ASSERT_EQ(test, sgx_fw_parse(&c->fw, c->file, c->len), 0);
+	KUNIT_ASSERT_EQ(test, sgx_fw_build(&c->fw, &tiny_layout, c->bufs), 0);
+	/* the record's own index (0x1ac + uk_off) and addend give the dword the build wrote */
+	KUNIT_ASSERT_EQ(test, sgx_fw_patch_word(&c->fw, &tiny_layout, 1, 0x1ac,
+						0x1ac + 0x200, 0x0800000f, &p), 0);
+	KUNIT_EXPECT_EQ(test, p.offset, 0u);
+	KUNIT_EXPECT_EQ(test, p.new_val, word(c->img[1]));
+	KUNIT_EXPECT_EQ(test, p.new_val, 0x08003acfu);
+	KUNIT_EXPECT_EQ(test, p.old_val, p.new_val);
+	KUNIT_EXPECT_EQ(test, p.old_index, 0x1ac + 0x200u);
+}
+
+static void sgx_fw_test_patch_word_one_record(struct kunit *test)
+{
+	struct ctx *c = test->priv;
+	struct sgx_fw_patched p;
+	u8 before[0x40];
+
+	KUNIT_ASSERT_EQ(test, sgx_fw_parse(&c->fw, c->file, c->len), 0);
+	KUNIT_ASSERT_EQ(test, sgx_fw_build(&c->fw, &tiny_layout, c->bufs), 0);
+	memcpy(before, c->img[1], sizeof(before));
+	/* our code at index 0x4000, 36 temporaries (TRC 9): addend | index << 4 */
+	KUNIT_ASSERT_EQ(test, sgx_fw_patch_word(&c->fw, &tiny_layout, 1, 0x1ac,
+						0x4000, 0x0900000f, &p), 0);
+	KUNIT_EXPECT_EQ(test, p.new_val, 0x0904000fu);
+	KUNIT_EXPECT_EQ(test, p.old_val, 0x08003acfu);
+	KUNIT_EXPECT_EQ(test, p.offset, 0u);
+	/* the function only evaluates: the built buffer is untouched */
+	KUNIT_EXPECT_EQ(test, memcmp(before, c->img[1], sizeof(before)), 0);
+}
+
+static void sgx_fw_test_patch_word_bad_target(struct kunit *test)
+{
+	struct ctx *c = test->priv;
+	struct sgx_fw_patched p;
+	struct sgx_fw_layout l = tiny_layout;
+
+	KUNIT_ASSERT_EQ(test, sgx_fw_parse(&c->fw, c->file, c->len), 0);
+	/* no CODE_WORD record with that target, or in that buffer */
+	KUNIT_EXPECT_EQ(test, sgx_fw_patch_word(&c->fw, &l, 1, 0x1ad, 0x4000, 0x0800000f, &p),
+			-ENOENT);
+	KUNIT_EXPECT_EQ(test, sgx_fw_patch_word(&c->fw, &l, 9, 0x1ac, 0x4000, 0x0800000f, &p),
+			-ENOENT);
+	KUNIT_EXPECT_EQ(test, sgx_fw_patch_word(&c->fw, &l, 99, 0x1ac, 0x4000, 0x0800000f, &p),
+			-ENOENT);
+	/* an index below the ukernel's offset, or past the 19-bit pc field */
+	KUNIT_EXPECT_EQ(test, sgx_fw_patch_word(&c->fw, &l, 1, 0x1ac, 0x1ff, 0x0800000f, &p),
+			-ERANGE);
+	KUNIT_EXPECT_EQ(test, sgx_fw_patch_word(&c->fw, &l, 1, 0x1ac, 1u << 19, 0x0800000f, &p),
+			-ERANGE);
+	KUNIT_EXPECT_EQ(test, sgx_fw_patch_word(&c->fw, &l, 1, 0x1ac, (1u << 19) - 1,
+						0x0800000f, &p), 0);
+	/* a layout without the ukernel placed */
+	l.addr_set &= ~(1u << SGX_FW_UKERNEL);
+	KUNIT_EXPECT_EQ(test, sgx_fw_patch_word(&c->fw, &l, 1, 0x1ac, 0x4000, 0x0800000f, &p),
+			-ENOENT);
+	/* a record that is not a code word is not matched by its target */
+	KUNIT_EXPECT_EQ(test, sgx_fw_patch_word(&c->fw, &tiny_layout, 1, 1, 0x4000, 0x0800000f, &p),
+			-ENOENT);
+}
+
+static void sgx_fw_test_code_targets(struct kunit *test)
+{
+	struct ctx *c = test->priv;
+	u32 t[4];
+
+	KUNIT_ASSERT_EQ(test, sgx_fw_parse(&c->fw, c->file, c->len), 0);
+	KUNIT_EXPECT_EQ(test, sgx_fw_code_targets(&c->fw, 1, t, ARRAY_SIZE(t)), 1);
+	KUNIT_EXPECT_EQ(test, t[0], 0x1acu);
+	KUNIT_EXPECT_EQ(test, sgx_fw_code_targets(&c->fw, 9, t, ARRAY_SIZE(t)), 0);
+	KUNIT_EXPECT_EQ(test, sgx_fw_code_targets(&c->fw, 1, t, 0), 1);	/* counts only */
+}
+
+static void sgx_fw_test_code_records(struct kunit *test)
+{
+	struct ctx *c = test->priv;
+	u8 *rec;
+
+	KUNIT_ASSERT_EQ(test, sgx_fw_parse(&c->fw, c->file, c->len), 0);
+	KUNIT_EXPECT_EQ(test, sgx_fw_code_records(&c->fw, 1, 0x1ac), 1u);
+	KUNIT_EXPECT_EQ(test, sgx_fw_code_records(&c->fw, 1, 0x1ad), 0u);
+	KUNIT_EXPECT_EQ(test, sgx_fw_code_records(&c->fw, 9, 0x1ac), 0u);
+	/* a second CODE_WORD record with the same target (record 3 of the PATCHES section) */
+	rec = c->file + word(c->file + 32 + 2 * 16 + 4) + 3 * 16;
+	rec[0] = 1;
+	rec[1] = WORD32;
+	rec[2] = CODE_WORD;
+	rec[3] = 0;
+	put32(rec + 4, 8);
+	put32(rec + 8, 0x1ac);
+	put32(rec + 12, 0x0800000f);
+	set_crc(c);
+	KUNIT_ASSERT_EQ(test, sgx_fw_parse(&c->fw, c->file, c->len), 0);
+	KUNIT_EXPECT_EQ(test, sgx_fw_code_records(&c->fw, 1, 0x1ac), 2u);
+	KUNIT_EXPECT_EQ(test, sgx_fw_code_targets(&c->fw, 1, (u32[1]){ 0 }, 1), 1);
+}
+
 static struct kunit_case sgx_fw_test_cases[] = {
 	KUNIT_CASE(sgx_fw_test_crc32),
 	KUNIT_CASE(sgx_fw_test_limm),
@@ -816,6 +925,11 @@ static struct kunit_case sgx_fw_test_cases[] = {
 	KUNIT_CASE(sgx_fw_test_tq_copy),
 	KUNIT_CASE(sgx_fw_test_tq_v3_reject),
 	KUNIT_CASE(sgx_fw_test_tq_ours),
+	KUNIT_CASE(sgx_fw_test_patch_word_same_as_build),
+	KUNIT_CASE(sgx_fw_test_patch_word_one_record),
+	KUNIT_CASE(sgx_fw_test_patch_word_bad_target),
+	KUNIT_CASE(sgx_fw_test_code_targets),
+	KUNIT_CASE(sgx_fw_test_code_records),
 	{}
 };
 

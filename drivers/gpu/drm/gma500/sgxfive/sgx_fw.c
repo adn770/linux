@@ -566,6 +566,115 @@ static u32 encode(const struct expr *e, u32 v)
 	return v;
 }
 
+/*
+ * Evaluate again one CODE_WORD record of a buffer, the one whose ukernel instruction index is
+ * `target`, with another code index and addend. `index` counts from the EDM code base (heap
+ * base, so the ukernel's own offset is included), as in the word the PDS program holds. Nothing
+ * is written: out->offset is where the dword sits in the buffer, out->old_val and
+ * out->old_index what the record gives and out->new_val what the new index and addend give,
+ * by the same evaluate() and encode() as the build.
+ */
+int sgx_fw_patch_word(const struct sgx_fw *fw, const struct sgx_fw_layout *l,
+		      unsigned int buffer, u32 target, u32 index, u32 addend,
+		      struct sgx_fw_patched *out)
+{
+	struct expr e, n;
+	u32 off, v;
+	u32 i;
+	int ret;
+
+	ret = uk_off(l, &off);
+	if (ret)
+		return ret;
+	for (i = 0; i < fw->patches.count; i++) {
+		expr_at(&fw->patches, i, &e);
+		if (e.kind != K_CODE_WORD || e.buffer != buffer || e.target != target)
+			continue;
+		if (e.enc != ENC_WORD32)
+			return -EINVAL;
+		if (index < off || index >> CODE_PC_BITS)
+			return -ERANGE;
+		ret = evaluate(fw, l, &e, &v);
+		if (ret)
+			return ret;
+		out->old_val = encode(&e, v);
+		out->old_index = e.target + off;
+		n = e;
+		n.target = index - off;
+		n.addend = addend;
+		ret = evaluate(fw, l, &n, &v);
+		if (ret)
+			return ret;
+		out->new_val = encode(&n, v);
+		out->offset = e.offset;
+		return 0;
+	}
+	return -ENOENT;
+}
+
+/*
+ * How many CODE_WORD records of a buffer have the ukernel index `target`: a start word is
+ * retargeted by sgx_fw_patch_word(), which takes the first, so a caller that must change every
+ * dword that starts a task checks for exactly one.
+ */
+unsigned int sgx_fw_code_records(const struct sgx_fw *fw, unsigned int buffer, u32 target)
+{
+	unsigned int n = 0;
+	struct expr e;
+	u32 i;
+
+	for (i = 0; i < fw->patches.count; i++) {
+		expr_at(&fw->patches, i, &e);
+		if (e.kind == K_CODE_WORD && e.buffer == buffer && e.target == target)
+			n++;
+	}
+	return n;
+}
+
+/* Whether the CODE_WORD record `at` of a buffer is the first one with its target. */
+static bool first_code_word(const struct sgx_fw *fw, unsigned int buffer, u32 at, u32 target)
+{
+	struct expr e;
+	u32 i;
+
+	for (i = 0; i < at; i++) {
+		expr_at(&fw->patches, i, &e);
+		if (e.kind == K_CODE_WORD && e.buffer == buffer && e.target == target)
+			return false;
+	}
+	return true;
+}
+
+/*
+ * The distinct ukernel indices of the CODE_WORD records of a buffer, in increasing order: the
+ * slots of a PDS program that starts one task of several (PDS #13 has four). Returns how many
+ * there are; at most `max` are stored (max 0 only counts them).
+ */
+int sgx_fw_code_targets(const struct sgx_fw *fw, unsigned int buffer, u32 *out, unsigned int max)
+{
+	struct expr e, o;
+	unsigned int n = 0, rank;
+	u32 i, k;
+
+	for (i = 0; i < fw->patches.count; i++) {
+		expr_at(&fw->patches, i, &e);
+		if (e.kind != K_CODE_WORD || e.buffer != buffer ||
+		    !first_code_word(fw, buffer, i, e.target))
+			continue;
+		n++;
+		rank = 0;		/* the distinct targets below this one */
+		for (k = 0; k < fw->patches.count; k++) {
+			expr_at(&fw->patches, k, &o);
+			if (o.kind == K_CODE_WORD && o.buffer == buffer && o.target < e.target &&
+			    first_code_word(fw, buffer, k, o.target))
+				rank++;
+		}
+		if (rank < max)
+			out[rank] = e.target;
+	}
+	return n;
+}
+
 int sgx_fw_check(const struct sgx_fw *fw, const struct sgx_fw_layout *l)
 {
 	const struct sgx_fw_buffer *b;

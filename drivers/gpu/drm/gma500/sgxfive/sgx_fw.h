@@ -180,6 +180,24 @@ const struct sgx_fw_buffer *sgx_fw_buffer(const struct sgx_fw *fw,
 					  unsigned int id);
 
 int sgx_fw_check(const struct sgx_fw *fw, const struct sgx_fw_layout *l);
+
+/*
+ * One CODE_WORD record evaluated again (debug group, sgxfive_owntask.c): where the dword sits,
+ * what the record gives and what another code index and addend give.
+ */
+struct sgx_fw_patched {
+	u32 offset;		/* byte offset in the buffer */
+	u32 old_val;		/* the record's own dword */
+	u32 new_val;		/* the dword for the new index and addend */
+	u32 old_index;		/* the record's instruction index, from the code base */
+};
+
+int sgx_fw_patch_word(const struct sgx_fw *fw, const struct sgx_fw_layout *l,
+		      unsigned int buffer, u32 target, u32 index, u32 addend,
+		      struct sgx_fw_patched *out);
+int sgx_fw_code_targets(const struct sgx_fw *fw, unsigned int buffer, u32 *out,
+			unsigned int max);
+unsigned int sgx_fw_code_records(const struct sgx_fw *fw, unsigned int buffer, u32 target);
 int sgx_fw_build(const struct sgx_fw *fw, const struct sgx_fw_layout *l,
 		 u8 *const bufs[SGX_FW_MAX_BUFFERS]);
 int sgx_fw_script(const struct sgx_fw *fw, const struct sgx_fw_layout *l,
