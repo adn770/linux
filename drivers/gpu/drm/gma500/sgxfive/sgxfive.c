@@ -36,6 +36,7 @@
 #include <drm/drm_print.h>
 
 #include "sgxfive.h"
+#include "sgxfive_coredump.h"
 #include "sgxfive_ctx.h"
 #include "sgxfive_priv.h"
 #include "sgxfive_regdump.h"
@@ -349,7 +350,7 @@ static const u32 sgxfive_dump_regs[] = {
 static_assert(ARRAY_SIZE(sgxfive_dump_regs) == SGXFIVE_DUMP_NREGS);
 
 /* What SGXDumpDebugInfo shows: registers, HostCtl, TA3DCtl, CCB control. */
-static void sgxfive_devstate(struct sgxfive *sgx, struct sgxfive_devstate *d)
+void sgxfive_devstate(struct sgxfive *sgx, struct sgxfive_devstate *d)
 {
 	unsigned int i;
 
@@ -381,22 +382,28 @@ static void sgxfive_print_words(struct drm_printer *p, const char *name,
 			   (int)(min(8u, n - i) * 4), &w[i]);
 }
 
+void sgxfive_devstate_print(struct drm_printer *p, const struct sgxfive_devstate *d)
+{
+	unsigned int i;
+
+	drm_printf(p, "loaded %d live %d sw_events %d bif_faults %d ccb_sent %llu deferred %u\n",
+		   d->loaded, d->live, d->sw_events, d->bif_faults, d->ccb_sent,
+		   d->ndeferred);
+	for (i = 0; i < SGXFIVE_DUMP_NREGS; i++)
+		drm_printf(p, "reg %#05x = %#010x\n", d->regs[i].reg, d->regs[i].val);
+	if (!d->loaded)
+		return;
+	sgxfive_print_words(p, "hostctl", d->hostctl, SGXFIVE_HC_DWORDS);
+	sgxfive_print_words(p, "ta3dctl", d->ta3dctl, SGXFIVE_TA3D_CTL_DWORDS);
+	sgxfive_print_words(p, "ccbctl", d->ccbctl, 2);
+}
+
 void sgxfive_dump(struct sgxfive *sgx, struct drm_printer *p)
 {
 	struct sgxfive_devstate d;
-	unsigned int i;
 
 	sgxfive_devstate(sgx, &d);
-	drm_printf(p, "loaded %d live %d sw_events %d bif_faults %d ccb_sent %llu deferred %u\n",
-		   d.loaded, d.live, d.sw_events, d.bif_faults, d.ccb_sent,
-		   d.ndeferred);
-	for (i = 0; i < SGXFIVE_DUMP_NREGS; i++)
-		drm_printf(p, "reg %#05x = %#010x\n", d.regs[i].reg, d.regs[i].val);
-	if (!d.loaded)
-		return;
-	sgxfive_print_words(p, "hostctl", d.hostctl, SGXFIVE_HC_DWORDS);
-	sgxfive_print_words(p, "ta3dctl", d.ta3dctl, SGXFIVE_TA3D_CTL_DWORDS);
-	sgxfive_print_words(p, "ccbctl", d.ccbctl, 2);
+	sgxfive_devstate_print(p, &d);
 }
 
 /*
@@ -567,8 +574,11 @@ static u32 sgxfive_fault_pd(struct sgxfive *sgx, u32 bif_fault)
  * count the fault against the file that owns the context. False when suspect
  * is no longer its context's oldest unfinished job, because another detector
  * already recovered from it. U64_MAX blames no one.
+ * When there is a hang, cd (if any) gets every context's unfinished jobs
+ * first.
  */
-static bool sgxfive_blame(struct sgxfive *sgx, u64 suspect, enum sgxfive_hang why)
+static bool sgxfive_blame(struct sgxfive *sgx, u64 suspect, enum sgxfive_hang why,
+			  struct sgxfive_coredump *cd)
 {
 	struct sgxfive_ctx *guilty;
 	bool hang;
@@ -576,6 +586,8 @@ static bool sgxfive_blame(struct sgxfive *sgx, u64 suspect, enum sgxfive_hang wh
 	spin_lock_irq(&sgx->ctx_lock);
 	guilty = sgxfive_ctx_of_job(&sgx->ctx_list, suspect);
 	hang = suspect == U64_MAX || guilty;
+	if (hang && cd)
+		sgxfive_coredump_ctxs(cd, &sgx->ctx_list, guilty);
 	if (hang && guilty) {
 		WRITE_ONCE(guilty->lost, true);
 		sgxfive_fence_fail_guilty(guilty, sgxfive_hang_error(why));
@@ -597,18 +609,32 @@ static bool sgxfive_blame(struct sgxfive *sgx, u64 suspect, enum sgxfive_hang wh
  * rewritten with its unfinished jobs, which run again after the boot. With a
  * suspect job (not U64_MAX), its context is lost instead (see sgxfive_blame),
  * and nothing is done if it has already been recovered from.
+ * A reset first captures the error state into *dump (sgxfive_coredump.c),
+ * NULL when there is none.
  */
-static int sgxfive_reset(struct sgxfive *sgx, u64 suspect, enum sgxfive_hang why)
+static int sgxfive_reset(struct sgxfive *sgx, u64 suspect, enum sgxfive_hang why,
+			 struct sgxfive_coredump **dump)
 {
 	u8 *bufs[SGX_FW_MAX_BUFFERS] = { NULL };
+	struct sgxfive_coredump *cd;
 	struct sgxfive_ctx *ctx;
 	unsigned int i;
 	int ret;
 
+	*dump = NULL;
 	if (!sgx->loaded)
 		return -ENODEV;
-	if (!sgxfive_blame(sgx, suspect, why))
+	cd = sgxfive_coredump_alloc(sgx, why, suspect);
+	if (!sgxfive_blame(sgx, suspect, why, cd)) {
+		sgxfive_coredump_discard(cd);
 		return 0;
+	}
+	if (cd) {
+		cd->bif_int_stat = sgx_rd(sgx, SGX_BIF_INT_STAT);
+		cd->bif_fault = sgx_rd(sgx, SGX_BIF_FAULT);
+		sgxfive_devstate(sgx, &cd->dev);
+		*dump = cd;
+	}
 	if (sgx->live)
 		sgxfive_halt(sgx);
 	sgxfive_clear_faults(sgx);
@@ -652,11 +678,16 @@ static int sgxfive_reset(struct sgxfive *sgx, u64 suspect, enum sgxfive_hang why
  */
 int sgxfive_recover(struct sgxfive *sgx, u64 suspect, enum sgxfive_hang why)
 {
+	struct sgxfive_coredump *cd;
 	int ret;
 
 	mutex_lock(&sgx->lock);
-	ret = sgxfive_reset(sgx, suspect, why);
+	ret = sgxfive_reset(sgx, suspect, why, &cd);
 	mutex_unlock(&sgx->lock);
+	if (cd) {
+		cd->result = ret;
+		sgxfive_coredump_emit(cd);
+	}
 	if (ret)
 		drm_err(sgx->dev, "SGX recovery failed: %d\n", ret);
 	return ret;
@@ -1097,6 +1128,7 @@ void sgxfive_destroy(struct sgxfive *sgx)
 	if (!sgx)
 		return;
 	cancel_delayed_work_sync(&sgx->watchdog);
+	sgxfive_coredump_fini(sgx);
 	mutex_lock(&sgx->lock);
 	sgxfive_unload(sgx);
 	mutex_unlock(&sgx->lock);

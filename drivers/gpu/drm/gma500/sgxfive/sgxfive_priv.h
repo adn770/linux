@@ -101,6 +101,7 @@ struct sgxfive {
 	struct delayed_work watchdog;	/* BIF fault poll while jobs run */
 	u64 fault_suspect;		/* job blamed when a fault was last seen */
 	u32 fault_reg, fault_pd;	/* that fault's BIF_FAULT, its directory */
+	unsigned long coredump;		/* an error state is pending (bit 0) */
 #if IS_ENABLED(CONFIG_DRM_GMA500_SGXFIVE_DEBUG)
 	struct sgxfive_xtest xt;
 #endif
@@ -183,6 +184,8 @@ int sgxfive_command(struct sgxfive *sgx, unsigned int cmd, const u32 *data,
 		    unsigned int ndata);
 int sgxfive_wait_mem(const u32 *w, u32 mask, u32 want);
 void sgxfive_dump(struct sgxfive *sgx, struct drm_printer *p);
+void sgxfive_devstate(struct sgxfive *sgx, struct sgxfive_devstate *d);
+void sgxfive_devstate_print(struct drm_printer *p, const struct sgxfive_devstate *d);
 int sgxfive_power(struct sgxfive *sgx, u32 powercmd, u32 done);
 
 struct sgxfive_vm;
