@@ -531,10 +531,13 @@ static void sgxfive_clear_faults(struct sgxfive *sgx)
 {
 	u32 st = sgx_rd(sgx, SGX_EVENT_STATUS), st2 = sgx_rd(sgx, SGX_EVENT_STATUS2);
 
-	drm_info(sgx->dev, "SGX reset: BIF_FAULT %#x EVENT_STATUS %#x/%#x\n",
-		 sgx_rd(sgx, SGX_BIF_FAULT), st, st2);
+	drm_info(sgx->dev, "SGX reset: BIF_FAULT %#x BIF_INT_STAT %#x EVENT_STATUS %#x/%#x\n",
+		 sgx_rd(sgx, SGX_BIF_FAULT), sgx_rd(sgx, SGX_BIF_INT_STAT), st, st2);
 	sgx_wr(sgx, SGX_BIF_CTRL, SGX_BIF_CTRL_CLEAR_FAULT);
 	sgx_wr(sgx, SGX_BIF_CTRL, 0);
+	/* what the two writes left, beside what the halt left above */
+	drm_info(sgx->dev, "SGX reset: after the fault clear BIF_FAULT %#x BIF_INT_STAT %#x\n",
+		 sgx_rd(sgx, SGX_BIF_FAULT), sgx_rd(sgx, SGX_BIF_INT_STAT));
 	sgx_wr(sgx, SGX_EVENT_HOST_CLEAR, st);
 	sgx_wr(sgx, SGX_EVENT_HOST_CLEAR2, st2);
 	udelay(1);

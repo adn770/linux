@@ -15,11 +15,13 @@
 #include <linux/string.h>
 #include <linux/dma-fence.h>
 #include <linux/mm.h>
+#include <linux/sizes.h>
 
 #include <drm/drm_print.h>
 
 #include "sgx_mmu.h"
 #include "sgx_render.h"
+#include "sgx_seq.h"
 #include "sgxfive_ctx.h"
 #include "sgxfive_kpoke.h"
 #include "sgxfive_priv.h"
@@ -404,6 +406,56 @@ static struct dma_fence *fake_job(struct kunit *test, struct sgxfive_ctx *ctx, u
 
 	KUNIT_ASSERT_NOT_NULL(test, hw);
 	return sgxfive_fence_init(hw, ctx, seqno, order, SGX_XFER_CMD_SIZE);
+}
+
+/*
+ * kregnow's BIF rows: written while idle or with a recovery held, refused
+ * (and nothing written) while a job is unfinished and nothing is held; the
+ * other rows are not bound by that.
+ */
+static void sgxfive_debug_test_kregnow_bif(struct kunit *test)
+{
+	struct sgxfive *sgx = kunit_kzalloc(test, sizeof(*sgx), GFP_KERNEL);
+	u32 *regs = kunit_kzalloc(test, SZ_4K, GFP_KERNEL);
+	struct sgxfive_ctx *ctx = fake_ctx(test);
+	struct dma_fence *f;
+
+	KUNIT_ASSERT_NOT_NULL(test, sgx);
+	KUNIT_ASSERT_NOT_NULL(test, regs);
+	sgx->dev = kunit_kzalloc(test, sizeof(*sgx->dev), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, sgx->dev);
+	sgx->regs = (void __iomem *)regs;
+	mutex_init(&sgx->lock);
+	sgxfive_hostirq_init(&sgx->hostirq);
+	spin_lock_init(&sgx->ctx_lock);
+	INIT_LIST_HEAD(&sgx->ctx_list);
+	sgx->live = true;
+	regs[SGX_BIF_INT_STAT / 4] = 0x80000;
+
+	/* idle */
+	KUNIT_EXPECT_EQ(test, sgxfive_kregnow_write(sgx, SGX_BIF_CTRL, true, 0x10), 0);
+	KUNIT_EXPECT_EQ(test, regs[SGX_BIF_CTRL / 4], 0x10u);
+	KUNIT_EXPECT_EQ(test, sgxfive_kregnow_write(sgx, SGX_BIF_INT_STAT, false, 0x1), 0);
+	KUNIT_EXPECT_EQ(test, regs[SGX_BIF_INT_STAT / 4], 0x1u);
+
+	/* a job unfinished, nothing held */
+	list_add_tail(&ctx->link, &sgx->ctx_list);
+	f = fake_job(test, ctx, 1, 7);
+	KUNIT_EXPECT_EQ(test, sgxfive_kregnow_write(sgx, SGX_BIF_CTRL, true, 0x10), -EBUSY);
+	KUNIT_EXPECT_EQ(test, sgxfive_kregnow_write(sgx, SGX_BIF_INT_STAT, false, 0x80000), -EBUSY);
+	KUNIT_EXPECT_EQ(test, regs[SGX_BIF_CTRL / 4], 0x10u);
+	KUNIT_EXPECT_EQ(test, regs[SGX_BIF_INT_STAT / 4], 0x1u);
+	KUNIT_EXPECT_EQ(test, sgxfive_kregnow_write(sgx, SGX_CLKGATECTL2, false, 0x5), 0);
+	KUNIT_EXPECT_EQ(test, regs[SGX_CLKGATECTL2 / 4], 0x5u);
+
+	/* held */
+	WRITE_ONCE(sgx->recovery_held, true);
+	KUNIT_EXPECT_EQ(test, sgxfive_kregnow_write(sgx, SGX_BIF_CTRL, true, 0x10), 0);
+	KUNIT_EXPECT_EQ(test, regs[SGX_BIF_CTRL / 4], 0u);
+	KUNIT_EXPECT_EQ(test, sgxfive_kregnow_write(sgx, SGX_BIF_INT_STAT, false, 0x80000), 0);
+	KUNIT_EXPECT_EQ(test, regs[SGX_BIF_INT_STAT / 4], 0x80000u);
+	sgxfive_fence_fail_all(ctx, -EIO);
+	dma_fence_put(f);
 }
 
 /*
@@ -836,6 +888,7 @@ static struct kunit_case sgxfive_debug_test_cases[] = {
 	KUNIT_CASE(sgxfive_debug_test_hold_recovery),
 	KUNIT_CASE(sgxfive_debug_test_held_reset),
 	KUNIT_CASE(sgxfive_debug_test_held_reset_closed),
+	KUNIT_CASE(sgxfive_debug_test_kregnow_bif),
 	KUNIT_CASE(sgxfive_debug_test_cleanup_reset),
 	KUNIT_CASE(sgxfive_debug_test_render_run),
 	KUNIT_CASE(sgxfive_debug_test_render_words),

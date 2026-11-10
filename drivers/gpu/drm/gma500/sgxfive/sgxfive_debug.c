@@ -1146,7 +1146,10 @@ static const struct file_operations sgxfive_kreg_fops = {
  * clear register or the register at 0x0740 (sgxfive_kregnow_allowed) at any
  * time, while a job runs or is held. A clear register is write-only: not read
  * before the write nor after it, so no flip; its log line has the event
- * status registers as read right after the write instead. The firmware writes none of them after its boot, so there is
+ * status registers as read right after the write instead. CR_BIF_CTRL and
+ * CR_BIF_INT_STAT, which the firmware reaches too, only while no job is
+ * unfinished or a recovery is held (-EBUSY otherwise); their log line adds
+ * BIF_INT_STAT and BIF_FAULT as read right after the write. The firmware writes none of them after its boot, so there is
  * nothing to race with, though it reads 0x0740 at a TA kick (a 32-bit store,
  * so it sees the old value or the new); the device lock only keeps a boot or
  * stop from running meanwhile.
@@ -1173,6 +1176,10 @@ int sgxfive_kregnow_write(struct sgxfive *sgx, u32 off, bool flip, u32 value)
 	mutex_lock(&sgx->lock);
 	if (!sgx->live) {
 		ret = -ENODEV;
+	} else if (sgxfive_kregnow_bif(off) &&
+		   !sgxfive_kregnow_bif_allowed(sgxfive_oldest(sgx) == U64_MAX,
+						sgxfive_recovery_held(sgx))) {
+		ret = -EBUSY;
 	} else if (sgxfive_kregnow_wo(off)) {
 		/* a clear register: no read before or after, the status read right after */
 		iowrite32(value, sgx->regs + off);
@@ -1190,8 +1197,13 @@ int sgxfive_kregnow_write(struct sgxfive *sgx, u32 off, bool flip, u32 value)
 		val = flip ? old ^ value : value;
 		iowrite32(val, sgx->regs + off);
 		spin_unlock_irqrestore(&h->lock, flags);
-		drm_info(sgx->dev, "sgxfive: kregnow 0x%04x: 0x%08x -> 0x%08x, reads 0x%08x\n",
-			 off, old, val, sgxfive_rd(sgx, off));
+		if (sgxfive_kregnow_bif(off))
+			drm_info(sgx->dev, "sgxfive: kregnow 0x%04x: 0x%08x -> 0x%08x, reads 0x%08x, BIF_INT_STAT 0x%08x BIF_FAULT 0x%08x\n",
+				 off, old, val, sgxfive_rd(sgx, off),
+				 sgxfive_rd(sgx, SGX_BIF_INT_STAT), sgxfive_rd(sgx, SGX_BIF_FAULT));
+		else
+			drm_info(sgx->dev, "sgxfive: kregnow 0x%04x: 0x%08x -> 0x%08x, reads 0x%08x\n",
+				 off, old, val, sgxfive_rd(sgx, off));
 	}
 	mutex_unlock(&sgx->lock);
 	return ret;

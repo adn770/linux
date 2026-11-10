@@ -333,13 +333,25 @@ int sgxfive_kreg_parse(const char *s, u32 *off, bool *flip, u32 *value)
 
 /*
  * CR_CLKGATECTL2, CR_EVENT_HOST_ENABLE2, CR_EVENT_HOST_CLEAR2,
- * CR_EVENT_HOST_ENABLE, CR_EVENT_HOST_CLEAR and the register at 0x0740 that
- * the TA kick reads (never writes) for its DPM store and load tasks.
+ * CR_EVENT_HOST_ENABLE, CR_EVENT_HOST_CLEAR, the register at 0x0740 that
+ * the TA kick reads (never writes) for its DPM store and load tasks, and
+ * CR_BIF_CTRL and CR_BIF_INT_STAT.
  */
 const u32 sgxfive_kregnow_allowed[SGXFIVE_KREGNOW_COUNT] = {
 	SGX_CLKGATECTL2, SGX_EVENT_HOST_ENABLE2, SGX_EVENT_HOST_CLEAR2, SGX_EVENT_HOST_ENABLE,
-	SGX_EVENT_HOST_CLEAR, SGX_DPM_TASK_FIELDS,
+	SGX_EVENT_HOST_CLEAR, SGX_DPM_TASK_FIELDS, SGX_BIF_CTRL, SGX_BIF_INT_STAT,
 };
+
+/* The BIF rows: the firmware reaches CR_BIF_CTRL itself */
+bool sgxfive_kregnow_bif(u32 off)
+{
+	return off == SGX_BIF_CTRL || off == SGX_BIF_INT_STAT;
+}
+
+bool sgxfive_kregnow_bif_allowed(bool idle, bool held)
+{
+	return idle || held;
+}
 
 /* The clear registers: write-only (the register dump never reads them) */
 bool sgxfive_kregnow_wo(u32 off)

@@ -142,14 +142,20 @@ int sgxfive_kreg_write(struct sgxfive *sgx, u32 off, bool flip, u32 value);
  * SW_EVENT anyway. Sorted; none is on kreg's list. Same lines as kreg:
  * OFFSET=VALUE or OFFSET^=VALUE (-EPERM off the list); the clear registers
  * are write-only (sgxfive_kregnow_wo): never read, so no flip (-EINVAL).
+ * The BIF's CR_BIF_CTRL and CR_BIF_INT_STAT are on the list too, but the
+ * firmware reaches CR_BIF_CTRL itself: they are written only while no job is
+ * unfinished or a recovery is held (sgxfive_kregnow_bif), else -EBUSY.
  */
-#define SGXFIVE_KREGNOW_COUNT	6
+#define SGXFIVE_KREGNOW_COUNT	8
 extern const u32 sgxfive_kregnow_allowed[SGXFIVE_KREGNOW_COUNT];
 bool sgxfive_kregnow_ok(u32 off);
 bool sgxfive_kregnow_wo(u32 off);
+bool sgxfive_kregnow_bif(u32 off);
+/* whether a BIF row may be written: idle (no job unfinished) or a recovery held */
+bool sgxfive_kregnow_bif_allowed(bool idle, bool held);
 int sgxfive_kregnow_parse(const char *s, u32 *off, bool *flip, u32 *value);
 
-/* Write one of them (sgxfive_debug.c): -ENODEV, -EPERM, -EINVAL. The write is logged. */
+/* Write one of them (sgxfive_debug.c): -ENODEV, -EPERM, -EINVAL, -EBUSY. The write is logged. */
 int sgxfive_kregnow_write(struct sgxfive *sgx, u32 off, bool flip, u32 value);
 
 /*
