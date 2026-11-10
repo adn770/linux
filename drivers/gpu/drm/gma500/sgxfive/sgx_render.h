@@ -178,8 +178,10 @@
 #define SGX_RENDER_MAX_W	4096
 #define SGX_RENDER_MAX_H	4096
 
-/* The TA data of a 4096 x 4096 maximum (struct sgx_render_tadata). */
+/* The TA data of a 4096 x 4096 maximum (struct sgx_render_tadata), one region-header array. */
 #define SGX_RENDER_TD_MAX_SIZE	0x103000
+/* What a context's TA data may take: its slot (SGXFIVE_RENDER_TD_SLOT, 2 MiB) */
+#define SGX_RENDER_TD_LIMIT	0x200000
 
 /*
  * How the tiling engine splits a render target: 32 x 16-pixel tiles, grouped
@@ -261,7 +263,12 @@ u32 sgx_render_pb_pages(u32 want);
 bool sgx_render_share_pb(struct sgx_render_addrs *a, const struct sgx_render_addrs *donor);
 void sgx_render_layout(struct sgx_render_layout *l, u32 width, u32 height);
 int sgx_render_check_max(u32 max_w, u32 max_h);
-int sgx_render_tadata_layout(struct sgx_render_tadata *t, u32 max_w, u32 max_h);
+/*
+ * arrays: the region-header arrays before the ZLS buffer, 1 (the default), 2 or 4 (debugfs
+ * render_rgn_arrays); -EINVAL for any other, -E2BIG when the TA data passes its slot
+ */
+bool sgx_render_rgn_arrays_ok(u32 arrays);
+int sgx_render_tadata_layout(struct sgx_render_tadata *t, u32 max_w, u32 max_h, u32 arrays);
 void sgx_render_rtds(u32 *rtds, const struct sgx_render_addrs *a, u32 mte_screen);
 void sgx_render_rtds_resize(u32 *rtds, u32 mte_screen);
 void sgx_render_rtds_job(u32 *rtds);

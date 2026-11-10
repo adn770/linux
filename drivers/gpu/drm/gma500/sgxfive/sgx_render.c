@@ -155,20 +155,34 @@ int sgx_render_check_max(u32 max_w, u32 max_h)
  * the power of two above them) grow with either size and with n, which grows
  * with the area.
  */
-int sgx_render_tadata_layout(struct sgx_render_tadata *t, u32 max_w, u32 max_h)
+bool sgx_render_rgn_arrays_ok(u32 arrays)
+{
+	return arrays == 1 || arrays == 2 || arrays == 4;
+}
+
+/*
+ * With arrays > 1 the region-header buffer is that many times the layout's
+ * (a test of how many arrays the hardware writes); the ZLS buffer after it
+ * keeps one array's size.
+ */
+int sgx_render_tadata_layout(struct sgx_render_tadata *t, u32 max_w, u32 max_h, u32 arrays)
 {
 	struct sgx_render_layout l;
+	struct sgx_render_tadata n;
 
-	if (sgx_render_check_max(max_w, max_h))
+	if (sgx_render_check_max(max_w, max_h) || !sgx_render_rgn_arrays_ok(arrays))
 		return -EINVAL;
 	sgx_render_layout(&l, max_w, max_h);
-	t->tail = 0;
-	t->control = t->tail + round_up(l.tail_size, SZ_4K);
-	t->otpm = t->control + SZ_4K;
-	t->state = t->otpm + SZ_4K;
-	t->rgn = t->state + SZ_4K;
-	t->zls = t->rgn + round_up(l.rgn_size, SZ_4K);
-	t->size = t->zls + round_up(l.rgn_size, SZ_4K);
+	n.tail = 0;
+	n.control = n.tail + round_up(l.tail_size, SZ_4K);
+	n.otpm = n.control + SZ_4K;
+	n.state = n.otpm + SZ_4K;
+	n.rgn = n.state + SZ_4K;
+	n.zls = n.rgn + round_up(arrays * l.rgn_size, SZ_4K);
+	n.size = n.zls + round_up(l.rgn_size, SZ_4K);
+	if (n.size > SGX_RENDER_TD_LIMIT)
+		return -E2BIG;
+	*t = n;
 	return 0;
 }
 

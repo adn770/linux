@@ -24,6 +24,7 @@
 #include "sgx_fw.h"
 #include "sgx_mmu.h"
 #if IS_ENABLED(CONFIG_DRM_GMA500_SGXFIVE_DEBUG)
+#include "sgx_render.h"
 #include "sgxfive_kpoke.h"
 #include "sgxfive_owntask.h"
 #endif
@@ -140,6 +141,7 @@ struct sgxfive {
 	spinlock_t kpoke_lock;		/* pokes for the next jobs' commands */
 	struct sgxfive_kpokes kpokes;
 	u32 render_pb_pages;		/* PB of new render contexts */
+	u32 render_rgn_arrays;		/* region-header arrays of new render contexts */
 	bool vm_low;			/* VM_MAP also takes the first MiB */
 	u32 render_ctx_flags;		/* new render contexts' extra flags */
 	struct sgxfive_cleanup_trace cleanup;	/* the last one's, under lock */
@@ -456,6 +458,14 @@ static inline u32 sgxfive_render_pb_pages(struct sgxfive *sgx)
 	return READ_ONCE(sgx->render_pb_pages);
 }
 
+/* 1, 2 or 4 (debugfs render_rgn_arrays); any other value: 1, the default. */
+static inline u32 sgxfive_render_rgn_arrays(struct sgxfive *sgx)
+{
+	u32 n = READ_ONCE(sgx->render_rgn_arrays);
+
+	return sgx_render_rgn_arrays_ok(n) ? n : 1;
+}
+
 static inline bool sgxfive_vm_low(struct sgxfive *sgx)
 {
 	return READ_ONCE(sgx->vm_low);
@@ -558,6 +568,11 @@ static inline void sgxfive_kpoke_xfer(struct sgxfive *sgx, u32 *hw)
 static inline u32 sgxfive_render_pb_pages(struct sgxfive *sgx)
 {
 	return 0;
+}
+
+static inline u32 sgxfive_render_rgn_arrays(struct sgxfive *sgx)
+{
+	return 1;
 }
 
 static inline bool sgxfive_take_ctx_rw(struct sgxfive *sgx)

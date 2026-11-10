@@ -757,7 +757,7 @@ static void sgxfive_debug_test_render_run(struct kunit *test)
 	c.bgobj_words[0] = 0x101;
 	c.bgobj_words[1] = 0x102;
 	c.bgobj_words[2] = 0x103;
-	KUNIT_ASSERT_EQ(test, sgx_render_tadata_layout(&td, 300, 200), 0);
+	KUNIT_ASSERT_EQ(test, sgx_render_tadata_layout(&td, 300, 200, 1), 0);
 	sgxfive_render_addrs(&a, 0x32500000, 0x01234000, 0, &td);
 	size = sgxfive_render_build(img, &a, &c, 1, true, true);
 	sgx_render_rtds(rtds, &a, 0);		/* as at creation */

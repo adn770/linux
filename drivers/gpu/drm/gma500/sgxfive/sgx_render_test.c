@@ -8,7 +8,9 @@
  * kernel owns are checked by value, the user's by where they land.
  */
 #include <kunit/test.h>
+#include <linux/math.h>
 #include <linux/module.h>
+#include <linux/sizes.h>
 #include <linux/string.h>
 
 #include "sgx_render.h"
@@ -392,7 +394,7 @@ static void sgx_render_test_tadata(struct kunit *test)
 		const unsigned int w = want[i].w, h = want[i].h;
 
 		memset(&t, 0xa5, sizeof(t));
-		KUNIT_EXPECT_EQ_MSG(test, sgx_render_tadata_layout(&t, w, h), 0, "%ux%u", w, h);
+		KUNIT_EXPECT_EQ_MSG(test, sgx_render_tadata_layout(&t, w, h, 1), 0, "%ux%u", w, h);
 		KUNIT_EXPECT_EQ_MSG(test, t.tail, want[i].t.tail, "%ux%u", w, h);
 		KUNIT_EXPECT_EQ_MSG(test, t.control, want[i].t.control, "%ux%u", w, h);
 		KUNIT_EXPECT_EQ_MSG(test, t.otpm, want[i].t.otpm, "%ux%u", w, h);
@@ -412,18 +414,69 @@ static void sgx_render_test_tadata(struct kunit *test)
 	}
 	KUNIT_EXPECT_EQ(test, want[0].t.size, (u32)SGX_RENDER_TD_MAX_SIZE);
 	/* Each dimension 1 to the device's 4096; 0 is no size. */
-	KUNIT_EXPECT_EQ(test, sgx_render_tadata_layout(&t, 0, 64), -EINVAL);
-	KUNIT_EXPECT_EQ(test, sgx_render_tadata_layout(&t, 64, 0), -EINVAL);
-	KUNIT_EXPECT_EQ(test, sgx_render_tadata_layout(&t, 0, 0), -EINVAL);
-	KUNIT_EXPECT_EQ(test, sgx_render_tadata_layout(&t, 4097, 64), -EINVAL);
-	KUNIT_EXPECT_EQ(test, sgx_render_tadata_layout(&t, 64, 4097), -EINVAL);
-	KUNIT_EXPECT_EQ(test, sgx_render_tadata_layout(&t, 0xffffffff, 1), -EINVAL);
+	KUNIT_EXPECT_EQ(test, sgx_render_tadata_layout(&t, 0, 64, 1), -EINVAL);
+	KUNIT_EXPECT_EQ(test, sgx_render_tadata_layout(&t, 64, 0, 1), -EINVAL);
+	KUNIT_EXPECT_EQ(test, sgx_render_tadata_layout(&t, 0, 0, 1), -EINVAL);
+	KUNIT_EXPECT_EQ(test, sgx_render_tadata_layout(&t, 4097, 64, 1), -EINVAL);
+	KUNIT_EXPECT_EQ(test, sgx_render_tadata_layout(&t, 64, 4097, 1), -EINVAL);
+	KUNIT_EXPECT_EQ(test, sgx_render_tadata_layout(&t, 0xffffffff, 1, 1), -EINVAL);
 	KUNIT_EXPECT_EQ(test, sgx_render_check_max(1, 1), 0);
 	KUNIT_EXPECT_EQ(test, sgx_render_check_max(4096, 4096), 0);
 	KUNIT_EXPECT_EQ(test, sgx_render_check_max(0, 1), -EINVAL);
 	KUNIT_EXPECT_EQ(test, sgx_render_check_max(1, 0), -EINVAL);
 	KUNIT_EXPECT_EQ(test, sgx_render_check_max(4097, 1), -EINVAL);
 	KUNIT_EXPECT_EQ(test, sgx_render_check_max(1, 4097), -EINVAL);
+}
+
+/*
+ * Four region-header arrays (debugfs render_rgn_arrays): the ZLS buffer moves
+ * up past four times the region headers, rounded to a page, and keeps one
+ * array's size; nothing below it moves. Sizes of the offline fit of the
+ * recorded faults (round 3). A maximum whose TA data would not fit its 2 MiB
+ * slot is -E2BIG; only 1, 2 and 4 arrays are taken.
+ */
+static void sgx_render_test_tadata_arrays(struct kunit *test)
+{
+	static const struct { u16 w, h; u32 size; } want[] = {
+		{ 320, 400, 0xc000 }, { 544, 400, 0x10000 }, { 640, 480, 0x13000 },
+		{ 288, 144, 0x8000 }, { 256, 288, 0x8000 }, { 384, 384, 0xb000 },
+		{ 320, 160, 0x8000 }, { 512, 384, 0xb000 }, { 1024, 768, 0x1e000 },
+		{ 64, 64, 0x6000 }, { 4096, 2048, 0x103000 },
+	};
+	struct sgx_render_tadata t, one;
+	struct sgx_render_layout l;
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(want); i++) {
+		const unsigned int w = want[i].w, h = want[i].h;
+
+		KUNIT_ASSERT_EQ(test, sgx_render_tadata_layout(&one, w, h, 1), 0);
+		KUNIT_ASSERT_EQ_MSG(test, sgx_render_tadata_layout(&t, w, h, 4), 0, "%ux%u", w, h);
+		sgx_render_layout(&l, w, h);
+		KUNIT_EXPECT_EQ_MSG(test, t.size, want[i].size, "%ux%u", w, h);
+		KUNIT_EXPECT_EQ(test, t.tail, one.tail);
+		KUNIT_EXPECT_EQ(test, t.control, one.control);
+		KUNIT_EXPECT_EQ(test, t.otpm, one.otpm);
+		KUNIT_EXPECT_EQ(test, t.state, one.state);
+		KUNIT_EXPECT_EQ(test, t.rgn, one.rgn);
+		KUNIT_EXPECT_EQ(test, t.zls, t.rgn + round_up(4 * l.rgn_size, SZ_4K));
+		KUNIT_EXPECT_EQ(test, t.size, t.zls + round_up(l.rgn_size, SZ_4K));
+		KUNIT_EXPECT_LE(test, t.size, (u32)SGX_RENDER_TD_LIMIT);
+		KUNIT_ASSERT_EQ(test, sgx_render_tadata_layout(&t, w, h, 2), 0);
+		KUNIT_EXPECT_EQ(test, t.zls, t.rgn + round_up(2 * l.rgn_size, SZ_4K));
+	}
+	KUNIT_EXPECT_EQ(test, sgx_render_tadata_layout(&t, 4096, 4096, 4), -E2BIG);
+	KUNIT_EXPECT_EQ(test, sgx_render_tadata_layout(&t, 4096, 4096, 2), 0);
+	KUNIT_EXPECT_EQ(test, sgx_render_tadata_layout(&t, 64, 64, 0), -EINVAL);
+	KUNIT_EXPECT_EQ(test, sgx_render_tadata_layout(&t, 64, 64, 3), -EINVAL);
+	KUNIT_EXPECT_EQ(test, sgx_render_tadata_layout(&t, 64, 64, 8), -EINVAL);
+	KUNIT_EXPECT_TRUE(test, sgx_render_rgn_arrays_ok(1));
+	KUNIT_EXPECT_TRUE(test, sgx_render_rgn_arrays_ok(2));
+	KUNIT_EXPECT_TRUE(test, sgx_render_rgn_arrays_ok(4));
+	KUNIT_EXPECT_FALSE(test, sgx_render_rgn_arrays_ok(0));
+	KUNIT_EXPECT_FALSE(test, sgx_render_rgn_arrays_ok(3));
+	KUNIT_EXPECT_FALSE(test, sgx_render_rgn_arrays_ok(5));
+	KUNIT_EXPECT_EQ(test, (u32)SGX_RENDER_TD_LIMIT, (u32)SZ_2M);
 }
 
 /* Every target within w x h has a layout no larger than w x h's. */
@@ -486,7 +539,7 @@ static void sgx_render_test_tadata_addrs(struct kunit *test)
 	KUNIT_ASSERT_NOT_NULL(test, r);
 	KUNIT_ASSERT_NOT_NULL(test, rd);
 	KUNIT_ASSERT_NOT_NULL(test, cmd);
-	KUNIT_ASSERT_EQ(test, sgx_render_tadata_layout(&a.td, 1024, 600), 0);
+	KUNIT_ASSERT_EQ(test, sgx_render_tadata_layout(&a.td, 1024, 600, 1), 0);
 	sgx_render_rtds(r, &a, cmd64.mte_screen);
 	rt = (const u8 *)r + SGX_RENDER_RTDS_RT;
 	KUNIT_EXPECT_EQ(test, dw(rt, SGX_RENDER_RT_TAIL), 0x20001000u);
@@ -501,6 +554,14 @@ static void sgx_render_test_tadata_addrs(struct kunit *test)
 			0x20008000u);
 	KUNIT_EXPECT_EQ(test, dw(cmd, SGX_RENDER_CMD_TAREGS + SGX_RENDER_TA_TPC),
 			0x20001000u);
+	/* four region-header arrays: the region headers stay, the ZLS buffer moves past them */
+	KUNIT_ASSERT_EQ(test, sgx_render_tadata_layout(&a.td, 1024, 600, 4), 0);
+	sgx_render_rd(rd, &a, &cmd64);
+	KUNIT_EXPECT_EQ(test, dw(rd, SGX_RENDER_RD_RGNBASE), 0x20008000u);
+	KUNIT_EXPECT_EQ(test, dw(rd, SGX_RENDER_RD_ZLSEXTZ), 0x2001a000u);
+	sgx_render_cmd(cmd, &a, &cmd64, &k);
+	KUNIT_EXPECT_EQ(test, dw(cmd, SGX_RENDER_CMD_TAREGS + SGX_RENDER_TA_PSGRGN),
+			0x20008000u);
 }
 
 /*
@@ -955,6 +1016,7 @@ static struct kunit_case sgx_render_test_cases[] = {
 	KUNIT_CASE(sgx_render_test_overflow),
 	KUNIT_CASE(sgx_render_test_layout),
 	KUNIT_CASE(sgx_render_test_tadata),
+	KUNIT_CASE(sgx_render_test_tadata_arrays),
 	KUNIT_CASE(sgx_render_test_tadata_covers),
 	KUNIT_CASE(sgx_render_test_tadata_addrs),
 	KUNIT_CASE(sgx_render_test_rd),

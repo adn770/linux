@@ -1943,6 +1943,13 @@ void sgxfive_debug_init(struct sgxfive *sgx, struct dentry *dir)
 	/* Pages of the PB of render contexts created from now on. */
 	sgx->render_pb_pages = SGX_RENDER_PB_PAGES;
 	debugfs_create_x32("render_pb_pages", 0600, dir, &sgx->render_pb_pages);
+	/*
+	 * Region-header arrays before the ZLS buffer in the TA data of render contexts created
+	 * from now on: 1 (the default), 2 or 4; any other value is taken as 1. A maximum whose
+	 * TA data would then pass its 2 MiB slot is refused at the context's creation (-E2BIG).
+	 */
+	sgx->render_rgn_arrays = 1;
+	debugfs_create_x32("render_rgn_arrays", 0600, dir, &sgx->render_rgn_arrays);
 	debugfs_create_file("render_param", 0400, dir, sgx, &sgxfive_render_param_fops);
 	debugfs_create_file("render_tadata", 0400, dir, sgx, &sgxfive_render_tadata_fops);
 	debugfs_create_file("render_words", 0400, dir, sgx, &sgxfive_render_words_fops);

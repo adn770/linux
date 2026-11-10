@@ -204,6 +204,8 @@ static void sgxfive_render_free(struct sgxfive_render *r)
 		sgxfive_ctx_put(donor);
 }
 
+static_assert(SGX_RENDER_TD_LIMIT == SGXFIVE_RENDER_TD_SLOT);
+
 /*
  * A new render context, its kernel memory allocated, its VM and its largest
  * target (ctx->max_width x max_height, checked) set: the slot and the
@@ -218,7 +220,8 @@ int sgxfive_render_init(struct sgxfive_ctx *ctx)
 
 	if (!r)
 		return -ENOMEM;
-	ret = sgx_render_tadata_layout(&td, ctx->max_width, ctx->max_height);
+	ret = sgx_render_tadata_layout(&td, ctx->max_width, ctx->max_height,
+				       sgxfive_render_rgn_arrays(ctx->sgx));
 	if (ret) {
 		kfree(r);
 		return ret;
