@@ -153,6 +153,8 @@ struct sgxfive {
 	bool alias_ctx_rw;		/* the next render context's page writable, once */
 	bool render_keep;		/* the next render context closed is kept, once */
 	struct sgxfive_keep kept;	/* the kept ones (debugfs render_keep) */
+	bool kick_no_bump;		/* the next command leaves the kicker word, once */
+	u32 event_kicks;		/* EVENT_KICK writes since the kicker word was zeroed */
 	struct sgxfive_tdfill tdfill;	/* the next render's TA data page fill */
 	struct sgxfive_hostirq hostirq;	/* host interrupts, kregnow's enables */
 	struct sgxfive_own own;		/* our own firmware task: blob and arming */
@@ -266,6 +268,8 @@ int sgxfive_map_pd(struct sgxfive *sgx, struct sgx_mmu_pd *pd,
 		   struct sgxfive_buf *b, u32 addr, u32 size, u32 flags);
 int sgxfive_command(struct sgxfive *sgx, unsigned int cmd, const u32 *data,
 		    unsigned int ndata);
+/* Zero the kicker word before a kick sequence (C7); the debug group's count of kicks with it. */
+void sgxfive_kicker_zero(struct sgxfive *sgx);
 int sgxfive_wait_mem(const u32 *w, u32 mask, u32 want);
 void sgxfive_dump(struct sgxfive *sgx, struct drm_printer *p);
 void sgxfive_devstate(struct sgxfive *sgx, struct sgxfive_devstate *d);
@@ -423,6 +427,29 @@ static inline bool sgxfive_take_share_pb(struct sgxfive *sgx)
 	return sgxfive_oneshot_take(&sgx->render_share_pb);
 }
 
+/* Whether the next command leaves the kicker word as it is: taken once (debugfs kick_no_bump). */
+static inline bool sgxfive_take_kick_no_bump(struct sgxfive *sgx)
+{
+	return sgxfive_oneshot_take(&sgx->kick_no_bump);
+}
+
+/* A command that took it was not sent: the next one takes it. */
+static inline void sgxfive_kick_no_bump_again(struct sgxfive *sgx)
+{
+	WRITE_ONCE(sgx->kick_no_bump, true);
+}
+
+/* One more EVENT_KICK write, and the count's restart with the kicker word (debugfs kicker). */
+static inline void sgxfive_note_kick(struct sgxfive *sgx)
+{
+	WRITE_ONCE(sgx->event_kicks, sgx->event_kicks + 1);
+}
+
+static inline void sgxfive_kicks_zero(struct sgxfive *sgx)
+{
+	WRITE_ONCE(sgx->event_kicks, 0);
+}
+
 /* 0 or out of range: the default (sgx_render_pb_pages()). */
 static inline u32 sgxfive_render_pb_pages(struct sgxfive *sgx)
 {
@@ -546,6 +573,23 @@ static inline bool sgxfive_take_render_keep(struct sgxfive *sgx)
 static inline bool sgxfive_take_share_pb(struct sgxfive *sgx)
 {
 	return false;
+}
+
+static inline bool sgxfive_take_kick_no_bump(struct sgxfive *sgx)
+{
+	return false;
+}
+
+static inline void sgxfive_kick_no_bump_again(struct sgxfive *sgx)
+{
+}
+
+static inline void sgxfive_note_kick(struct sgxfive *sgx)
+{
+}
+
+static inline void sgxfive_kicks_zero(struct sgxfive *sgx)
+{
 }
 
 static inline u32 sgxfive_ctx_page_flags(bool rw)

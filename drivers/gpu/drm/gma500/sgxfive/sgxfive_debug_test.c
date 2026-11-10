@@ -458,6 +458,149 @@ static void sgxfive_debug_test_kregnow_bif(struct kunit *test)
 	dma_fence_put(f);
 }
 
+/* A running device whose registers and kernel CCB are plain memory, idle. */
+static struct sgxfive *fake_ccb_sgx(struct kunit *test, u32 **regs)
+{
+	struct sgxfive *sgx = kunit_kzalloc(test, sizeof(*sgx), GFP_KERNEL);
+
+	KUNIT_ASSERT_NOT_NULL(test, sgx);
+	*regs = kunit_kzalloc(test, SZ_4K, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, *regs);
+	sgx->dev = kunit_kzalloc(test, sizeof(*sgx->dev), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, sgx->dev);
+	sgx->regs = (void __iomem *)*regs;
+	sgx->buf[BUF_CCB].va = kunit_kzalloc(test, SGX_CCB_ENTRIES * SGX_CCB_CMD_DWORDS * 4,
+					     GFP_KERNEL);
+	sgx->buf[BUF_CCB_CTL].va = kunit_kzalloc(test, 8, GFP_KERNEL);
+	sgx->buf[BUF_KICKER].va = kunit_kzalloc(test, 4, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, sgx->buf[BUF_CCB].va);
+	KUNIT_ASSERT_NOT_NULL(test, sgx->buf[BUF_CCB_CTL].va);
+	KUNIT_ASSERT_NOT_NULL(test, sgx->buf[BUF_KICKER].va);
+	sgx->fw.meta[SGX_FW_META_KICK + SGX_CMD_GETMISCINFO] = 0x1234;
+	mutex_init(&sgx->lock);
+	spin_lock_init(&sgx->kpoke_lock);
+	sgxfive_hostirq_init(&sgx->hostirq);
+	spin_lock_init(&sgx->ctx_lock);
+	INIT_LIST_HEAD(&sgx->ctx_list);
+	sgx->live = true;
+	return sgx;
+}
+
+static bool regs_zero(const u32 *regs)
+{
+	unsigned int i;
+
+	for (i = 0; i < SZ_4K / 4; i++)
+		if (regs[i])
+			return false;
+	return true;
+}
+
+/* debugfs kicker's "=N": 0 to 255 after an '=', nothing else */
+static void sgxfive_debug_test_kicker_parse(struct kunit *test)
+{
+	static const char *const bad[] = { "", "=", "5", "=256", "=-1", "==1", "=0x100", "kick" };
+	unsigned int i;
+	u32 v;
+
+	KUNIT_EXPECT_EQ(test, sgxfive_kicker_parse("=0", &v), 0);
+	KUNIT_EXPECT_EQ(test, v, 0u);
+	KUNIT_EXPECT_EQ(test, sgxfive_kicker_parse("=0x42", &v), 0);
+	KUNIT_EXPECT_EQ(test, v, 0x42u);
+	KUNIT_EXPECT_EQ(test, sgxfive_kicker_parse("=255", &v), 0);
+	KUNIT_EXPECT_EQ(test, v, 255u);
+	for (i = 0; i < ARRAY_SIZE(bad); i++)
+		KUNIT_EXPECT_EQ_MSG(test, sgxfive_kicker_parse(bad[i], &v), -EINVAL, "\"%s\"", bad[i]);
+}
+
+/*
+ * A kicker write sets the word and nothing else: no command in the CCB, its
+ * offsets as they were, no register written; refused before the firmware
+ * runs and while a job is unfinished, the word left.
+ */
+static void sgxfive_debug_test_kicker_write(struct kunit *test)
+{
+	struct sgxfive_ctx *ctx = fake_ctx(test);
+	struct dma_fence *f;
+	struct sgxfive *sgx;
+	u32 *regs, *ctl, *w;
+
+	sgx = fake_ccb_sgx(test, &regs);
+	ctl = sgxfive_words(sgx, BUF_CCB_CTL);
+	w = sgxfive_words(sgx, BUF_KICKER);
+	*w = 2;
+	ctl[0] = 2;
+	ctl[1] = 2;
+	KUNIT_EXPECT_EQ(test, sgxfive_kicker_write(sgx, 0x42), 0);
+	KUNIT_EXPECT_EQ(test, *w, 0x42u);
+	KUNIT_EXPECT_EQ(test, ctl[0], 2u);
+	KUNIT_EXPECT_EQ(test, ctl[1], 2u);
+	KUNIT_EXPECT_TRUE(test, regs_zero(regs));
+	KUNIT_EXPECT_EQ(test, sgx->ccb_sent, 0ull);
+	KUNIT_EXPECT_EQ(test, sgx->event_kicks, 0u);
+
+	list_add_tail(&ctx->link, &sgx->ctx_list);
+	f = fake_job(test, ctx, 1, 3);
+	KUNIT_EXPECT_EQ(test, sgxfive_kicker_write(sgx, 7), -EBUSY);
+	KUNIT_EXPECT_EQ(test, *w, 0x42u);
+	sgxfive_fence_fail_all(ctx, -EIO);
+	dma_fence_put(f);
+
+	sgx->live = false;
+	KUNIT_EXPECT_EQ(test, sgxfive_kicker_write(sgx, 7), -ENODEV);
+	KUNIT_EXPECT_EQ(test, *w, 0x42u);
+	KUNIT_EXPECT_TRUE(test, regs_zero(regs));
+}
+
+/*
+ * kick_no_bump: the next command is written and kicked (the write offset
+ * advances, EVENT_KICK is written once) with the kicker word left, once; the
+ * command after bumps it again. The count of kicks counts both, and starts
+ * over where the word is zeroed (the boot's pre-kick step).
+ */
+static void sgxfive_debug_test_kick_no_bump(struct kunit *test)
+{
+	struct sgxfive *sgx;
+	u32 *regs, *ctl, *w;
+
+	sgx = fake_ccb_sgx(test, &regs);
+	ctl = sgxfive_words(sgx, BUF_CCB_CTL);
+	w = sgxfive_words(sgx, BUF_KICKER);
+	*w = 2;
+	ctl[0] = 2;
+	ctl[1] = 2;
+
+	WRITE_ONCE(sgx->kick_no_bump, true);
+	KUNIT_ASSERT_EQ(test, sgxfive_command(sgx, SGX_CMD_GETMISCINFO, NULL, 0), 0);
+	KUNIT_EXPECT_EQ(test, ctl[0], 3u);
+	KUNIT_EXPECT_EQ(test, regs[SGX_EVENT_KICK / 4], 1u);
+	KUNIT_EXPECT_EQ(test, *w, 2u);
+	KUNIT_EXPECT_FALSE(test, sgx->kick_no_bump);
+	KUNIT_EXPECT_EQ(test, sgx->event_kicks, 1u);
+	KUNIT_EXPECT_EQ(test, ((u32 *)sgxfive_words(sgx, BUF_CCB))[2 * SGX_CCB_CMD_DWORDS], 0x1234u);
+
+	regs[SGX_EVENT_KICK / 4] = 0;
+	KUNIT_ASSERT_EQ(test, sgxfive_command(sgx, SGX_CMD_GETMISCINFO, NULL, 0), 0);
+	KUNIT_EXPECT_EQ(test, ctl[0], 4u);
+	KUNIT_EXPECT_EQ(test, regs[SGX_EVENT_KICK / 4], 1u);
+	KUNIT_EXPECT_EQ(test, *w, 3u);
+	KUNIT_EXPECT_EQ(test, sgx->event_kicks, 2u);
+
+	/* a command that is not sent leaves the one-shot armed */
+	WRITE_ONCE(sgx->kick_no_bump, true);
+	sgx->fw.meta[SGX_FW_META_KICK + SGX_CMD_GETMISCINFO] = 0;	/* no handler: -ENOENT */
+	KUNIT_EXPECT_EQ(test, sgxfive_command(sgx, SGX_CMD_GETMISCINFO, NULL, 0), -ENOENT);
+	KUNIT_EXPECT_TRUE(test, sgx->kick_no_bump);
+	KUNIT_EXPECT_EQ(test, *w, 3u);
+
+	sgxfive_kicker_zero(sgx);
+	KUNIT_EXPECT_EQ(test, *w, 0u);
+	KUNIT_EXPECT_EQ(test, sgx->event_kicks, 0u);
+	/* and a boot, a reload or a reset disarms it */
+	sgxfive_debug_disarm(sgx);
+	KUNIT_EXPECT_FALSE(test, sgx->kick_no_bump);
+}
+
 /*
  * A job of a closed context stays queued in the firmware while a recovery is
  * held. The reset that ends the hold cancels it, as sgxfive_reset does with
@@ -889,6 +1032,9 @@ static struct kunit_case sgxfive_debug_test_cases[] = {
 	KUNIT_CASE(sgxfive_debug_test_held_reset),
 	KUNIT_CASE(sgxfive_debug_test_held_reset_closed),
 	KUNIT_CASE(sgxfive_debug_test_kregnow_bif),
+	KUNIT_CASE(sgxfive_debug_test_kicker_parse),
+	KUNIT_CASE(sgxfive_debug_test_kicker_write),
+	KUNIT_CASE(sgxfive_debug_test_kick_no_bump),
 	KUNIT_CASE(sgxfive_debug_test_cleanup_reset),
 	KUNIT_CASE(sgxfive_debug_test_render_run),
 	KUNIT_CASE(sgxfive_debug_test_render_words),

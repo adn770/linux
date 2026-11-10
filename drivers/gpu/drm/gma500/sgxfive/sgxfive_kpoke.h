@@ -159,6 +159,15 @@ int sgxfive_kregnow_parse(const char *s, u32 *off, bool *flip, u32 *value);
 int sgxfive_kregnow_write(struct sgxfive *sgx, u32 off, bool flip, u32 value);
 
 /*
+ * debugfs kicker: "=N" sets the event-kicker word to N (0 to 255), with no
+ * command and no kick (-EINVAL for anything else). The write
+ * (sgxfive_debug.c): -ENODEV before the firmware runs, -EBUSY while a job is
+ * unfinished; logged.
+ */
+int sgxfive_kicker_parse(const char *s, u32 *value);
+int sgxfive_kicker_write(struct sgxfive *sgx, u32 value);
+
+/*
  * The host's SGX interrupts, counted (debugfs kregnow): every one, and the
  * ones no EDM SW_EVENT came with while the host event enables were written
  * (an event the firmware did not enable raised them). That event's status

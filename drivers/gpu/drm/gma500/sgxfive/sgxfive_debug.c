@@ -91,6 +91,7 @@ void sgxfive_debug_disarm(struct sgxfive *sgx)
 	WRITE_ONCE(sgx->alias_ctx_rw, false);
 	WRITE_ONCE(sgx->render_share_pb, false);
 	WRITE_ONCE(sgx->render_keep, false);
+	WRITE_ONCE(sgx->kick_no_bump, false);
 	spin_lock(&sgx->kpoke_lock);
 	sgx->tdfill.armed = false;
 	sgx->kpokes.n = 0;
@@ -1209,6 +1210,86 @@ int sgxfive_kregnow_write(struct sgxfive *sgx, u32 off, bool flip, u32 value)
 	return ret;
 }
 
+/*
+ * debugfs kicker: the event-kicker word the host bumps with every command
+ * (sgx_ccb_submit), the CCB's write and read offsets and the EVENT_KICK
+ * writes since the word was last zeroed (at the boot); "=N" sets the word,
+ * live and with no job unfinished, and sends no command and writes no
+ * register. No file kicks without a command: a kick with nothing at the read
+ * offset would have the EDM read an empty command. debugfs kick_no_bump (a
+ * one-shot bool) has the next command written and kicked with the word left.
+ */
+int sgxfive_kicker_write(struct sgxfive *sgx, u32 value)
+{
+	u32 *w, old;
+	int ret = 0;
+
+	if (!READ_ONCE(sgx->live))
+		return -ENODEV;
+	mutex_lock(&sgx->lock);
+	if (!sgx->live) {
+		ret = -ENODEV;
+	} else if (sgxfive_oldest(sgx) != U64_MAX) {
+		ret = -EBUSY;
+	} else {
+		w = sgxfive_words(sgx, BUF_KICKER);
+		old = READ_ONCE(*w);
+		WRITE_ONCE(*w, value);
+		wmb(); /* the EDM reads it at its next event */
+		drm_info(sgx->dev, "sgxfive: kicker %u -> %u (no command, no kick)\n", old, value);
+	}
+	mutex_unlock(&sgx->lock);
+	return ret;
+}
+
+static int sgxfive_kicker_show(struct seq_file *m, void *unused)
+{
+	struct sgxfive *sgx = m->private;
+	const u32 *ctl;
+	int ret = 0;
+
+	mutex_lock(&sgx->lock);
+	if (!sgx->live) {
+		ret = -ENODEV;
+	} else {
+		ctl = sgxfive_words(sgx, BUF_CCB_CTL);
+		seq_printf(m, "kicker %u ccbctl %u %u kicks %u\n",
+			   READ_ONCE(*sgxfive_words(sgx, BUF_KICKER)), READ_ONCE(ctl[0]),
+			   READ_ONCE(ctl[1]), READ_ONCE(sgx->event_kicks));
+	}
+	mutex_unlock(&sgx->lock);
+	return ret;
+}
+
+static int sgxfive_kicker_open(struct inode *inode, struct file *f)
+{
+	return single_open(f, sgxfive_kicker_show, inode->i_private);
+}
+
+static ssize_t sgxfive_kicker_fwrite(struct file *f, const char __user *ubuf, size_t len,
+				     loff_t *ppos)
+{
+	struct sgxfive *sgx = file_inode(f)->i_private;
+	char buf[16];
+	u32 value;
+	int ret;
+
+	if (!len || len >= sizeof(buf))
+		return -EINVAL;
+	if (copy_from_user(buf, ubuf, len))
+		return -EFAULT;
+	buf[len] = '\0';
+	ret = sgxfive_kicker_parse(strim(buf), &value);
+	if (!ret)
+		ret = sgxfive_kicker_write(sgx, value);
+	return ret ? ret : len;
+}
+
+static const struct file_operations sgxfive_kicker_fops = {
+	.owner = THIS_MODULE, .open = sgxfive_kicker_open, .read = seq_read,
+	.write = sgxfive_kicker_fwrite, .llseek = seq_lseek, .release = single_release,
+};
+
 /* From the host's SGX interrupt, before the driver acts on it. */
 void sgxfive_debug_irq(struct sgxfive *sgx, u32 stat_1, u32 stat_2)
 {
@@ -1857,6 +1938,8 @@ void sgxfive_debug_init(struct sgxfive *sgx, struct dentry *dir)
 	debugfs_create_file("kreg", 0600, dir, sgx, &sgxfive_kreg_fops);
 	debugfs_create_file("tadata_fill", 0600, dir, sgx, &sgxfive_tdfill_fops);
 	debugfs_create_file("kregnow", 0600, dir, sgx, &sgxfive_kregnow_fops);
+	debugfs_create_file("kicker", 0600, dir, sgx, &sgxfive_kicker_fops);
+	debugfs_create_bool("kick_no_bump", 0600, dir, &sgx->kick_no_bump);
 	/* Pages of the PB of render contexts created from now on. */
 	sgx->render_pb_pages = SGX_RENDER_PB_PAGES;
 	debugfs_create_x32("render_pb_pages", 0600, dir, &sgx->render_pb_pages);

@@ -317,13 +317,19 @@ static void seq_wmb(void *ctx)
 	wmb(); /* the command and the offsets before the kick */
 }
 
+void sgxfive_kicker_zero(struct sgxfive *sgx)
+{
+	WRITE_ONCE(*sgxfive_words(sgx, BUF_KICKER), 0);
+	sgxfive_kicks_zero(sgx);
+}
+
 /* C7, C9-C11: the kicker word, the host clock, InitStatus, then a barrier. */
 static void seq_pre_kick(void *ctx)
 {
 	struct sgxfive *sgx = ctx;
 	u32 *hc = sgxfive_words(sgx, BUF_HOST_CTL);
 
-	WRITE_ONCE(*sgxfive_words(sgx, BUF_KICKER), 0);
+	sgxfive_kicker_zero(sgx);
 	WRITE_ONCE(hc[HC_HOST_CLOCK], (u32)(jiffies * (1000000 / HZ)));
 	WRITE_ONCE(hc[HC_INIT_STATUS], 0);
 	wmb(); /* the EDM must see all of the above before the kick */
@@ -1073,7 +1079,9 @@ void sgxfive_need_bif_inval(struct sgxfive *sgx)
 /*
  * Submit one kernel CCB command (SGXScheduleCCBCommand): cmd is its index in
  * the firmware file's kick table, data its words. The cache control bits
- * gathered since the last command go with it.
+ * gathered since the last command go with it. With debugfs kick_no_bump armed
+ * the command is written and kicked as always but the kicker word is left as
+ * it was, once.
  */
 int sgxfive_command(struct sgxfive *sgx, unsigned int cmd, const u32 *data,
 		    unsigned int ndata)
@@ -1081,20 +1089,30 @@ int sgxfive_command(struct sgxfive *sgx, unsigned int cmd, const u32 *data,
 	struct sgx_seq s = {
 		.wr = seq_wr, .wmb = seq_wmb, .ctx = sgx,
 	};
+	u32 *kicker, word = 0;
+	bool no_bump;
 	int ret;
 
 	if (!sgx->live)
 		return -ENODEV;
 	if (cmd >= SGX_FW_META_STRUCT_SIZES - SGX_FW_META_KICK)
 		return -EINVAL;
+	kicker = sgxfive_words(sgx, BUF_KICKER);
+	no_bump = sgxfive_take_kick_no_bump(sgx);
+	if (no_bump) {
+		word = READ_ONCE(*kicker);
+		kicker = &word;		/* bumped here, not in the buffer */
+	}
 	ret = sgx_ccb_submit(&s, sgxfive_words(sgx, BUF_CCB),
-			     sgxfive_words(sgx, BUF_CCB_CTL),
-			     sgxfive_words(sgx, BUF_KICKER),
+			     sgxfive_words(sgx, BUF_CCB_CTL), kicker,
 			     sgx->fw.meta[SGX_FW_META_KICK + cmd],
 			     sgx->cache_control, data, ndata);
 	if (!ret) {
 		sgx->cache_control = 0;
 		sgx->ccb_sent++;
+		sgxfive_note_kick(sgx);
+	} else if (no_bump) {
+		sgxfive_kick_no_bump_again(sgx);
 	}
 	return ret;
 }

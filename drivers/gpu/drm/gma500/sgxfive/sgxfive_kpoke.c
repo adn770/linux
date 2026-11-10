@@ -380,6 +380,16 @@ int sgxfive_kregnow_parse(const char *s, u32 *off, bool *flip, u32 *value)
 	return *flip && sgxfive_kregnow_wo(*off) ? -EINVAL : 0;
 }
 
+int sgxfive_kicker_parse(const char *s, u32 *value)
+{
+	u32 v;
+
+	if (s[0] != '=' || kstrtou32(s + 1, 0, &v) || v > 255)
+		return -EINVAL;
+	*value = v;
+	return 0;
+}
+
 void sgxfive_hostirq_init(struct sgxfive_hostirq *h)
 {
 	spin_lock_init(&h->lock);
