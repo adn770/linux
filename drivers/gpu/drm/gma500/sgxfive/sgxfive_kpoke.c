@@ -332,13 +332,20 @@ int sgxfive_kreg_parse(const char *s, u32 *off, bool *flip, u32 *value)
 }
 
 /*
- * CR_CLKGATECTL2, CR_EVENT_HOST_ENABLE2, CR_EVENT_HOST_ENABLE and the
- * register at 0x0740 that the TA kick reads (never writes) for its DPM store
- * and load tasks.
+ * CR_CLKGATECTL2, CR_EVENT_HOST_ENABLE2, CR_EVENT_HOST_CLEAR2,
+ * CR_EVENT_HOST_ENABLE, CR_EVENT_HOST_CLEAR and the register at 0x0740 that
+ * the TA kick reads (never writes) for its DPM store and load tasks.
  */
 const u32 sgxfive_kregnow_allowed[SGXFIVE_KREGNOW_COUNT] = {
-	SGX_CLKGATECTL2, SGX_EVENT_HOST_ENABLE2, SGX_EVENT_HOST_ENABLE, SGX_DPM_TASK_FIELDS,
+	SGX_CLKGATECTL2, SGX_EVENT_HOST_ENABLE2, SGX_EVENT_HOST_CLEAR2, SGX_EVENT_HOST_ENABLE,
+	SGX_EVENT_HOST_CLEAR, SGX_DPM_TASK_FIELDS,
 };
+
+/* The clear registers: write-only (the register dump never reads them) */
+bool sgxfive_kregnow_wo(u32 off)
+{
+	return off == SGX_EVENT_HOST_CLEAR2 || off == SGX_EVENT_HOST_CLEAR;
+}
 
 bool sgxfive_kregnow_ok(u32 off)
 {
@@ -354,7 +361,11 @@ int sgxfive_kregnow_parse(const char *s, u32 *off, bool *flip, u32 *value)
 {
 	int ret = sgxfive_kreg_split(s, off, flip, value);
 
-	return ret ? ret : sgxfive_kregnow_ok(*off) ? 0 : -EPERM;
+	if (ret)
+		return ret;
+	if (!sgxfive_kregnow_ok(*off))
+		return -EPERM;
+	return *flip && sgxfive_kregnow_wo(*off) ? -EINVAL : 0;
 }
 
 void sgxfive_hostirq_init(struct sgxfive_hostirq *h)

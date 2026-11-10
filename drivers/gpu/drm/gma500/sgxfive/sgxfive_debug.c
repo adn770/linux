@@ -1142,9 +1142,11 @@ static const struct file_operations sgxfive_kreg_fops = {
 };
 
 /*
- * debugfs kregnow: a write to CR_CLKGATECTL2, a host event enable or the
- * register at 0x0740 (sgxfive_kregnow_allowed) at any time, while a job runs
- * or is held. The firmware writes none of them after its boot, so there is
+ * debugfs kregnow: a write to CR_CLKGATECTL2, a host event enable, a host
+ * clear register or the register at 0x0740 (sgxfive_kregnow_allowed) at any
+ * time, while a job runs or is held. A clear register is write-only: not read
+ * before the write nor after it, so no flip; its log line has the event
+ * status registers as read right after the write instead. The firmware writes none of them after its boot, so there is
  * nothing to race with, though it reads 0x0740 at a TA kick (a 32-bit store,
  * so it sees the old value or the new); the device lock only keeps a boot or
  * stop from running meanwhile.
@@ -1166,9 +1168,17 @@ int sgxfive_kregnow_write(struct sgxfive *sgx, u32 off, bool flip, u32 value)
 		return -ENODEV;
 	if (!sgxfive_kregnow_ok(off))
 		return -EPERM;
+	if (flip && sgxfive_kregnow_wo(off))
+		return -EINVAL;
 	mutex_lock(&sgx->lock);
 	if (!sgx->live) {
 		ret = -ENODEV;
+	} else if (sgxfive_kregnow_wo(off)) {
+		/* a clear register: no read before or after, the status read right after */
+		iowrite32(value, sgx->regs + off);
+		drm_info(sgx->dev, "sgxfive: kregnow 0x%04x = 0x%08x (write-only), EVENT_STATUS 0x%08x/0x%08x\n",
+			 off, value, sgxfive_rd(sgx, SGX_EVENT_STATUS),
+			 sgxfive_rd(sgx, SGX_EVENT_STATUS2));
 	} else {
 		bool enable = off == SGX_EVENT_HOST_ENABLE || off == SGX_EVENT_HOST_ENABLE2;
 
@@ -1223,8 +1233,9 @@ static int sgxfive_kregnow_show(struct seq_file *m, void *unused)
 	if (!sgx->live)
 		ret = -ENODEV;
 	for (i = 0; !ret && i < SGXFIVE_KREGNOW_COUNT; i++)
-		seq_printf(m, "0x%04x 0x%08x\n", sgxfive_kregnow_allowed[i],
-			   sgxfive_rd(sgx, sgxfive_kregnow_allowed[i]));
+		if (!sgxfive_kregnow_wo(sgxfive_kregnow_allowed[i]))	/* never read */
+			seq_printf(m, "0x%04x 0x%08x\n", sgxfive_kregnow_allowed[i],
+				   sgxfive_rd(sgx, sgxfive_kregnow_allowed[i]));
 	if (!ret) {
 		spin_lock_irqsave(&h->lock, flags);
 		armed = h->armed;

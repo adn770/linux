@@ -137,15 +137,19 @@ int sgxfive_kreg_write(struct sgxfive *sgx, u32 off, bool flip, u32 value);
  * or is held: CR_CLKGATECTL2, the two host event enables
  * (CR_EVENT_HOST_ENABLE2, CR_EVENT_HOST_ENABLE) and the register at 0x0740
  * (SGX_DPM_TASK_FIELDS), none of which the firmware writes after its boot
- * (it reads 0x0740 at a TA kick). Sorted; none is on kreg's list. Same lines
- * as kreg: OFFSET=VALUE or OFFSET^=VALUE (-EPERM off the list).
+ * (it reads 0x0740 at a TA kick), and the two host clear registers
+ * (CR_EVENT_HOST_CLEAR2, CR_EVENT_HOST_CLEAR), which the host writes at every
+ * SW_EVENT anyway. Sorted; none is on kreg's list. Same lines as kreg:
+ * OFFSET=VALUE or OFFSET^=VALUE (-EPERM off the list); the clear registers
+ * are write-only (sgxfive_kregnow_wo): never read, so no flip (-EINVAL).
  */
-#define SGXFIVE_KREGNOW_COUNT	4
+#define SGXFIVE_KREGNOW_COUNT	6
 extern const u32 sgxfive_kregnow_allowed[SGXFIVE_KREGNOW_COUNT];
 bool sgxfive_kregnow_ok(u32 off);
+bool sgxfive_kregnow_wo(u32 off);
 int sgxfive_kregnow_parse(const char *s, u32 *off, bool *flip, u32 *value);
 
-/* Write one of them (sgxfive_debug.c): -ENODEV, -EPERM. The write is logged. */
+/* Write one of them (sgxfive_debug.c): -ENODEV, -EPERM, -EINVAL. The write is logged. */
 int sgxfive_kregnow_write(struct sgxfive *sgx, u32 off, bool flip, u32 value);
 
 /*

@@ -637,11 +637,12 @@ static void sgxfive_kpoke_test_hwperf_needs_live(struct kunit *test)
 /*
  * The registers kregnow may write while a job runs: the clock gates' second
  * control and the two host event enables, which the firmware never writes
- * after its boot; none is on kreg's list.
+ * after its boot, and the two host clear registers, write-only; none is on
+ * kreg's list.
  */
 static void sgxfive_kpoke_test_kregnow_allowed(struct kunit *test)
 {
-	static const u32 want[] = { 0x0004, 0x0110, 0x0130, 0x0740 };
+	static const u32 want[] = { 0x0004, 0x0110, 0x0114, 0x0130, 0x0134, 0x0740 };
 	unsigned int i;
 
 	KUNIT_ASSERT_EQ(test, ARRAY_SIZE(want), (size_t)SGXFIVE_KREGNOW_COUNT);
@@ -649,10 +650,14 @@ static void sgxfive_kpoke_test_kregnow_allowed(struct kunit *test)
 		KUNIT_EXPECT_EQ(test, sgxfive_kregnow_allowed[i], want[i]);
 		KUNIT_EXPECT_TRUE(test, sgxfive_kregnow_ok(want[i]));
 		KUNIT_EXPECT_FALSE(test, sgxfive_kreg_ok(want[i]));
+		KUNIT_EXPECT_EQ(test, sgxfive_kregnow_wo(want[i]),
+				want[i] == SGX_EVENT_HOST_CLEAR2 || want[i] == SGX_EVENT_HOST_CLEAR);
 	}
 	KUNIT_EXPECT_FALSE(test, sgxfive_kregnow_ok(0x0000));
 	KUNIT_EXPECT_FALSE(test, sgxfive_kregnow_ok(0x0008));
-	KUNIT_EXPECT_FALSE(test, sgxfive_kregnow_ok(0x0134));
+	KUNIT_EXPECT_FALSE(test, sgxfive_kregnow_ok(0x0118));	/* the status registers */
+	KUNIT_EXPECT_FALSE(test, sgxfive_kregnow_ok(0x012c));
+	KUNIT_EXPECT_FALSE(test, sgxfive_kregnow_wo(0x0118));
 	KUNIT_EXPECT_FALSE(test, sgxfive_kregnow_ok(0x073c));
 	KUNIT_EXPECT_FALSE(test, sgxfive_kregnow_ok(0x0744));
 	KUNIT_EXPECT_FALSE(test, sgxfive_kregnow_ok(0x0810));
@@ -680,6 +685,14 @@ static void sgxfive_kpoke_test_kregnow_parse(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, val, 0x3fe00u);
 	KUNIT_EXPECT_FALSE(test, flip);
 	KUNIT_EXPECT_EQ(test, sgxfive_kreg_parse("0x0740=1", &off, &flip, &val), -EPERM);
+	/* a clear register is written, never read: no flip */
+	KUNIT_EXPECT_EQ(test, sgxfive_kregnow_parse("0x0134=0x40000", &off, &flip, &val), 0);
+	KUNIT_EXPECT_EQ(test, off, 0x0134u);
+	KUNIT_EXPECT_EQ(test, val, 0x40000u);
+	KUNIT_EXPECT_EQ(test, sgxfive_kregnow_parse("0x0114=0x8000", &off, &flip, &val), 0);
+	KUNIT_EXPECT_EQ(test, off, 0x0114u);
+	KUNIT_EXPECT_EQ(test, sgxfive_kregnow_parse("0x0134^=0x40", &off, &flip, &val), -EINVAL);
+	KUNIT_EXPECT_EQ(test, sgxfive_kregnow_parse("0x0114^=0x40", &off, &flip, &val), -EINVAL);
 	/* kreg's own registers are not kregnow's, nor the status. */
 	KUNIT_EXPECT_EQ(test, sgxfive_kregnow_parse("0x0810=1", &off, &flip, &val), -EPERM);
 	KUNIT_EXPECT_EQ(test, sgxfive_kregnow_parse("0x0008=1", &off, &flip, &val), -EPERM);
@@ -883,6 +896,33 @@ static void sgxfive_kpoke_test_kregnow_write(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, regs[SGX_EVENT_HOST_ENABLE / 4], 0x4000u);
 	KUNIT_EXPECT_TRUE(test, spin_trylock(&h->lock));
 	spin_unlock(&h->lock);
+}
+
+/*
+ * The clear registers are written as given, never combined with what the
+ * register file holds (it is never read), not an enable (nothing kept), and
+ * a flip is refused with nothing written.
+ */
+static void sgxfive_kpoke_test_kregnow_write_clear(struct kunit *test)
+{
+	struct sgxfive *sgx;
+	u32 *regs;
+
+	sgx = fake_regs_sgx(test, &regs);
+	regs[SGX_EVENT_HOST_CLEAR / 4] = 0xffffffff;
+	regs[SGX_EVENT_HOST_CLEAR2 / 4] = 0xffffffff;
+	regs[SGX_EVENT_STATUS / 4] = 0x40000;
+	regs[SGX_EVENT_STATUS2 / 4] = 0x440;
+	KUNIT_EXPECT_EQ(test, sgxfive_kregnow_write(sgx, SGX_EVENT_HOST_CLEAR, false, 0x40000), 0);
+	KUNIT_EXPECT_EQ(test, regs[SGX_EVENT_HOST_CLEAR / 4], 0x40000u);
+	KUNIT_EXPECT_EQ(test, sgxfive_kregnow_write(sgx, SGX_EVENT_HOST_CLEAR2, false, 0x8000), 0);
+	KUNIT_EXPECT_EQ(test, regs[SGX_EVENT_HOST_CLEAR2 / 4], 0x8000u);
+	KUNIT_EXPECT_EQ(test, sgxfive_kregnow_write(sgx, SGX_EVENT_HOST_CLEAR2, true, 0x40), -EINVAL);
+	KUNIT_EXPECT_EQ(test, regs[SGX_EVENT_HOST_CLEAR2 / 4], 0x8000u);
+	KUNIT_EXPECT_FALSE(test, sgx->hostirq.armed);
+	/* the status registers are only read */
+	KUNIT_EXPECT_EQ(test, regs[SGX_EVENT_STATUS / 4], 0x40000u);
+	KUNIT_EXPECT_EQ(test, regs[SGX_EVENT_STATUS2 / 4], 0x440u);
 }
 
 /*
@@ -1145,6 +1185,7 @@ static struct kunit_case sgxfive_kpoke_test_cases[] = {
 	KUNIT_CASE(sgxfive_kpoke_test_kregnow_needs_live),
 	KUNIT_CASE(sgxfive_kpoke_test_hostirq),
 	KUNIT_CASE(sgxfive_kpoke_test_kregnow_write),
+	KUNIT_CASE(sgxfive_kpoke_test_kregnow_write_clear),
 	KUNIT_CASE(sgxfive_kpoke_test_debug_irq),
 	KUNIT_CASE(sgxfive_kpoke_test_reset_disarms),
 	KUNIT_CASE(sgxfive_kpoke_test_oneshot),
