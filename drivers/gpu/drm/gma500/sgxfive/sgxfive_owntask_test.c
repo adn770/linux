@@ -404,6 +404,93 @@ static void sgxfive_owntask_test_apply_refusals(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, memcmp(f->pds, f->stock, PDS_SIZE), 0);
 }
 
+/* a blob of the continue triple with a cont<slot> patch on its limm, entry 0 */
+static size_t own_triple(u8 *buf, u8 slot)
+{
+	static const u64 w[3] = { 0xfc23715003cdbeefULL /* mov r30, #0xdeadbeef */,
+				  0xf80000c000000f00ULL /* mov pclink, r30 */,
+				  0xf800008000000000ULL /* lapc */ };
+	unsigned int i;
+
+	memset(buf, 0, 16 + 8 * 3 + 8 + 2);
+	memcpy(buf, "SGXOWN01", 8);
+	put_unaligned_le16(3, buf + 8);
+	put_unaligned_le16(1, buf + 10);
+	put_unaligned_le16(1, buf + 12);
+	for (i = 0; i < 3; i++)
+		put_unaligned_le64(w[i], buf + 16 + 8 * i);
+	buf[16 + 24 + 2] = SGX_OWN_PATCH_CONT;		/* index 0, kind, slot, addend 0 */
+	buf[16 + 24 + 3] = slot;
+	return 16 + 8 * 3 + 8 + 2;
+}
+
+static const u8 own_exit_fw_digest[32] = {
+	0x6a, 0x00, 0x26, 0x8e, 0x9d, 0x4c, 0xa5, 0x52, 0xc0, 0x2e, 0x52, 0x65, 0x1a, 0x42, 0xa2, 0xb4,
+	0xdb, 0x38, 0x87, 0xd7, 0xfe, 0x62, 0x6f, 0x20, 0x98, 0x88, 0x36, 0x99, 0x85, 0x16, 0x2b, 0x0a,
+};
+
+/* the shared exit's index is known for one firmware file only */
+static void sgxfive_owntask_test_exit_index(struct kunit *test)
+{
+	u8 d[32];
+	unsigned int i;
+
+	KUNIT_EXPECT_EQ(test, sgx_own_exit_index(own_exit_fw_digest), (u32)SGX_OWN_EXIT_UK_INDEX);
+	KUNIT_EXPECT_EQ(test, (u32)SGX_OWN_EXIT_UK_INDEX, 0x1974u);
+	for (i = 0; i < 32; i++) {
+		memcpy(d, own_exit_fw_digest, 32);
+		d[i] ^= 0x01;
+		KUNIT_EXPECT_EQ_MSG(test, sgx_own_exit_index(d), 0u, "byte %u", i);
+	}
+	memset(d, 0, sizeof(d));
+	KUNIT_EXPECT_EQ(test, sgx_own_exit_index(d), 0u);
+}
+
+/*
+ * cont4: the verifier takes slot 4 as a continue patch (slot 5 is a bad slot); the overlay puts
+ * the exit's index, from the code base, in the limm when the load gave it, and refuses the arm,
+ * writing nothing, when it did not
+ */
+static void sgxfive_owntask_test_apply_cont4(struct kunit *test)
+{
+	struct own_fw *f = own_fw_new(test, 4);
+	struct sgx_own_arm a;
+	struct sgx_own_blob b;
+	const char *why = "";
+	u8 buf[64];
+	size_t len;
+
+	len = own_triple(buf, 5);
+	KUNIT_EXPECT_EQ(test, verify_data(buf, len, &why), -EPERM);
+	KUNIT_EXPECT_STREQ(test, why, SGX_OWN_WHY_PATCH_SLOT);
+	len = own_triple(buf, SGX_OWN_EXIT_SLOT);
+	KUNIT_ASSERT_EQ(test, verify_data(buf, len, &why), 0);
+	KUNIT_ASSERT_EQ(test, sgx_own_parse(buf, len, &b), 0);
+	KUNIT_ASSERT_EQ(test, sgx_own_arm_parse("slots=0x1 entry=0", &a), 0);
+	KUNIT_EXPECT_EQ(test, a.exit_index, 0u);	/* own_arm never sets it */
+
+	/* not known: refused, nothing written */
+	KUNIT_EXPECT_EQ(test, sgx_own_apply(&b, &a, &f->fw, &f->l, PDS_BUF, f->pds, PDS_SIZE,
+					    f->code, 0x32140000), -ENOENT);
+	KUNIT_EXPECT_EQ(test, memcmp(f->pds, f->stock, PDS_SIZE), 0);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le64(f->code), 0ull);
+
+	/* known: the limm holds it (the ukernel at the code base here), the rest as cont0 does */
+	a.exit_index = SGX_OWN_EXIT_UK_INDEX;
+	KUNIT_ASSERT_EQ(test, sgx_own_apply(&b, &a, &f->fw, &f->l, PDS_BUF, f->pds, PDS_SIZE,
+					    f->code, 0x32140000), 0);
+	KUNIT_EXPECT_EQ(test, sgx_fw_limm_get(get_unaligned_le64(f->code)), 0x1974u);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le64(f->code + 8), sgx_own_insn(&b, 1));
+	KUNIT_EXPECT_EQ(test, dw(f->pds, 4), 0x0804000fu);
+
+	/* the ukernel 0x10 instructions above the code base: the index moves with it */
+	f = own_fw_new(test, 4);
+	f->l.addr[0] = 0xe8000000 + 8 * 0x10;
+	KUNIT_ASSERT_EQ(test, sgx_own_apply(&b, &a, &f->fw, &f->l, PDS_BUF, f->pds, PDS_SIZE,
+					    f->code, 0x32140000), 0);
+	KUNIT_EXPECT_EQ(test, sgx_fw_limm_get(get_unaligned_le64(f->code)), 0x1984u);
+}
+
 /* the verifier is the last step before the copy, and one record per armed target */
 static void sgxfive_owntask_test_apply_reverifies_and_wants_one_record(struct kunit *test)
 {
@@ -482,6 +569,8 @@ static struct kunit_case sgxfive_owntask_test_cases[] = {
 	KUNIT_CASE(sgxfive_owntask_test_apply_default_trc_and_entry),
 	KUNIT_CASE(sgxfive_owntask_test_apply_patches),
 	KUNIT_CASE(sgxfive_owntask_test_apply_refusals),
+	KUNIT_CASE(sgxfive_owntask_test_exit_index),
+	KUNIT_CASE(sgxfive_owntask_test_apply_cont4),
 	KUNIT_CASE(sgxfive_owntask_test_apply_reverifies_and_wants_one_record),
 	KUNIT_CASE(sgxfive_owntask_test_arm_parse),
 	KUNIT_CASE(sgxfive_owntask_test_res_write),

@@ -11,8 +11,10 @@
  * their status and update writes. Transfers are serialised by the device
  * lock, one in flight at a time.
  */
+#include <crypto/sha2.h>
 #include <linux/debugfs.h>
 #include <linux/delay.h>
+#include <linux/firmware.h>
 #include <linux/fs.h>
 #include <linux/ktime.h>
 #include <linux/lockdep.h>
@@ -1769,6 +1771,8 @@ static const struct file_operations sgxfive_own_arm_fops = {
 int sgxfive_debug_own_apply(struct sgxfive *sgx, u8 *const bufs[])
 {
 	struct sgxfive_own *own = &sgx->own;
+	u8 digest[SHA256_DIGEST_SIZE];
+	struct sgx_own_arm arm;
 	struct sgx_own_blob b;
 	int ret;
 
@@ -1777,19 +1781,26 @@ int sgxfive_debug_own_apply(struct sgxfive *sgx, u8 *const bufs[])
 		*(u32 *)sgx->xt.buf[XB_OWNRES].va = SGX_OWN_MAGIC_DWORD;
 	if (!READ_ONCE(own->armed))
 		return 0;
+	/* the shared exit (a cont4 patch) only for the firmware file it was read from */
+	arm = own->arm;
+	arm.exit_index = 0;
+	if (sgx->blob) {
+		sha256(sgx->blob->data, sgx->blob->size, digest);
+		arm.exit_index = sgx_own_exit_index(digest);
+	}
 	ret = sgx_own_parse(own->blob, own->len, &b);
 	if (!ret && !sgx_fw_buffer(&sgx->fw, SGXFIVE_OWN_PDS_BUF))
 		ret = -ENOENT;
 	if (!ret)
-		ret = sgx_own_apply(&b, &own->arm, &sgx->fw, &sgx->layout, SGXFIVE_OWN_PDS_BUF,
+		ret = sgx_own_apply(&b, &arm, &sgx->fw, &sgx->layout, SGXFIVE_OWN_PDS_BUF,
 				    bufs[SGXFIVE_OWN_PDS_BUF],
 				    sgx_fw_buffer(&sgx->fw, SGXFIVE_OWN_PDS_BUF)->size,
 				    sgx->xt.buf[XB_OWNCODE].va, sgx->xt.buf[XB_OWNRES].addr);
 	if (ret)
 		drm_err(sgx->dev, "sgxfive: own task not armed: %d\n", ret);
 	else
-		drm_info(sgx->dev, "sgxfive: own task armed: slots %#x, trc %u (0: stock) (debugfs own_arm)\n",
-			 own->arm.slots, own->arm.trc);
+		drm_info(sgx->dev, "sgxfive: own task armed: slots %#x, trc %u (0: stock), exit %#x (0: unknown) (debugfs own_arm)\n",
+			 own->arm.slots, own->arm.trc, arm.exit_index);
 	return ret;
 }
 

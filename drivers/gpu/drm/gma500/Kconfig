@@ -35,6 +35,7 @@ config DRM_GMA500_KUNIT_TEST
 config DRM_GMA500_SGXFIVE_DEBUG
 	bool "Debug files for the GMA3600 SGX545 support"
 	depends on DRM_GMA500 && DEBUG_FS
+	select CRYPTO_LIB_SHA256
 	help
 	  Extra debugfs files in dri/N/sgx/ for work on the SGX545 firmware
 	  interface, such as a snapshot of every register the firmware uses

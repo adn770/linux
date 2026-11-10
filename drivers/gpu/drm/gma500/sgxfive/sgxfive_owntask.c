@@ -323,7 +323,7 @@ int sgx_own_verify(const struct sgx_own_blob *b, const char **why)
 			*why = SGX_OWN_WHY_PATCH_LIMM;
 			goto out;
 		}
-		if (pk == SGX_OWN_PATCH_CONT && slot > 3) {
+		if (pk == SGX_OWN_PATCH_CONT && slot > SGX_OWN_EXIT_SLOT) {
 			*why = SGX_OWN_WHY_PATCH_SLOT;
 			goto out;
 		}
@@ -395,6 +395,20 @@ out:
 }
 
 /* ---- the overlay ---------------------------------------------------------------------------- */
+/* sgx545_ukernel.fw as tools/fwcutter cuts it (format v3), the file E154 read the exit from */
+static const u8 sgx_own_exit_fw_sha256[32] = {
+	0x6a, 0x00, 0x26, 0x8e, 0x9d, 0x4c, 0xa5, 0x52,
+	0xc0, 0x2e, 0x52, 0x65, 0x1a, 0x42, 0xa2, 0xb4,
+	0xdb, 0x38, 0x87, 0xd7, 0xfe, 0x62, 0x6f, 0x20,
+	0x98, 0x88, 0x36, 0x99, 0x85, 0x16, 0x2b, 0x0a,
+};
+
+u32 sgx_own_exit_index(const u8 *digest)
+{
+	return memcmp(digest, sgx_own_exit_fw_sha256, sizeof(sgx_own_exit_fw_sha256)) ? 0 :
+	       SGX_OWN_EXIT_UK_INDEX;
+}
+
 int sgx_own_arm_parse(const char *line, struct sgx_own_arm *a)
 {
 	char buf[96], *tok, *p, *e;
@@ -479,6 +493,16 @@ int sgx_own_apply(const struct sgx_own_blob *b, const struct sgx_own_arm *a,
 	for (j = 0; j < a->nentry; j++)
 		if (a->entry[j] >= b->n_entry)
 			return -EINVAL;
+	/* the shared exit is known for one firmware file only */
+	for (i = 0; i < b->n_patch; i++) {
+		u16 pi;
+		u8 pk, slot;
+		u32 add;
+
+		sgx_own_patch_get(b, i, &pi, &pk, &slot, &add);
+		if (pk == SGX_OWN_PATCH_CONT && slot == SGX_OWN_EXIT_SLOT && !a->exit_index)
+			return -ENOENT;
+	}
 	/* check every armed slot before anything is written */
 	for (k = 0; k < n; k++) {
 		if (!(a->slots & 1u << k))
@@ -502,7 +526,13 @@ int sgx_own_apply(const struct sgx_own_blob *b, const struct sgx_own_arm *a,
 		u32 add, val;
 
 		sgx_own_patch_get(b, i, &pi, &pk, &slot, &add);	/* verified: cont has no addend */
-		if (pk == SGX_OWN_PATCH_CONT) {
+		if (pk == SGX_OWN_PATCH_CONT && slot == SGX_OWN_EXIT_SLOT) {
+			/* the exit's ukernel index plus the ukernel's offset from the code base */
+			ret = sgx_fw_patch_word(fw, l, pds_buf, tgt[0], SGX_OWN_INDEX, 0, &p);
+			if (ret)
+				return ret;
+			val = a->exit_index + p.old_index - tgt[0];
+		} else if (pk == SGX_OWN_PATCH_CONT) {
 			if (slot >= n)
 				return -ENOENT;
 			ret = sgx_fw_patch_word(fw, l, pds_buf, tgt[slot], SGX_OWN_INDEX, 0, &p);

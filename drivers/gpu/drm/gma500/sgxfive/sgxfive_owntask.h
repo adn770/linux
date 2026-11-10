@@ -31,6 +31,15 @@
 
 enum { SGX_OWN_PATCH_RES = 1, SGX_OWN_PATCH_CONT = 2 };
 
+/*
+ * A continue patch's slot 0 to 3 is the closed task a slot of PDS #13 started; slot 4 is the
+ * closed tasks' shared exit, at a ukernel index read from one firmware file only (E154): it is
+ * resolved for that file alone (sgx_own_exit_index()), and an arm that needs it on any other file
+ * is refused.
+ */
+#define SGX_OWN_EXIT_SLOT	4
+#define SGX_OWN_EXIT_UK_INDEX	0x1974
+
 struct sgx_own_blob {
 	u16 n_insn, n_patch, n_entry;
 	const u8 *insn;
@@ -68,6 +77,8 @@ struct sgx_own_arm {
 	unsigned int nentry;
 	u8 trc;				/* TRC field: units of 4 temporaries; 0: the stock word's */
 	bool trc_hazard;
+	u32 exit_index;			/* the shared exit's ukernel index, set by the load (not by
+					 * own_arm): 0, unknown, refuses a cont4 patch */
 };
 
 /* the debug group's own-task state, in struct sgxfive */
@@ -80,6 +91,9 @@ struct sgxfive_own {
 
 struct sgx_fw;
 struct sgx_fw_layout;
+
+/* SGX_OWN_EXIT_UK_INDEX for the firmware file of that sha256 digest, else 0 */
+u32 sgx_own_exit_index(const u8 *digest);
 
 /* "slots=<mask> entry=<n>,<n>.. [trc=<t>] [trc_hazard=1]" */
 int sgx_own_arm_parse(const char *line, struct sgx_own_arm *a);
