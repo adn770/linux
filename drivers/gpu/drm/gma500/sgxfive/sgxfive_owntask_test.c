@@ -7,6 +7,7 @@
  * verifier, and test_host_verifier.py runs this file's verifier on the host against it.
  */
 #include <kunit/test.h>
+#include <linux/bits.h>
 #include <linux/module.h>
 #include <linux/string.h>
 
@@ -164,10 +165,10 @@ static void sgxfive_owntask_test_deny_rows(struct kunit *test)
 /* a blob of the given words, no patch, entry 0 */
 static int verify_words(const u64 *w, unsigned int n, const char **why)
 {
-	u8 buf[16 + 8 * 4 + 2];
+	u8 buf[16 + 8 * 8 + 2];
 	unsigned int i;
 
-	if (n > 4)
+	if (n > 8)
 		return -E2BIG;
 	memset(buf, 0, sizeof(buf));
 	memcpy(buf, "SGXOWN01", 8);
@@ -196,6 +197,34 @@ static void sgxfive_owntask_test_mov_pa(struct kunit *test)
 		} else {
 			KUNIT_EXPECT_EQ_MSG(test, ret, -EPERM, "pa%u", n);
 			KUNIT_EXPECT_STREQ_MSG(test, why, SGX_OWN_WHY_PA, "pa%u", n);
+		}
+	}
+}
+
+#define OWN_EXIT_CFI	0xf843b300a0000180ULL	/* cfi.global #3, #0, #3 */
+#define OWN_EXIT_PHAS	0xfa44070000000000ULL	/* phas #0, #0, pixel, end, parallel */
+
+/*
+ * The closed tasks' shared exit: a copy of its five words is accepted, and of its cfi and phas
+ * only those two exact words (no bit of either may change)
+ */
+static void sgxfive_owntask_test_exit_words(struct kunit *test)
+{
+	static const u64 tail[] = { OWN_EXIT_CFI, 0xf820000000000000ULL /* idf drc0, bif */,
+				    0xf920000000000000ULL /* wdf drc0 */, OWN_EXIT_PHAS,
+				    OWN_NOP_END };
+	static const u64 word[] = { OWN_EXIT_CFI, OWN_EXIT_PHAS };
+	const char *why = "";
+	unsigned int i, b;
+
+	KUNIT_EXPECT_EQ_MSG(test, verify_words(tail, ARRAY_SIZE(tail), &why), 0, "%s", why);
+	for (i = 0; i < ARRAY_SIZE(word); i++) {
+		for (b = 0; b < 64; b++) {
+			u64 w[2] = { word[i] ^ BIT_ULL(b), OWN_NOP_END };
+
+			why = "";
+			KUNIT_EXPECT_EQ_MSG(test, verify_words(w, 2, &why), -EPERM,
+					    "0x%016llx bit %u", word[i], b);
 		}
 	}
 }
@@ -447,6 +476,7 @@ static struct kunit_case sgxfive_owntask_test_cases[] = {
 	KUNIT_CASE(sgxfive_owntask_test_register_lists),
 	KUNIT_CASE(sgxfive_owntask_test_deny_rows),
 	KUNIT_CASE(sgxfive_owntask_test_mov_pa),
+	KUNIT_CASE(sgxfive_owntask_test_exit_words),
 	KUNIT_CASE(sgxfive_owntask_test_parse),
 	KUNIT_CASE(sgxfive_owntask_test_apply_only_armed_dwords),
 	KUNIT_CASE(sgxfive_owntask_test_apply_default_trc_and_entry),

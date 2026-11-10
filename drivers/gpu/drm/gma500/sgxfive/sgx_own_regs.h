@@ -79,6 +79,8 @@ static const struct { u64 mask, value; u8 kind; } sgx_own_forms[] __maybe_unused
 	{ 0xfffbffffffffffffULL, 0xf800014000000000ULL, SGX_OWN_NOP },	/* nop */
 	{ 0xfffffffeffffffffULL, 0xf820000000000000ULL, SGX_OWN_PLAIN },	/* idf */
 	{ 0xfffffffeffffffffULL, 0xf920000000000000ULL, SGX_OWN_PLAIN },	/* wdf */
+	{ 0xffffffffffffffffULL, 0xf843b300a0000180ULL, SGX_OWN_PLAIN },	/* cfi-exit */
+	{ 0xffffffffffffffffULL, 0xfa44070000000000ULL, SGX_OWN_PLAIN },	/* phas-exit */
 	{ 0xf8fffffffffc0000ULL, 0xf800004000000000ULL, SGX_OWN_BR },	/* br */
 	{ 0xffffffffffffffffULL, 0xf800008000000000ULL, SGX_OWN_LAPC },	/* lapc */
 	{ 0xfffefcf3cfff4000ULL, 0x48081081000c0000ULL, SGX_OWN_PLAIN },	/* alu-test */
