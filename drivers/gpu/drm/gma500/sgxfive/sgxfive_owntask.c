@@ -52,6 +52,8 @@ static unsigned int own_mov_pclink_src(u64 w)
 	return w >> 7 & 0x7f;
 }
 
+#define SGX_OWN_PA_FIRST	2		/* the pa registers a mov may write */
+#define SGX_OWN_PA_LAST		4
 #define OWN_TRACKED	32		/* the registers a base may name: the stock 32 temporaries */
 #define OWN_TOP		0xffff		/* a register of the base analysis that holds no page offset */
 
@@ -154,7 +156,10 @@ struct own_scan {
 	u16 st[SGX_OWN_MAX_INSNS][OWN_TRACKED];
 };
 
-/* the state after word i: its destination registers become unknown, a patched limm a page offset */
+/*
+ * the state after word i: its destination registers become unknown, a patched limm a page offset;
+ * a mov to a pa register writes no temporary
+ */
 static void own_effects(const struct own_scan *s, u64 w, unsigned int i, u16 *st)
 {
 	unsigned int d = own_dst(w), r;
@@ -295,6 +300,13 @@ int sgx_own_verify(const struct sgx_own_blob *b, const char **why)
 			t = own_br_target(i, w);
 			if (t >= b->n_insn) {
 				*why = SGX_OWN_WHY_BR_OUT;
+				goto out;
+			}
+			break;
+		case SGX_OWN_MOVPA:
+			/* pa0 and pa1 are what the closed task reads: only pa2 to pa4 */
+			if (own_dst(w) < SGX_OWN_PA_FIRST || own_dst(w) > SGX_OWN_PA_LAST) {
+				*why = SGX_OWN_WHY_PA;
 				goto out;
 			}
 			break;

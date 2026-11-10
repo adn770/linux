@@ -161,6 +161,45 @@ static void sgxfive_owntask_test_deny_rows(struct kunit *test)
 	}
 }
 
+/* a blob of the given words, no patch, entry 0 */
+static int verify_words(const u64 *w, unsigned int n, const char **why)
+{
+	u8 buf[16 + 8 * 4 + 2];
+	unsigned int i;
+
+	if (n > 4)
+		return -E2BIG;
+	memset(buf, 0, sizeof(buf));
+	memcpy(buf, "SGXOWN01", 8);
+	put_unaligned_le16(n, buf + 8);
+	put_unaligned_le16(1, buf + 12);
+	for (i = 0; i < n; i++)
+		put_unaligned_le64(w[i], buf + 16 + 8 * i);
+	return verify_data(buf, 16 + 8 * n + 2, why);
+}
+
+#define OWN_NOP_END	0xf804014000000000ULL
+#define OWN_MOV_PA_R1	0x2801100220000080ULL	/* mov pa0, r1 */
+
+/* a mov to pa2, pa3 or pa4 is accepted; to any other pa refused for its reason */
+static void sgxfive_owntask_test_mov_pa(struct kunit *test)
+{
+	unsigned int n;
+
+	for (n = 0; n < 128; n++) {
+		u64 w[2] = { OWN_MOV_PA_R1 | (u64)n << 21, OWN_NOP_END };
+		const char *why = "";
+		int ret = verify_words(w, 2, &why);
+
+		if (n >= 2 && n <= 4) {
+			KUNIT_EXPECT_EQ_MSG(test, ret, 0, "pa%u: %s", n, why);
+		} else {
+			KUNIT_EXPECT_EQ_MSG(test, ret, -EPERM, "pa%u", n);
+			KUNIT_EXPECT_STREQ_MSG(test, why, SGX_OWN_WHY_PA, "pa%u", n);
+		}
+	}
+}
+
 static void sgxfive_owntask_test_parse(struct kunit *test)
 {
 	struct sgx_own_blob b;
@@ -407,6 +446,7 @@ static struct kunit_case sgxfive_owntask_test_cases[] = {
 	KUNIT_CASE(sgxfive_owntask_test_clock_gate),
 	KUNIT_CASE(sgxfive_owntask_test_register_lists),
 	KUNIT_CASE(sgxfive_owntask_test_deny_rows),
+	KUNIT_CASE(sgxfive_owntask_test_mov_pa),
 	KUNIT_CASE(sgxfive_owntask_test_parse),
 	KUNIT_CASE(sgxfive_owntask_test_apply_only_armed_dwords),
 	KUNIT_CASE(sgxfive_owntask_test_apply_default_trc_and_entry),

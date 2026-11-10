@@ -12,7 +12,7 @@
 #include <linux/types.h>
 
 enum sgx_own_kind {
-	SGX_OWN_PLAIN, SGX_OWN_LDR, SGX_OWN_STR, SGX_OWN_BR, SGX_OWN_LAPC, SGX_OWN_MOVLIMM, SGX_OWN_MOVREG, SGX_OWN_MOVPCLINK, SGX_OWN_MOVFROMPC, SGX_OWN_NOP, SGX_OWN_IMA32, SGX_OWN_LOAD_ABS, SGX_OWN_STORE_ABS, SGX_OWN_DENY,
+	SGX_OWN_PLAIN, SGX_OWN_LDR, SGX_OWN_STR, SGX_OWN_BR, SGX_OWN_LAPC, SGX_OWN_MOVLIMM, SGX_OWN_MOVREG, SGX_OWN_MOVPCLINK, SGX_OWN_MOVFROMPC, SGX_OWN_NOP, SGX_OWN_IMA32, SGX_OWN_LOAD_ABS, SGX_OWN_STORE_ABS, SGX_OWN_DENY, SGX_OWN_MOVPA,
 };
 
 #define SGX_OWN_WHY_CLOCK "clock gate register"
@@ -32,6 +32,7 @@ enum sgx_own_kind {
 #define SGX_OWN_WHY_LAST "the last word does not end the task"
 #define SGX_OWN_WHY_ENTRY "entry outside the blob or inside a continue triple"
 #define SGX_OWN_WHY_BASE "load or store base is not the results page"
+#define SGX_OWN_WHY_PA "mov to a pa register not on the list"
 
 static const u16 sgx_own_clockgate_regs[] __maybe_unused = { 0, 1, 2, 3 };
 static const u16 sgx_own_str_regs[] __maybe_unused = { 69, 77, 517, 670, 691 };
@@ -72,6 +73,7 @@ static const u16 sgx_own_deny[][2] __maybe_unused = {
 static const struct { u64 mask, value; u8 kind; } sgx_own_forms[] __maybe_unused = {
 	{ 0xfffc000ff0000000ULL, 0xfc20000000000000ULL, SGX_OWN_MOVLIMM },	/* mov-limm */
 	{ 0xfff7ffff301fc07fULL, 0x2801100020000000ULL, SGX_OWN_MOVREG },	/* mov-reg */
+	{ 0xffffffff301fc07fULL, 0x2801100220000000ULL, SGX_OWN_MOVPA },	/* mov-reg-pa */
 	{ 0xffffffffffffc07fULL, 0xf80000c000000000ULL, SGX_OWN_MOVPCLINK },	/* mov-to-pclink */
 	{ 0xfffffffff01fffffULL, 0xf800010000000000ULL, SGX_OWN_MOVFROMPC },	/* mov-from-pclink */
 	{ 0xfffbffffffffffffULL, 0xf800014000000000ULL, SGX_OWN_NOP },	/* nop */
