@@ -34,7 +34,7 @@ enum sgx_own_kind {
 #define SGX_OWN_WHY_BASE "load or store base is not the results page"
 
 static const u16 sgx_own_clockgate_regs[] __maybe_unused = { 0, 1, 2, 3 };
-static const u16 sgx_own_str_regs[] __maybe_unused = { 69, 77, 517, 670 };
+static const u16 sgx_own_str_regs[] __maybe_unused = { 69, 77, 517, 670, 691 };
 static const u16 sgx_own_ldr_regs[] __maybe_unused = { 7, 8, 81, 517, 670 };
 
 /* every register offset a deny row names, for the tests: lo, hi */
@@ -60,7 +60,8 @@ static const u16 sgx_own_deny[][2] __maybe_unused = {
 	{ 0x0a58, 0x0a70 },
 	{ 0x0aa4, 0x0aa8 },
 	{ 0x0ab8, 0x0ab8 },
-	{ 0x0ac4, 0x0aec },
+	{ 0x0ac4, 0x0ac8 },
+	{ 0x0ad0, 0x0aec },
 	{ 0x0b0c, 0x0b20 },
 	{ 0x0b80, 0x0b98 },
 	{ 0x0c00, 0x0cfc },

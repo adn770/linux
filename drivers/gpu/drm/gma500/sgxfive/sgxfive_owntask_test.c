@@ -117,6 +117,9 @@ static void sgxfive_owntask_test_register_lists(struct kunit *test)
 	KUNIT_EXPECT_TRUE(test, sgx_own_reg_ok(0x0134 / 4, true));
 	KUNIT_EXPECT_FALSE(test, sgx_own_reg_ok(0x0114 / 4, false));
 	KUNIT_EXPECT_FALSE(test, sgx_own_reg_ok(0x0134 / 4, false));
+	/* and of the EDM timer, which the closed tick handler writes */
+	KUNIT_EXPECT_TRUE(test, sgx_own_reg_ok(0x0acc / 4, true));
+	KUNIT_EXPECT_FALSE(test, sgx_own_reg_ok(0x0acc / 4, false));
 }
 
 static bool own_in_deny_row(unsigned int off)
@@ -148,6 +151,13 @@ static void sgxfive_owntask_test_deny_rows(struct kunit *test)
 
 		KUNIT_EXPECT_EQ_MSG(test, own_in_deny_row(off), !clear, "0x%04x", off);
 		KUNIT_EXPECT_EQ_MSG(test, sgx_own_reg_ok(off / 4, true), clear, "str 0x%04x", off);
+	}
+	/* the kicker, the kicks and the PDS invalidates: all denied, but the str-only timer */
+	for (off = 0x0ac4; off <= 0x0aec; off += 4) {
+		bool timer = off == 0x0acc;
+
+		KUNIT_EXPECT_EQ_MSG(test, own_in_deny_row(off), !timer, "0x%04x", off);
+		KUNIT_EXPECT_EQ_MSG(test, sgx_own_reg_ok(off / 4, true), timer, "str 0x%04x", off);
 	}
 }
 
