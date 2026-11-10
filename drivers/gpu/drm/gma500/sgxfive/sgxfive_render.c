@@ -474,15 +474,31 @@ static void sgxfive_render_tdfill(struct sgxfive_ctx *ctx)
 		 f.ramp ? "ramp from" : "with", f.value);
 }
 
-/* Before the kick: the armed pokes of the context's structures. */
+static_assert(SGXFIVE_KPOKE_PAR_PAGES <= CPU_FIRST);	/* pages of the PB itself */
+
+/*
+ * Before the kick: the armed pokes of the context's structures. The first
+ * pages of the parameter buffer are mapped for a par poke only, and only on
+ * the context's own PB (one shared with a sibling keeps the poke armed).
+ */
 static void sgxfive_render_poke(struct sgxfive_ctx *ctx)
 {
+	struct sgxfive_render *r = ctx->render;
 	u32 *w[SGXFIVE_KPOKE_SPACES];
+	void *par = NULL;
 
 	sgxfive_render_tdfill(ctx);
 	render_spaces(ctx, w);
 	w[SGXFIVE_KPOKE_RD] = NULL;	/* poked in the job's image instead */
+	if (r && !r->pb_shared && sgxfive_kpoke_armed(ctx->sgx, SGXFIVE_KPOKE_PAR))
+		par = vmap(r->param, SGXFIVE_KPOKE_PAR_PAGES, VM_MAP,
+			   pgprot_writecombine(PAGE_KERNEL));
+	w[SGXFIVE_KPOKE_PAR] = par;
 	sgxfive_kpoke_run(ctx->sgx, w);
+	if (par) {
+		wmb();	/* the write-combined pages, before the kick */
+		vunmap(par);
+	}
 }
 
 /*

@@ -18,11 +18,13 @@
  *          its flags, priority, page directory, client CCB and control block
  *   bg:N   word N of a render's background object (SGX_XFER_BGOBJ_DWORDS):
  *          the three PDS state words, six zero words, the rectangle's vertices
+ *   par:N  word N of a render context's parameter buffer, from its first page,
+ *          the first SGXFIVE_KPOKE_PAR_PAGES pages only (what the TA wrote)
  *
  * SPACE:N=V sets the word, SPACE:N^=V flips the bits of V in what the kernel
  * built. A poke applies once, to the next job of its kind (ta and rd to the
  * next render submitted, tq to the next transfer submitted that is not a
- * dummy; ctx, rtds, pb, kw and bg to the next render the kernel kicks, after
+ * dummy; ctx, rtds, pb, kw, bg and par to the next render the kernel kicks, after
  * it has written its own words there (the EDM then writes bg words 0-2 again
  * at the kick, so a poke there is lost, and a bg poke is lost too when the
  * render is replayed after a recovery, which rebuilds the object unpoked); th
@@ -59,11 +61,13 @@ enum sgxfive_kpoke_space {
 	SGXFIVE_KPOKE_KW,
 	SGXFIVE_KPOKE_TH,
 	SGXFIVE_KPOKE_BG,
+	SGXFIVE_KPOKE_PAR,
 	SGXFIVE_KPOKE_SPACES,
 };
 
 #define SGXFIVE_KPOKE_MAX	16	/* armed at once */
 #define SGXFIVE_KPOKE_KW_WORDS	4	/* access, pending, RT status, bgpri */
+#define SGXFIVE_KPOKE_PAR_PAGES	16	/* the parameter buffer's pages par reaches */
 #define SGXFIVE_KPOKE_LINE	32	/* "tq:305^=0xffffffff", a NUL, room */
 
 struct sgxfive_kpoke {
@@ -120,6 +124,8 @@ int sgxfive_kpoke_write(struct sgxfive *sgx, char *buf);
 void sgxfive_kpoke_job(struct sgxfive *sgx, u8 *img, bool render);
 /* Before a render's kick, on its context's structures: the armed pokes of theirs. */
 void sgxfive_kpoke_run(struct sgxfive *sgx, u32 *const words[SGXFIVE_KPOKE_SPACES]);
+/* Whether a poke of the space is armed (the par words are mapped only then). */
+bool sgxfive_kpoke_armed(struct sgxfive *sgx, u32 space);
 
 /* The registers debugfs kreg may write, sorted. */
 #define SGXFIVE_KREG_COUNT	10

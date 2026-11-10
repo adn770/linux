@@ -6,6 +6,7 @@
  */
 #include <linux/errno.h>
 #include <linux/kernel.h>
+#include <linux/sizes.h>
 #include <linux/spinlock.h>
 #include <linux/string.h>
 #include <linux/unaligned.h>
@@ -28,7 +29,7 @@ static const char *const sgxfive_kpoke_names[SGXFIVE_KPOKE_SPACES] = {
 	[SGXFIVE_KPOKE_TA] = "ta", [SGXFIVE_KPOKE_RD] = "rd", [SGXFIVE_KPOKE_TQ] = "tq",
 	[SGXFIVE_KPOKE_CTX] = "ctx", [SGXFIVE_KPOKE_RTDS] = "rtds", [SGXFIVE_KPOKE_PB] = "pb",
 	[SGXFIVE_KPOKE_KW] = "kw", [SGXFIVE_KPOKE_TH] = "th",
-	[SGXFIVE_KPOKE_BG] = "bg",
+	[SGXFIVE_KPOKE_BG] = "bg", [SGXFIVE_KPOKE_PAR] = "par",
 };
 
 /*
@@ -61,6 +62,8 @@ u32 sgxfive_kpoke_words(u32 space)
 		return SGX_XFER_CTX_SIZE / 4;
 	case SGXFIVE_KPOKE_BG:
 		return SGX_XFER_BGOBJ_DWORDS;
+	case SGXFIVE_KPOKE_PAR:
+		return SGXFIVE_KPOKE_PAR_PAGES * SZ_4K / 4;
 	}
 	return 0;
 }
@@ -237,6 +240,18 @@ void sgxfive_kpoke_run(struct sgxfive *sgx, u32 *const words[SGXFIVE_KPOKE_SPACE
 		n = sgxfive_kpoke_take_run(&sgx->kpokes, words, done);
 	spin_unlock(&sgx->kpoke_lock);
 	sgxfive_kpoke_log(sgx, done, n);
+}
+
+bool sgxfive_kpoke_armed(struct sgxfive *sgx, u32 space)
+{
+	bool armed = false;
+	unsigned int i;
+
+	spin_lock(&sgx->kpoke_lock);
+	for (i = 0; i < sgx->kpokes.n; i++)
+		armed |= sgx->kpokes.p[i].space == space;
+	spin_unlock(&sgx->kpoke_lock);
+	return armed;
 }
 
 void sgxfive_kpoke_xfer(struct sgxfive *sgx, u32 *hw)

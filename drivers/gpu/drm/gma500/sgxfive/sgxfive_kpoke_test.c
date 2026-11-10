@@ -50,6 +50,8 @@ static void sgxfive_kpoke_test_words(struct kunit *test)
 	/* A transfer context's HW context. */
 	KUNIT_EXPECT_EQ(test, sgxfive_kpoke_words(SGXFIVE_KPOKE_TH), (u32)SGX_XFER_CTX_SIZE / 4);
 	KUNIT_EXPECT_EQ(test, sgxfive_kpoke_words(SGXFIVE_KPOKE_TH), 45u);
+	/* The first 16 pages of a render context's parameter buffer. */
+	KUNIT_EXPECT_EQ(test, sgxfive_kpoke_words(SGXFIVE_KPOKE_PAR), 0x4000u);
 	KUNIT_EXPECT_EQ(test, sgxfive_kpoke_words(SGXFIVE_KPOKE_SPACES), 0u);
 	/* The kernel's words are contiguous, in kw order. */
 	KUNIT_EXPECT_EQ(test, SGXFIVE_RCTX_PENDING_OFF, SGXFIVE_RCTX_ACCESS_OFF + 4);
@@ -356,6 +358,72 @@ static void sgxfive_kpoke_test_bg(struct kunit *test)
 	/* A bg poke is not an image poke: a render's image leaves it armed. */
 	KUNIT_EXPECT_EQ(test, sgxfive_kpoke_take(k, img, true, done), 0u);
 	KUNIT_EXPECT_EQ(test, k->n, 1u);
+}
+
+/*
+ * par pokes (a render context's parameter buffer, its first 16 pages):
+ * parsed and ranged by dword, applied once, in order, to the words given at
+ * the render's kick, left armed with no words given and by a render's image,
+ * the others staying armed; sgxfive_kpoke_armed() says whether one is.
+ */
+static void sgxfive_kpoke_test_par(struct kunit *test)
+{
+	struct sgxfive_kpokes *k = kunit_kzalloc(test, sizeof(*k), GFP_KERNEL);
+	struct sgxfive *sgx = kunit_kzalloc(test, sizeof(*sgx), GFP_KERNEL);
+	u32 *par = kunit_kzalloc(test, SGXFIVE_KPOKE_PAR_PAGES * SZ_4K, GFP_KERNEL);
+	u8 *img = kunit_kzalloc(test, SGX_XFER_CMD_SIZE, GFP_KERNEL);
+	u32 ctx[17] = { };
+	u32 *words[SGXFIVE_KPOKE_SPACES] = { [SGXFIVE_KPOKE_PAR] = par };
+	static const char *const lines[] = {
+		"par:11=0", "ctx:1=7", "par:0x3fff=0xffffffff", "par:12^=0x10", "par:11^=0x5",
+	};
+	struct sgxfive_kpoke p[ARRAY_SIZE(lines)], done[SGXFIVE_KPOKE_MAX];
+	char line[SGXFIVE_KPOKE_LINE];
+	unsigned int i;
+
+	KUNIT_ASSERT_NOT_NULL(test, k);
+	KUNIT_ASSERT_NOT_NULL(test, sgx);
+	KUNIT_ASSERT_NOT_NULL(test, par);
+	KUNIT_ASSERT_NOT_NULL(test, img);
+	KUNIT_EXPECT_EQ(test, sgxfive_kpoke_parse("par:0=1", &p[0]), 0);
+	KUNIT_EXPECT_EQ(test, p[0].space, (u32)SGXFIVE_KPOKE_PAR);
+	KUNIT_EXPECT_EQ(test, sgxfive_kpoke_parse("par:0x4000=1", &p[0]), -ERANGE);
+	KUNIT_EXPECT_EQ(test, sgxfive_kpoke_parse("par:16383^=0xffffffff", &p[0]), 0);
+	sgxfive_kpoke_format(&p[0], line, sizeof(line));
+	KUNIT_EXPECT_STREQ(test, line, "par:16383^=0xffffffff");
+	KUNIT_EXPECT_EQ(test, sgxfive_kpoke_parse("pa:0=1", &p[0]), -EINVAL);
+
+	for (i = 0; i < ARRAY_SIZE(lines); i++)
+		KUNIT_ASSERT_EQ(test, sgxfive_kpoke_parse(lines[i], &p[i]), 0);
+	KUNIT_ASSERT_EQ(test, sgxfive_kpoke_arm(k, p, ARRAY_SIZE(p)), 0);
+	par[11] = 0x26;
+	par[12] = 0x01;
+	/* not an image poke */
+	KUNIT_EXPECT_EQ(test, sgxfive_kpoke_take(k, img, true, done), 0u);
+	KUNIT_EXPECT_EQ(test, k->n, 5u);
+	/* the par words given, no ctx: the four par pokes, in order */
+	KUNIT_EXPECT_EQ(test, sgxfive_kpoke_take_run(k, words, done), 4u);
+	KUNIT_EXPECT_EQ(test, par[11], 0x5u);		/* set to 0, then flipped */
+	KUNIT_EXPECT_EQ(test, par[12], 0x11u);
+	KUNIT_EXPECT_EQ(test, par[0x3fff], 0xffffffffu);
+	KUNIT_EXPECT_EQ(test, par[13], 0u);
+	KUNIT_EXPECT_EQ(test, k->n, 1u);
+	KUNIT_EXPECT_EQ(test, k->p[0].space, (u32)SGXFIVE_KPOKE_CTX);
+	/* no par words: armed */
+	KUNIT_ASSERT_EQ(test, sgxfive_kpoke_arm(k, p, 1), 0);
+	words[SGXFIVE_KPOKE_PAR] = NULL;
+	words[SGXFIVE_KPOKE_CTX] = ctx;
+	KUNIT_EXPECT_EQ(test, sgxfive_kpoke_take_run(k, words, done), 1u);
+	KUNIT_EXPECT_EQ(test, ctx[1], 7u);
+	KUNIT_EXPECT_EQ(test, k->n, 1u);
+	KUNIT_EXPECT_EQ(test, k->p[0].space, (u32)SGXFIVE_KPOKE_PAR);
+
+	/* the debugfs side */
+	spin_lock_init(&sgx->kpoke_lock);
+	KUNIT_EXPECT_FALSE(test, sgxfive_kpoke_armed(sgx, SGXFIVE_KPOKE_PAR));
+	sgx->kpokes = *k;
+	KUNIT_EXPECT_TRUE(test, sgxfive_kpoke_armed(sgx, SGXFIVE_KPOKE_PAR));
+	KUNIT_EXPECT_FALSE(test, sgxfive_kpoke_armed(sgx, SGXFIVE_KPOKE_BG));
 }
 
 /*
@@ -1191,6 +1259,7 @@ static struct kunit_case sgxfive_kpoke_test_cases[] = {
 	KUNIT_CASE(sgxfive_kpoke_test_render),
 	KUNIT_CASE(sgxfive_kpoke_test_run),
 	KUNIT_CASE(sgxfive_kpoke_test_bg),
+	KUNIT_CASE(sgxfive_kpoke_test_par),
 	KUNIT_CASE(sgxfive_kpoke_test_xfer),
 	KUNIT_CASE(sgxfive_kpoke_test_submit_xfer),
 	KUNIT_CASE(sgxfive_kpoke_test_write),
