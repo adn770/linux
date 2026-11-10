@@ -112,6 +112,21 @@ static void sgxfive_owntask_test_register_lists(struct kunit *test)
 	}
 	KUNIT_EXPECT_FALSE(test, sgx_own_reg_ok(1000, false));	/* default deny */
 	KUNIT_EXPECT_FALSE(test, sgx_own_reg_ok(0x3fff, true));
+	/* str, never ldr, of the two host clear registers (CLEAR2, CLEAR) */
+	KUNIT_EXPECT_TRUE(test, sgx_own_reg_ok(0x0114 / 4, true));
+	KUNIT_EXPECT_TRUE(test, sgx_own_reg_ok(0x0134 / 4, true));
+	KUNIT_EXPECT_FALSE(test, sgx_own_reg_ok(0x0114 / 4, false));
+	KUNIT_EXPECT_FALSE(test, sgx_own_reg_ok(0x0134 / 4, false));
+}
+
+static bool own_in_deny_row(unsigned int off)
+{
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(sgx_own_deny); i++)
+		if (sgx_own_deny[i][0] <= off && off <= sgx_own_deny[i][1])
+			return true;
+	return false;
 }
 
 /* the deny rows: no offset of any range may be stored, and only CR_TIMER of them read */
@@ -126,6 +141,13 @@ static void sgxfive_owntask_test_deny_rows(struct kunit *test)
 				KUNIT_EXPECT_FALSE_MSG(test, sgx_own_reg_ok(off / 4, false),
 						       "ldr 0x%04x", off);
 		}
+	}
+	/* the event block: every register a deny row, but the str-only clear registers */
+	for (off = 0x0110; off <= 0x0144; off += 4) {
+		bool clear = off == 0x0114 || off == 0x0134;
+
+		KUNIT_EXPECT_EQ_MSG(test, own_in_deny_row(off), !clear, "0x%04x", off);
+		KUNIT_EXPECT_EQ_MSG(test, sgx_own_reg_ok(off / 4, true), clear, "str 0x%04x", off);
 	}
 }
 
