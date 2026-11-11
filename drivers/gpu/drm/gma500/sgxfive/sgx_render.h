@@ -46,6 +46,17 @@
 #define SGX_RENDER_CMD_TAREGS	0x238	/* hw_ta_registers */
 #define SGX_RENDER_CMD_3DREGUPD	0x2a8
 
+/*
+ * TE_AA bits 31 and 30: either set is a multisampled render (0xe0000000 at
+ * 4x), whose tiling engine writes four arrays of region headers (E788, E824).
+ */
+#define SGX_RENDER_TEAA_MS	0xc0000000u
+
+static inline bool sgx_render_te_aa_ms(u32 te_aa)
+{
+	return te_aa & SGX_RENDER_TEAA_MS;
+}
+
 /* The TA registers, from SGX_RENDER_CMD_TAREGS. */
 #define SGX_RENDER_TA_TEAA	0x00
 #define SGX_RENDER_TA_TEMTILE1	0x04
@@ -271,6 +282,12 @@ int sgx_render_check_max(u32 max_w, u32 max_h);
  * (SGX_RENDER_TD_LIMIT; _in: limit bytes), with *t untouched
  */
 bool sgx_render_rgn_arrays_ok(u32 arrays);
+/*
+ * The arrays of a new render context: setting (debugfs render_rgn_arrays) when
+ * it is 1, 2 or 4 (forced), else automatic: four for a context made for 4x
+ * targets (aa4), one for any other.
+ */
+u32 sgx_render_rgn_arrays(u32 setting, bool aa4);
 int sgx_render_tadata_layout(struct sgx_render_tadata *t, u32 max_w, u32 max_h, u32 arrays);
 int sgx_render_tadata_layout_in(struct sgx_render_tadata *t, u32 max_w, u32 max_h, u32 arrays,
 				u32 limit);

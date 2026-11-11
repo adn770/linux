@@ -80,6 +80,8 @@ struct sgxfive_ctx {
 	u32 type;			/* enum drm_sgxfive_ctx_type */
 	struct sgxfive_render *render;	/* render contexts only */
 	u32 max_width, max_height;	/* render: the largest target it takes */
+	bool aa4;			/* render: DRM_SGXFIVE_CTX_RENDER_AA_4X */
+	bool aa_ms;			/* render: its jobs may set TE_AA bits 31:30 */
 	struct sgxfive_vm *vm;		/* holds a reference */
 	u32 pd_phys;			/* the VM's page directory */
 	struct sgxfive_client *client;	/* holds a reference */

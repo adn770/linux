@@ -108,7 +108,7 @@ static int sgxfive_submit_check_render(struct sgxfive_submit *s,
 		return -EINVAL;
 	ret = copy_elem(&s->rc, sizeof(s->rc), u64_to_user_ptr(d->cmd_stream), len);
 	return ret ? ret : sgxfive_render_check(&s->rc, ctx->max_width,
-						ctx->max_height);
+						ctx->max_height, ctx->aa_ms);
 }
 
 static int sgxfive_submit_check(struct sgxfive_submit *s, struct sgxfive_ctx *ctx)

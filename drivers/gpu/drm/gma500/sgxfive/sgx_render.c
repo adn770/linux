@@ -160,10 +160,18 @@ bool sgx_render_rgn_arrays_ok(u32 arrays)
 	return arrays == 1 || arrays == 2 || arrays == 4;
 }
 
+u32 sgx_render_rgn_arrays(u32 setting, bool aa4)
+{
+	if (sgx_render_rgn_arrays_ok(setting))
+		return setting;
+	return aa4 ? 4 : 1;
+}
+
 /*
  * With arrays > 1 the region-header buffer is that many times the layout's
- * (a test of how many arrays the hardware writes); the ZLS buffer after it
- * keeps one array's size.
+ * (four for a 4x context, where the TA writes four arrays: E788, E824); the
+ * ZLS buffer after it keeps one array's size (whether 4x needs more is not
+ * known).
  */
 int sgx_render_tadata_layout_in(struct sgx_render_tadata *t, u32 max_w, u32 max_h, u32 arrays,
 				u32 limit)

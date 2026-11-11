@@ -120,13 +120,17 @@ int sgxfive_job_check(const struct drm_sgxfive_transfer_cmd *regs)
  * The checks on a render command: the VDM stream and the pixel-event program
  * in the client's heaps, aligned (a render VM aliases the firmware, so a
  * pointer into the kernel heaps would reach it), the render target within the
- * context's maximum, max_w x max_h, for which its tiling buffers are sized.
+ * context's maximum, max_w x max_h, for which its tiling buffers are sized, and
+ * a multisampled TE_AA only where the context may take one (ms: made for 4x
+ * targets, or with its region-header arrays forced by debugfs).
  */
 int sgxfive_render_check(const struct drm_sgxfive_render_cmd *c, u32 max_w,
-			 u32 max_h)
+			 u32 max_h, bool ms)
 {
 	if (c->vdm_ctrl_stream_base & 3 || !in_user_heap(c->vdm_ctrl_stream_base) ||
 	    c->event_pixel_pds_exec & 0xf || !in_user_heap(c->event_pixel_pds_exec))
+		return -EINVAL;
+	if (!ms && sgx_render_te_aa_ms(c->te_aa))
 		return -EINVAL;
 	return sgx_render_check_size(c, max_w, max_h);
 }

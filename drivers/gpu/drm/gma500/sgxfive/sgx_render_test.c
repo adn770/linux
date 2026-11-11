@@ -495,6 +495,49 @@ static void sgx_render_test_tadata_arrays(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, (u32)SGX_RENDER_TD_LIMIT, (u32)SZ_4M);
 }
 
+/*
+ * How many region-header arrays a new render context gets: debugfs
+ * render_rgn_arrays at 1, 2 or 4 forces that count; any other value (0, the
+ * default) is automatic, four for a context made for 4x targets
+ * (DRM_SGXFIVE_CTX_RENDER_AA_4X) and one for any other, as before. A job's
+ * TE_AA with bit 31 or 30 set is a multisampled one (0xe0000000 at 4x).
+ */
+static void sgx_render_test_rgn_arrays(struct kunit *test)
+{
+	static const struct { u32 setting; bool aa4; u32 arrays; } want[] = {
+		{ 0, false, 1 }, { 0, true, 4 }, { 1, true, 1 }, { 1, false, 1 },
+		{ 2, false, 2 }, { 2, true, 2 }, { 4, false, 4 }, { 4, true, 4 },
+		{ 3, false, 1 }, { 3, true, 4 }, { 8, false, 1 }, { 8, true, 4 },
+		{ 0xffffffff, true, 4 },
+	};
+	struct sgx_render_tadata t;
+	struct sgx_render_layout l;
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(want); i++)
+		KUNIT_EXPECT_EQ_MSG(test, sgx_render_rgn_arrays(want[i].setting, want[i].aa4),
+				    want[i].arrays, "%u %d", want[i].setting, want[i].aa4);
+	/* The automatic 4x maximum fits its slot; a 1x one keeps its size. */
+	KUNIT_ASSERT_EQ(test, sgx_render_tadata_layout(&t, 4096, 4096,
+						       sgx_render_rgn_arrays(0, true)), 0);
+	KUNIT_EXPECT_EQ(test, t.size, 0x223000u);
+	KUNIT_ASSERT_EQ(test, sgx_render_tadata_layout(&t, 4096, 4096,
+						       sgx_render_rgn_arrays(0, false)), 0);
+	KUNIT_EXPECT_EQ(test, t.size, (u32)SGX_RENDER_TD_MAX_SIZE);
+	KUNIT_ASSERT_EQ(test, sgx_render_tadata_layout(&t, 288, 144,
+						       sgx_render_rgn_arrays(1, true)), 0);
+	sgx_render_layout(&l, 288, 144);
+	KUNIT_EXPECT_EQ(test, t.zls, t.rgn + round_up(l.rgn_size, SZ_4K));	/* E729's one array */
+	KUNIT_EXPECT_FALSE(test, sgx_render_te_aa_ms(0x20000000));
+	KUNIT_EXPECT_FALSE(test, sgx_render_te_aa_ms(0x201));
+	KUNIT_EXPECT_FALSE(test, sgx_render_te_aa_ms(0));
+	KUNIT_EXPECT_TRUE(test, sgx_render_te_aa_ms(0xe0000000));
+	KUNIT_EXPECT_TRUE(test, sgx_render_te_aa_ms(0x60000000));
+	KUNIT_EXPECT_TRUE(test, sgx_render_te_aa_ms(0xa0000000));
+	KUNIT_EXPECT_TRUE(test, sgx_render_te_aa_ms(0x40000000));
+	KUNIT_EXPECT_TRUE(test, sgx_render_te_aa_ms(0x80000000));
+}
+
 /* Every target within w x h has a layout no larger than w x h's. */
 static void covers(struct kunit *test, u32 mw, u32 mh, u32 step)
 {
@@ -1033,6 +1076,7 @@ static struct kunit_case sgx_render_test_cases[] = {
 	KUNIT_CASE(sgx_render_test_layout),
 	KUNIT_CASE(sgx_render_test_tadata),
 	KUNIT_CASE(sgx_render_test_tadata_arrays),
+	KUNIT_CASE(sgx_render_test_rgn_arrays),
 	KUNIT_CASE(sgx_render_test_tadata_covers),
 	KUNIT_CASE(sgx_render_test_tadata_addrs),
 	KUNIT_CASE(sgx_render_test_rd),

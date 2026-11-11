@@ -56,17 +56,18 @@ bool sgxfive_client_fault(struct sgxfive_client *c, unsigned long now)
 }
 
 /*
- * CREATE_CONTEXT's arguments: no flags, the one priority, zero padding.
+ * CREATE_CONTEXT's arguments: known flags, the one priority, zero padding.
  * A render context states the largest target its jobs use, 1 to the
- * device's each way; a transfer context has none, so both fields stay zero.
+ * device's each way, and may be made for 4x targets; a transfer context has
+ * none, so both fields and the flags stay zero.
  */
 int sgxfive_ctx_check_args(const struct drm_sgxfive_create_context_args *a)
 {
-	if (a->flags || a->priority != DRM_SGXFIVE_CTX_PRIORITY_NORMAL ||
-	    a->_padding_1c)
+	if (a->flags & ~DRM_SGXFIVE_CTX_FLAGS_MASK ||
+	    a->priority != DRM_SGXFIVE_CTX_PRIORITY_NORMAL || a->_padding_1c)
 		return -EINVAL;
 	if (a->type == DRM_SGXFIVE_CTX_TYPE_TRANSFER)
-		return a->max_width || a->max_height ? -EINVAL : 0;
+		return a->max_width || a->max_height || a->flags ? -EINVAL : 0;
 	if (a->type == DRM_SGXFIVE_CTX_TYPE_RENDER)
 		return sgx_render_check_max(a->max_width, a->max_height);
 	return -EINVAL;
@@ -144,6 +145,7 @@ int sgxfive_ioctl_create_ctx(struct sgxfive *sgx, void *data,
 	ctx->pd_phys = sgxfive_vm_pd_phys(ctx->vm);
 	ctx->max_width = a->max_width;
 	ctx->max_height = a->max_height;
+	ctx->aa4 = a->flags & DRM_SGXFIVE_CTX_RENDER_AA_4X;
 	if (ctx->type == DRM_SGXFIVE_CTX_TYPE_RENDER) {
 		ret = sgxfive_render_init(ctx);
 		if (ret) {

@@ -207,21 +207,24 @@ static void sgxfive_render_free(struct sgxfive_render *r)
 static_assert(SGX_RENDER_TD_LIMIT == SGXFIVE_RENDER_TD_SLOT);
 
 /*
- * A new render context, its kernel memory allocated, its VM and its largest
- * target (ctx->max_width x max_height, checked) set: the slot and the
+ * A new render context, its kernel memory allocated, its VM, its largest
+ * target (ctx->max_width x max_height, checked) and ctx->aa4 set: the slot and the
  * firmware alias in the VM, the slot's pages, the TA data for that target,
  * the structures.
  */
 int sgxfive_render_init(struct sgxfive_ctx *ctx)
 {
 	struct sgxfive_render *r = kzalloc_obj(*r, GFP_KERNEL_ACCOUNT);
+	const u32 setting = sgxfive_render_rgn_arrays(ctx->sgx);
 	struct sgx_render_tadata td;
 	int ret;
 
 	if (!r)
 		return -ENOMEM;
+	/* Forced arrays (debug option) also let its jobs set any TE_AA, as E729's control. */
+	ctx->aa_ms = ctx->aa4 || setting;
 	ret = sgx_render_tadata_layout(&td, ctx->max_width, ctx->max_height,
-				       sgxfive_render_rgn_arrays(ctx->sgx));
+				       sgx_render_rgn_arrays(setting, ctx->aa4));
 	if (ret) {
 		kfree(r);
 		return ret;

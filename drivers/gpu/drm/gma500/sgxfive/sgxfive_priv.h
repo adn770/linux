@@ -348,7 +348,7 @@ struct sgx_mmu_pd;
 struct sgx_render_addrs;
 struct sgx_render_tadata;
 int sgxfive_render_check(const struct drm_sgxfive_render_cmd *c, u32 max_w,
-			 u32 max_h);
+			 u32 max_h, bool ms);
 void sgxfive_render_addrs(struct sgx_render_addrs *a, u32 mem, u32 pd_phys,
 			  unsigned int slot, const struct sgx_render_tadata *td);
 u32 sgxfive_render_build(u8 *img, const struct sgx_render_addrs *a,
@@ -458,12 +458,15 @@ static inline u32 sgxfive_render_pb_pages(struct sgxfive *sgx)
 	return READ_ONCE(sgx->render_pb_pages);
 }
 
-/* 1, 2 or 4 (debugfs render_rgn_arrays); any other value: 1, the default. */
+/*
+ * debugfs render_rgn_arrays: 1, 2 or 4 forced; 0, the default, and any other
+ * value: 0, automatic (sgx_render_rgn_arrays()).
+ */
 static inline u32 sgxfive_render_rgn_arrays(struct sgxfive *sgx)
 {
 	u32 n = READ_ONCE(sgx->render_rgn_arrays);
 
-	return sgx_render_rgn_arrays_ok(n) ? n : 1;
+	return sgx_render_rgn_arrays_ok(n) ? n : 0;
 }
 
 static inline bool sgxfive_vm_low(struct sgxfive *sgx)
@@ -572,7 +575,7 @@ static inline u32 sgxfive_render_pb_pages(struct sgxfive *sgx)
 
 static inline u32 sgxfive_render_rgn_arrays(struct sgxfive *sgx)
 {
-	return 1;
+	return 0;
 }
 
 static inline bool sgxfive_take_ctx_rw(struct sgxfive *sgx)

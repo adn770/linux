@@ -1945,10 +1945,13 @@ void sgxfive_debug_init(struct sgxfive *sgx, struct dentry *dir)
 	debugfs_create_x32("render_pb_pages", 0600, dir, &sgx->render_pb_pages);
 	/*
 	 * Region-header arrays before the ZLS buffer in the TA data of render contexts created
-	 * from now on: 1 (the default), 2 or 4; any other value is taken as 1. A maximum whose
-	 * TA data would then pass its 4 MiB slot is refused at the context's creation (-E2BIG).
+	 * from now on. 0, the default, is automatic: four for a context created with
+	 * DRM_SGXFIVE_CTX_RENDER_AA_4X, one for any other. 1, 2 or 4 force that count, and
+	 * also let the context's jobs set TE_AA bits 31:30 without the flag (1 reproduces
+	 * E729's fault); any other value is taken as 0. A maximum whose TA data would pass its
+	 * 4 MiB slot is refused at the context's creation (-E2BIG; none does at 1, 2 or 4).
 	 */
-	sgx->render_rgn_arrays = 1;
+	sgx->render_rgn_arrays = 0;
 	debugfs_create_x32("render_rgn_arrays", 0600, dir, &sgx->render_rgn_arrays);
 	debugfs_create_file("render_param", 0400, dir, sgx, &sgxfive_render_param_fops);
 	debugfs_create_file("render_tadata", 0400, dir, sgx, &sgxfive_render_tadata_fops);

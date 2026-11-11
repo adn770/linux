@@ -76,6 +76,26 @@ static void sgxfive_debug_test_pb_pages(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, sgx_render_pb_pages(0x423), 0x422u);
 }
 
+/*
+ * debugfs render_rgn_arrays: 1, 2 or 4 force that many region-header arrays on
+ * render contexts created from now on; 0 (the default) and any other value are
+ * automatic (0), which gives four to a context made for 4x targets and one to
+ * any other.
+ */
+static void sgxfive_debug_test_rgn_arrays(struct kunit *test)
+{
+	static const u32 set[] = { 0, 1, 2, 4, 3, 5, 8, 0xffffffff };
+	static const u32 want[] = { 0, 1, 2, 4, 0, 0, 0, 0 };
+	struct sgxfive *sgx = kunit_kzalloc(test, sizeof(*sgx), GFP_KERNEL);
+	unsigned int i;
+
+	KUNIT_ASSERT_NOT_NULL(test, sgx);
+	for (i = 0; i < ARRAY_SIZE(set); i++) {
+		sgx->render_rgn_arrays = set[i];
+		KUNIT_EXPECT_EQ_MSG(test, sgxfive_render_rgn_arrays(sgx), want[i], "%#x", set[i]);
+	}
+}
+
 /* A context with its memory in a plain buffer, as far as the dumps need one. */
 static struct sgxfive_ctx *fake_ctx(struct kunit *test)
 {
@@ -1021,6 +1041,7 @@ static void sgxfive_debug_test_own_arm(struct kunit *test)
 static struct kunit_case sgxfive_debug_test_cases[] = {
 	KUNIT_CASE(sgxfive_debug_test_pb_small),
 	KUNIT_CASE(sgxfive_debug_test_pb_pages),
+	KUNIT_CASE(sgxfive_debug_test_rgn_arrays),
 	KUNIT_CASE(sgxfive_debug_test_pages_copy),
 	KUNIT_CASE(sgxfive_debug_test_render_newest),
 	KUNIT_CASE(sgxfive_debug_test_render_donor),

@@ -210,6 +210,18 @@ static void sgxfive_job_test_ctx_args(struct kunit *test)
 	a.flags = 1;
 	KUNIT_EXPECT_EQ(test, sgxfive_ctx_check_args(&a), -EINVAL);
 	a = xfer;
+	a.flags = DRM_SGXFIVE_CTX_RENDER_AA_4X;		/* a render context's flag */
+	KUNIT_EXPECT_EQ(test, sgxfive_ctx_check_args(&a), -EINVAL);
+	a = render;
+	a.flags = DRM_SGXFIVE_CTX_RENDER_AA_4X;
+	KUNIT_EXPECT_EQ(test, sgxfive_ctx_check_args(&a), 0);
+	KUNIT_EXPECT_EQ(test, DRM_SGXFIVE_CTX_RENDER_AA_4X, 1u);
+	KUNIT_EXPECT_EQ(test, DRM_SGXFIVE_CTX_FLAGS_MASK, 1u);
+	a.flags = 2;					/* unknown flags stay refused */
+	KUNIT_EXPECT_EQ(test, sgxfive_ctx_check_args(&a), -EINVAL);
+	a.flags = DRM_SGXFIVE_CTX_RENDER_AA_4X | 0x80000000;
+	KUNIT_EXPECT_EQ(test, sgxfive_ctx_check_args(&a), -EINVAL);
+	a = xfer;
 	a.priority = 1;
 	KUNIT_EXPECT_EQ(test, sgxfive_ctx_check_args(&a), -EINVAL);
 	/* Render: a struct without the sizes reads as 0 x 0, which is refused. */
@@ -250,31 +262,50 @@ static void sgxfive_job_test_render_check(struct kunit *test)
 	struct drm_sgxfive_render_cmd c;
 
 	test_cmd(&c);
-	KUNIT_EXPECT_EQ(test, sgxfive_render_check(&c, 4096, 4096), 0);
+	KUNIT_EXPECT_EQ(test, sgxfive_render_check(&c, 4096, 4096, false), 0);
 	c.vdm_ctrl_stream_base = 0x32000000;	/* the reserved firmware data */
-	KUNIT_EXPECT_EQ(test, sgxfive_render_check(&c, 4096, 4096), -EINVAL);
+	KUNIT_EXPECT_EQ(test, sgxfive_render_check(&c, 4096, 4096, false), -EINVAL);
 	c.vdm_ctrl_stream_base = 0x10001000;	/* a render context's PB */
-	KUNIT_EXPECT_EQ(test, sgxfive_render_check(&c, 4096, 4096), -EINVAL);
+	KUNIT_EXPECT_EQ(test, sgxfive_render_check(&c, 4096, 4096, false), -EINVAL);
 	c.vdm_ctrl_stream_base = 0x3e001002;	/* not 4-byte aligned */
-	KUNIT_EXPECT_EQ(test, sgxfive_render_check(&c, 4096, 4096), -EINVAL);
+	KUNIT_EXPECT_EQ(test, sgxfive_render_check(&c, 4096, 4096, false), -EINVAL);
 	c.vdm_ctrl_stream_base = 0;
-	KUNIT_EXPECT_EQ(test, sgxfive_render_check(&c, 4096, 4096), -EINVAL);
+	KUNIT_EXPECT_EQ(test, sgxfive_render_check(&c, 4096, 4096, false), -EINVAL);
 	test_cmd(&c);
 	c.event_pixel_pds_exec = 0x30000000;	/* the reserved firmware code */
-	KUNIT_EXPECT_EQ(test, sgxfive_render_check(&c, 4096, 4096), -EINVAL);
+	KUNIT_EXPECT_EQ(test, sgxfive_render_check(&c, 4096, 4096, false), -EINVAL);
 	c.event_pixel_pds_exec = 0x2e001088;	/* not 16-byte aligned */
-	KUNIT_EXPECT_EQ(test, sgxfive_render_check(&c, 4096, 4096), -EINVAL);
+	KUNIT_EXPECT_EQ(test, sgxfive_render_check(&c, 4096, 4096, false), -EINVAL);
 	test_cmd(&c);
 	c.mte_screen = 0x01ff01ff;		/* 512 x 512 */
-	KUNIT_EXPECT_EQ(test, sgxfive_render_check(&c, 4096, 4096), -EINVAL);
+	KUNIT_EXPECT_EQ(test, sgxfive_render_check(&c, 4096, 4096, false), -EINVAL);
 	/* The context's maximum: 64 x 64 fits 64 x 64, not 63 or 32 across. */
 	test_cmd(&c);
-	KUNIT_EXPECT_EQ(test, sgxfive_render_check(&c, 64, 64), 0);
-	KUNIT_EXPECT_EQ(test, sgxfive_render_check(&c, 63, 64), -EINVAL);
-	KUNIT_EXPECT_EQ(test, sgxfive_render_check(&c, 64, 32), -EINVAL);
+	KUNIT_EXPECT_EQ(test, sgxfive_render_check(&c, 64, 64, false), 0);
+	KUNIT_EXPECT_EQ(test, sgxfive_render_check(&c, 63, 64, false), -EINVAL);
+	KUNIT_EXPECT_EQ(test, sgxfive_render_check(&c, 64, 32, false), -EINVAL);
 	test_cmd(&c);
 	c.isp_bgobj = 0x400;
-	KUNIT_EXPECT_EQ(test, sgxfive_render_check(&c, 4096, 4096), -EINVAL);
+	KUNIT_EXPECT_EQ(test, sgxfive_render_check(&c, 4096, 4096, false), -EINVAL);
+	/*
+	 * TE_AA with bit 31 or 30 (0xe0000000 at 4x): only on a context made for
+	 * 4x targets, or one whose region-header arrays debugfs forced (ms).
+	 */
+	test_cmd(&c);
+	KUNIT_EXPECT_EQ(test, sgxfive_render_check(&c, 4096, 4096, true), 0);
+	c.te_aa = 0x20000000;
+	KUNIT_EXPECT_EQ(test, sgxfive_render_check(&c, 4096, 4096, false), 0);
+	c.te_aa = 0xe0000000;
+	KUNIT_EXPECT_EQ(test, sgxfive_render_check(&c, 4096, 4096, false), -EINVAL);
+	KUNIT_EXPECT_EQ(test, sgxfive_render_check(&c, 4096, 4096, true), 0);
+	c.te_aa = 0x60000000;
+	KUNIT_EXPECT_EQ(test, sgxfive_render_check(&c, 4096, 4096, false), -EINVAL);
+	c.te_aa = 0xa0000000;
+	KUNIT_EXPECT_EQ(test, sgxfive_render_check(&c, 4096, 4096, false), -EINVAL);
+	KUNIT_EXPECT_EQ(test, sgxfive_render_check(&c, 4096, 4096, true), 0);
+	c.te_aa = 0xe0000000;
+	c.mte_screen = 0x01ff01ff;		/* the size checks still apply */
+	KUNIT_EXPECT_EQ(test, sgxfive_render_check(&c, 4096, 4096, true), -EINVAL);
 }
 
 /*
