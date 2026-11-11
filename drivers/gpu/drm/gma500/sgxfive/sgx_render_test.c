@@ -432,8 +432,10 @@ static void sgx_render_test_tadata(struct kunit *test)
  * Four region-header arrays (debugfs render_rgn_arrays): the ZLS buffer moves
  * up past four times the region headers, rounded to a page, and keeps one
  * array's size; nothing below it moves. Sizes of the offline fit of the
- * recorded faults (round 3). A maximum whose TA data would not fit its 2 MiB
- * slot is -E2BIG; only 1, 2 and 4 arrays are taken.
+ * recorded faults (round 3). A maximum whose TA data would not fit its 4 MiB
+ * slot is -E2BIG (none does: 4096 x 4096 at four arrays takes 0x223000, so the
+ * bound is checked with sgx_render_tadata_layout_in()'s own limit); only 1, 2
+ * and 4 arrays are taken.
  */
 static void sgx_render_test_tadata_arrays(struct kunit *test)
 {
@@ -465,8 +467,22 @@ static void sgx_render_test_tadata_arrays(struct kunit *test)
 		KUNIT_ASSERT_EQ(test, sgx_render_tadata_layout(&t, w, h, 2), 0);
 		KUNIT_EXPECT_EQ(test, t.zls, t.rgn + round_up(2 * l.rgn_size, SZ_4K));
 	}
-	KUNIT_EXPECT_EQ(test, sgx_render_tadata_layout(&t, 4096, 4096, 4), -E2BIG);
+	/* 4096 x 4096 at four arrays fits the 4 MiB slot; it did not fit the old 2 MiB one. */
+	KUNIT_ASSERT_EQ(test, sgx_render_tadata_layout(&t, 4096, 4096, 4), 0);
+	KUNIT_EXPECT_EQ(test, t.size, (u32)SGX_RENDER_TD_MAX4_SIZE);
+	KUNIT_EXPECT_EQ(test, (u32)SGX_RENDER_TD_MAX4_SIZE, 0x223000u);
+	KUNIT_EXPECT_EQ(test, sgx_render_tadata_layout_in(&t, 4096, 4096, 4, SZ_2M), -E2BIG);
 	KUNIT_EXPECT_EQ(test, sgx_render_tadata_layout(&t, 4096, 4096, 2), 0);
+	/* The limit is a bound: a TA data of exactly the limit fits, a byte less is -E2BIG. */
+	KUNIT_EXPECT_EQ(test, sgx_render_tadata_layout_in(&t, 4096, 4096, 4, 0x223000), 0);
+	memset(&one, 0xa5, sizeof(one));
+	t = one;
+	KUNIT_EXPECT_EQ(test, sgx_render_tadata_layout_in(&t, 4096, 4096, 4, 0x222fff), -E2BIG);
+	KUNIT_EXPECT_EQ(test, memcmp(&t, &one, sizeof(t)), 0);	/* untouched */
+	KUNIT_EXPECT_EQ(test, sgx_render_tadata_layout_in(&t, 4096, 4096, 1,
+							  SGX_RENDER_TD_MAX_SIZE), 0);
+	KUNIT_EXPECT_EQ(test, sgx_render_tadata_layout_in(&t, 4096, 4096, 1,
+							  SGX_RENDER_TD_MAX_SIZE - 1), -E2BIG);
 	KUNIT_EXPECT_EQ(test, sgx_render_tadata_layout(&t, 64, 64, 0), -EINVAL);
 	KUNIT_EXPECT_EQ(test, sgx_render_tadata_layout(&t, 64, 64, 3), -EINVAL);
 	KUNIT_EXPECT_EQ(test, sgx_render_tadata_layout(&t, 64, 64, 8), -EINVAL);
@@ -476,7 +492,7 @@ static void sgx_render_test_tadata_arrays(struct kunit *test)
 	KUNIT_EXPECT_FALSE(test, sgx_render_rgn_arrays_ok(0));
 	KUNIT_EXPECT_FALSE(test, sgx_render_rgn_arrays_ok(3));
 	KUNIT_EXPECT_FALSE(test, sgx_render_rgn_arrays_ok(5));
-	KUNIT_EXPECT_EQ(test, (u32)SGX_RENDER_TD_LIMIT, (u32)SZ_2M);
+	KUNIT_EXPECT_EQ(test, (u32)SGX_RENDER_TD_LIMIT, (u32)SZ_4M);
 }
 
 /* Every target within w x h has a layout no larger than w x h's. */

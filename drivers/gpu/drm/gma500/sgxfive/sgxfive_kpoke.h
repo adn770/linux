@@ -211,7 +211,7 @@ void sgxfive_hostirq_reset(struct sgxfive_hostirq *h);
  * context's TA data is filled with a value ("PAGE VALUE") or a ramp ("PAGE
  * VALUE ramp": the word's index added), to see what a unit reads or writes
  * there. PAGE counts pages of the TA data from its start; it must be within
- * the largest TA data a context can have, and within this context's own when
+ * a context's TA-data slot (SGX_RENDER_TD_LIMIT), and within its own when
  * the fill is applied (else it is dropped, and logged). Taken once.
  */
 struct sgxfive_tdfill {
@@ -221,7 +221,7 @@ struct sgxfive_tdfill {
 	u32 value;
 };
 
-/* -EINVAL, -ERANGE for a page past the largest TA data. */
+/* -EINVAL, -ERANGE for a page past the TA-data slot. */
 int sgxfive_tdfill_parse(const char *s, struct sgxfive_tdfill *f);
 /* Fill the PAGE_SIZE bytes at page with the fill's words. */
 void sgxfive_tdfill_apply(const struct sgxfive_tdfill *f, u32 *page);

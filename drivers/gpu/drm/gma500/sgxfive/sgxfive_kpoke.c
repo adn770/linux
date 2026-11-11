@@ -475,7 +475,7 @@ int sgxfive_tdfill_parse(const char *s, struct sgxfive_tdfill *f)
 	}
 	if (kstrtou32(page, 0, &t.page) || kstrtou32(value, 0, &t.value))
 		return -EINVAL;
-	if (t.page >= SGX_RENDER_TD_MAX_SIZE >> PAGE_SHIFT)
+	if (t.page >= SGX_RENDER_TD_LIMIT >> PAGE_SHIFT)
 		return -ERANGE;
 	*f = t;
 	return 0;

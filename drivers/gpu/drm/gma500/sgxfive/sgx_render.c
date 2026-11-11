@@ -165,7 +165,8 @@ bool sgx_render_rgn_arrays_ok(u32 arrays)
  * (a test of how many arrays the hardware writes); the ZLS buffer after it
  * keeps one array's size.
  */
-int sgx_render_tadata_layout(struct sgx_render_tadata *t, u32 max_w, u32 max_h, u32 arrays)
+int sgx_render_tadata_layout_in(struct sgx_render_tadata *t, u32 max_w, u32 max_h, u32 arrays,
+				u32 limit)
 {
 	struct sgx_render_layout l;
 	struct sgx_render_tadata n;
@@ -180,10 +181,15 @@ int sgx_render_tadata_layout(struct sgx_render_tadata *t, u32 max_w, u32 max_h, 
 	n.rgn = n.state + SZ_4K;
 	n.zls = n.rgn + round_up(arrays * l.rgn_size, SZ_4K);
 	n.size = n.zls + round_up(l.rgn_size, SZ_4K);
-	if (n.size > SGX_RENDER_TD_LIMIT)
+	if (n.size > limit)
 		return -E2BIG;
 	*t = n;
 	return 0;
+}
+
+int sgx_render_tadata_layout(struct sgx_render_tadata *t, u32 max_w, u32 max_h, u32 arrays)
+{
+	return sgx_render_tadata_layout_in(t, max_w, max_h, arrays, SGX_RENDER_TD_LIMIT);
 }
 
 static void sgx_render_screen(struct sgx_render_layout *l, u32 mte_screen)

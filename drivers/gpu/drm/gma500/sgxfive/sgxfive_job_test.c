@@ -292,7 +292,7 @@ static void sgxfive_job_test_render_addrs(struct kunit *test)
 	sgxfive_render_addrs(&a, m, 0x01234000, 3, &td);
 	KUNIT_EXPECT_EQ(test, a.pd_phys, 0x01234000u);
 	KUNIT_EXPECT_EQ(test, a.param_base, 0x10000000u + 3 * SZ_8M);
-	KUNIT_EXPECT_EQ(test, a.tadata, 0x20000000u + 3 * SZ_2M);
+	KUNIT_EXPECT_EQ(test, a.tadata, 0x20c00000u);	/* slot 3 of 4 MiB */
 	/* The TA data of the context's maximum, inside its slot. */
 	KUNIT_EXPECT_EQ(test, a.td.rgn, td.rgn);
 	KUNIT_EXPECT_EQ(test, a.td.zls, td.zls);

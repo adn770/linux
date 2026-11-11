@@ -875,7 +875,10 @@ static void sgxfive_kpoke_test_tdfill(struct kunit *test)
 	for (i = 0; i < PAGE_SIZE / 4; i++)
 		KUNIT_EXPECT_EQ(test, page[i], 0x100u + i);
 	KUNIT_EXPECT_EQ(test, sgxfive_tdfill_parse("0x102 1", &f), 0);
-	KUNIT_EXPECT_EQ(test, sgxfive_tdfill_parse("0x103 1", &f), -ERANGE);
+	KUNIT_EXPECT_EQ(test, sgxfive_tdfill_parse("0x103 1", &f), 0);	/* four arrays' pages */
+	KUNIT_EXPECT_EQ(test, sgxfive_tdfill_parse("0x222 1", &f), 0);
+	KUNIT_EXPECT_EQ(test, sgxfive_tdfill_parse("0x3ff 1", &f), 0);
+	KUNIT_EXPECT_EQ(test, sgxfive_tdfill_parse("0x400 1", &f), -ERANGE);
 	for (i = 0; i < ARRAY_SIZE(bad); i++)
 		KUNIT_EXPECT_EQ_MSG(test, sgxfive_tdfill_parse(bad[i], &f), -EINVAL,
 				    "\"%s\"", bad[i]);

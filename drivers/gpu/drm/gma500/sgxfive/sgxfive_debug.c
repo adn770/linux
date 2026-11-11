@@ -1946,7 +1946,7 @@ void sgxfive_debug_init(struct sgxfive *sgx, struct dentry *dir)
 	/*
 	 * Region-header arrays before the ZLS buffer in the TA data of render contexts created
 	 * from now on: 1 (the default), 2 or 4; any other value is taken as 1. A maximum whose
-	 * TA data would then pass its 2 MiB slot is refused at the context's creation (-E2BIG).
+	 * TA data would then pass its 4 MiB slot is refused at the context's creation (-E2BIG).
 	 */
 	sgx->render_rgn_arrays = 1;
 	debugfs_create_x32("render_rgn_arrays", 0600, dir, &sgx->render_rgn_arrays);
