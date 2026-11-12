@@ -409,14 +409,23 @@ u32 sgx_render_executed(const u8 *cmd)
 	return get32(cmd, SGX_RENDER_CMD_RFLAGS) & SGX_RENDER_SCENE ? 1 : 0;
 }
 
-/* The background object: the user's PDS words over the whole render target, zero layers. */
-void sgx_render_bgobj(u32 *bg, const struct drm_sgxfive_render_cmd *c)
+/*
+ * The background object: the user's PDS words over the whole render target,
+ * zero layers (17 dwords). With layers (only debugfs render_bg_layer sets
+ * them in the tag) the 23-dword form of a one-layer copy, its source the
+ * target's own rectangle and size (coordinates 0 to 1): the user's PDS
+ * program samples the layer.
+ */
+void sgx_render_bgobj(u32 *bg, const struct drm_sgxfive_render_cmd *c, u32 layers)
 {
 	const struct sgx_xfer_rect r = {
 		0, 0, (c->mte_screen & 0xffff) + 1, (c->mte_screen >> 16) + 1,
 	};
 
-	sgx_xfer_bgobj_words(bg, c->bgobj_words, &r);
+	if (layers)
+		sgx_xfer_bgobj_copy_words(bg, c->bgobj_words, &r, &r, r.x1, r.y1);
+	else
+		sgx_xfer_bgobj_words(bg, c->bgobj_words, &r);
 }
 
 /*

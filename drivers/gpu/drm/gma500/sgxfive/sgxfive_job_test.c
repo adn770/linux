@@ -399,6 +399,51 @@ static void sgxfive_job_test_render_build(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, dw(img, SGX_RENDER_CMD_TAREGS + SGX_RENDER_TA_TEPSG), 0u);
 }
 
+/*
+ * The background object a recovery rebuilds from a render image (the copy in
+ * its fence): the PDS words and the target size the TA command carries, the
+ * layer count the render details' tag carries. With no layer the 17 dwords
+ * of before, the words past them untouched; with the tag's layer the 23
+ * dwords of the one-layer form, as the run writes them.
+ */
+static void sgxfive_job_test_render_img_bg(struct kunit *test)
+{
+	u8 *img = kunit_kzalloc(test, SGX_XFER_CMD_SIZE, GFP_KERNEL);
+	u32 bg[SGX_XFER_BGOBJ1_DWORDS], want[SGX_XFER_BGOBJ1_DWORDS];
+	struct drm_sgxfive_render_cmd c, got;
+	struct sgx_render_addrs a;
+	struct sgx_render_tadata td;
+	u32 tag;
+
+	KUNIT_ASSERT_NOT_NULL(test, img);
+	test_cmd(&c);
+	KUNIT_ASSERT_EQ(test, sgx_render_tadata_layout(&td, 64, 64, 1, 0), 0);
+	sgxfive_render_addrs(&a, 0x32500000, 0x01234000, 0, &td);
+	sgxfive_render_build(img, &a, &c, 9, true, true);
+	KUNIT_EXPECT_EQ(test, sgxfive_render_img_bg_layers(img), 0u);
+
+	memset(bg, 0xa5, sizeof(bg));
+	memset(want, 0xa5, sizeof(want));
+	sgx_render_bgobj(want, &c, 0);
+	memset(&got, 0, sizeof(got));
+	sgxfive_render_img_bg(bg, &got, img);
+	KUNIT_EXPECT_EQ(test, memcmp(bg, want, sizeof(want)), 0);
+	KUNIT_EXPECT_EQ(test, got.mte_screen, c.mte_screen);
+	KUNIT_EXPECT_EQ(test, memcmp(got.bgobj_words, c.bgobj_words, sizeof(c.bgobj_words)), 0);
+
+	sgxfive_render_img_set_bg_layers(img, 1);
+	KUNIT_EXPECT_EQ(test, sgxfive_render_img_bg_layers(img), 1u);
+	tag = dw(img, SGXFIVE_RENDER_IMG_RD + SGX_RENDER_RD_BGTAG);
+	KUNIT_EXPECT_EQ(test, tag, (u32)(SGX_RENDER_PARAM_BG >> 4) | 1u << 25);
+	sgx_render_bgobj(want, &c, 1);
+	sgxfive_render_img_bg(bg, &got, img);
+	KUNIT_EXPECT_EQ(test, memcmp(bg, want, sizeof(want)), 0);
+	KUNIT_EXPECT_EQ(test, bg[10], 0x202u);
+	sgxfive_render_img_set_bg_layers(img, 0);
+	KUNIT_EXPECT_EQ(test, dw(img, SGXFIVE_RENDER_IMG_RD + SGX_RENDER_RD_BGTAG),
+			(u32)(SGX_RENDER_PARAM_BG >> 4));
+}
+
 /* A fence is done once the context's fence word has reached its number. */
 static void sgxfive_job_test_seqno(struct kunit *test)
 {
@@ -1025,6 +1070,7 @@ static struct kunit_case sgxfive_job_test_cases[] = {
 	KUNIT_CASE(sgxfive_job_test_render_check),
 	KUNIT_CASE(sgxfive_job_test_render_addrs),
 	KUNIT_CASE(sgxfive_job_test_render_build),
+	KUNIT_CASE(sgxfive_job_test_render_img_bg),
 	KUNIT_CASE(sgxfive_job_test_render_scene),
 	KUNIT_CASE(sgxfive_job_test_geometry_fence),
 	KUNIT_CASE(sgxfive_job_test_seqno),

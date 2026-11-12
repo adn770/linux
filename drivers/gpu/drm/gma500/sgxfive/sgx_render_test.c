@@ -14,6 +14,7 @@
 #include <linux/string.h>
 
 #include "sgx_render.h"
+#include "sgx_xfer.h"
 
 #define KD	0x32152000u	/* a render context's control page */
 
@@ -1106,11 +1107,12 @@ static void sgx_render_test_executed(struct kunit *test)
  */
 static void sgx_render_test_bgobj(struct kunit *test)
 {
-	u32 bg[17];
+	u32 bg[SGX_XFER_BGOBJ1_DWORDS];
 	struct drm_sgxfive_render_cmd c = cmd64;
+	unsigned int i;
 
 	memset(bg, 0xa5, sizeof(bg));
-	sgx_render_bgobj(bg, &c);
+	sgx_render_bgobj(bg, &c, 0);
 	KUNIT_EXPECT_EQ(test, bg[0], c.bgobj_words[0]);
 	KUNIT_EXPECT_EQ(test, bg[1], c.bgobj_words[1]);
 	KUNIT_EXPECT_EQ(test, bg[2], c.bgobj_words[2]);
@@ -1119,10 +1121,69 @@ static void sgx_render_test_bgobj(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, bg[11], 0x00000000u);
 	KUNIT_EXPECT_EQ(test, bg[12], 0x10400010u);	/* x1 = 64, y0 */
 	KUNIT_EXPECT_EQ(test, bg[14], 0x00104000u);	/* y1 = 64 */
+	/* 17 dwords, nothing past them */
+	for (i = SGX_XFER_BGOBJ_DWORDS; i < SGX_XFER_BGOBJ1_DWORDS; i++)
+		KUNIT_EXPECT_EQ_MSG(test, bg[i], 0xa5a5a5a5u, "dword %u", i);
 	c.mte_screen = 255 | 127 << 16;			/* 256 x 128 */
-	sgx_render_bgobj(bg, &c);
+	sgx_render_bgobj(bg, &c, 0);
 	KUNIT_EXPECT_EQ(test, bg[12], 0x11000010u);	/* x1 = 256 */
 	KUNIT_EXPECT_EQ(test, bg[14], 0x00108000u);	/* y1 = 128 */
+}
+
+/*
+ * With one texture layer (debugfs render_bg_layer) the object is a one-layer
+ * copy's, 23 dwords, over the whole target from a source of the target's size
+ * (coordinates 0 to 1): the copy's object for the same rectangle with the
+ * user's PDS words. Any layer count but 0 builds that one form.
+ */
+static void sgx_render_test_bgobj_layer(struct kunit *test)
+{
+	static const struct { u16 w, h; } sizes[] = { { 64, 64 }, { 256, 128 }, { 300, 200 } };
+	u32 bg[SGX_XFER_BGOBJ1_DWORDS + 1], want[SGX_XFER_BGOBJ1_DWORDS];
+	struct drm_sgxfive_render_cmd c = cmd64;
+	unsigned int i, j;
+
+	for (i = 0; i < ARRAY_SIZE(sizes); i++) {
+		const struct sgx_xfer_rect r = { 0, 0, sizes[i].w, sizes[i].h };
+
+		sgx_xfer_bgobj_copy(want, 0x2e000000, 0x2e000100, 0x30, 0x2e000020, 0x10,
+				    &r, &r, sizes[i].w, sizes[i].h);
+		memcpy(c.bgobj_words, want, sizeof(c.bgobj_words));
+		c.mte_screen = (sizes[i].h - 1) << 16 | (sizes[i].w - 1);
+		memset(bg, 0xa5, sizeof(bg));
+		sgx_render_bgobj(bg, &c, 1);
+		for (j = 0; j < SGX_XFER_BGOBJ1_DWORDS; j++)
+			KUNIT_EXPECT_EQ_MSG(test, bg[j], want[j], "%ux%u dword %u",
+					    sizes[i].w, sizes[i].h, j);
+		KUNIT_EXPECT_EQ(test, bg[SGX_XFER_BGOBJ1_DWORDS], 0xa5a5a5a5u);
+		KUNIT_EXPECT_EQ(test, bg[5], 0x3f800000u);	/* U1 = 1.0 */
+		KUNIT_EXPECT_EQ(test, bg[8], 0x3f800000u);	/* V1 = 1.0 */
+		sgx_render_bgobj(bg, &c, 0x3f);
+		KUNIT_EXPECT_EQ(test, memcmp(bg, want, sizeof(want)), 0);
+	}
+	/* the user's words as given, not the copy's PDS state */
+	c = cmd64;
+	sgx_render_bgobj(bg, &c, 1);
+	KUNIT_EXPECT_EQ(test, bg[0], c.bgobj_words[0]);
+	KUNIT_EXPECT_EQ(test, bg[1], c.bgobj_words[1]);
+	KUNIT_EXPECT_EQ(test, bg[2], c.bgobj_words[2]);
+	KUNIT_EXPECT_EQ(test, bg[10], 0x202u);			/* the layer format word */
+}
+
+/* The layer count of the background object's tag: bits 30:25, as a transfer's. */
+static void sgx_render_test_bgtag_layers(struct kunit *test)
+{
+	const u32 tag = SGX_RENDER_PARAM_BG >> 4;
+
+	KUNIT_EXPECT_EQ(test, sgx_render_bgtag_layers(tag), 0u);
+	KUNIT_EXPECT_EQ(test, sgx_render_bgtag_layers(tag | 1u << 25), 1u);
+	KUNIT_EXPECT_EQ(test, sgx_render_bgtag_layers(tag | 0x3fu << 25), 0x3fu);
+	KUNIT_EXPECT_EQ(test, sgx_render_bgtag_layers(0x80000000u | tag), 0u);
+	KUNIT_EXPECT_EQ(test, sgx_render_bgtag_set_layers(tag, 1), tag | 1u << 25);
+	KUNIT_EXPECT_EQ(test, sgx_render_bgtag_set_layers(tag | 0x3fu << 25, 1), tag | 1u << 25);
+	KUNIT_EXPECT_EQ(test, sgx_render_bgtag_set_layers(tag | 1u << 25, 0), tag);
+	KUNIT_EXPECT_EQ(test, sgx_render_bgtag_set_layers(0x80000000u | tag, 0x41),
+			0x80000000u | tag | 1u << 25);
 }
 
 /*
@@ -1292,6 +1353,8 @@ static struct kunit_case sgx_render_test_cases[] = {
 	KUNIT_CASE(sgx_render_test_scene_kick),
 	KUNIT_CASE(sgx_render_test_executed),
 	KUNIT_CASE(sgx_render_test_bgobj),
+	KUNIT_CASE(sgx_render_test_bgobj_layer),
+	KUNIT_CASE(sgx_render_test_bgtag_layers),
 	KUNIT_CASE(sgx_render_test_check_size),
 	KUNIT_CASE(sgx_render_test_check_max_size),
 	{}

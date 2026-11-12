@@ -182,6 +182,21 @@ static inline bool sgx_render_te_aa_ms(u32 te_aa)
 #define SGX_RENDER_PARAM_BG	0x464000
 #define SGX_RENDER_PARAM_SIZE	0x465000
 
+/* ISP_BGOBJTAG's texture layer count (TSPDATASIZE), as a transfer's tag has it. */
+#define SGX_RENDER_BGTAG_LAYERS_SHIFT	25
+#define SGX_RENDER_BGTAG_LAYERS_MASK	(0x3fu << SGX_RENDER_BGTAG_LAYERS_SHIFT)
+
+static inline u32 sgx_render_bgtag_layers(u32 tag)
+{
+	return (tag & SGX_RENDER_BGTAG_LAYERS_MASK) >> SGX_RENDER_BGTAG_LAYERS_SHIFT;
+}
+
+static inline u32 sgx_render_bgtag_set_layers(u32 tag, u32 layers)
+{
+	return (tag & ~SGX_RENDER_BGTAG_LAYERS_MASK) |
+	       (layers << SGX_RENDER_BGTAG_LAYERS_SHIFT & SGX_RENDER_BGTAG_LAYERS_MASK);
+}
+
 /*
  * The render targets the kernel takes: at most 4096 x 4096. A render context
  * states its own largest, at most this, when it is created.
@@ -308,7 +323,11 @@ void sgx_render_rd(u32 *rd, const struct sgx_render_addrs *a,
 u32 sgx_render_cmd(u8 *cmd, const struct sgx_render_addrs *a,
 		   const struct drm_sgxfive_render_cmd *c,
 		   const struct sgx_render_kick *k);
-void sgx_render_bgobj(u32 *bg, const struct drm_sgxfive_render_cmd *c);
+/*
+ * layers: the texture layers of the object's tag (render details' BGTAG bits
+ * 30:25): 0 the 17-dword object, any other the 23-dword one-layer form
+ */
+void sgx_render_bgobj(u32 *bg, const struct drm_sgxfive_render_cmd *c, u32 layers);
 void sgx_render_scene_kick(struct sgx_render_kick *k, u32 seqno, u32 status_val,
 			   bool first, bool last);
 u32 sgx_render_executed(const u8 *cmd);

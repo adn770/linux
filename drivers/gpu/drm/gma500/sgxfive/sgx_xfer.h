@@ -95,6 +95,9 @@ void sgx_xfer_bgobj_copy(u32 bg[SGX_XFER_BGOBJ1_DWORDS], u32 pds_base,
 			 u32 pri, u32 pri_data, u32 sec, u32 sec_data,
 			 const struct sgx_xfer_rect *dst,
 			 const struct sgx_xfer_rect *src, u32 src_w, u32 src_h);
+void sgx_xfer_bgobj_copy_words(u32 bg[SGX_XFER_BGOBJ1_DWORDS], const u32 words[3],
+			       const struct sgx_xfer_rect *dst,
+			       const struct sgx_xfer_rect *src, u32 src_w, u32 src_h);
 u32 sgx_xfer_fill_cmd(u8 *cmd, const struct sgx_xfer_fill *f);
 
 u32 sgx_xfer_dummy(u8 *cmd, u32 status_addr, u32 status_val, u32 update_addr,

@@ -265,6 +265,25 @@ static void sgx_xfer_test_bgobj_copy_coords(struct kunit *test)
 		KUNIT_EXPECT_EQ_MSG(test, bg[3 + i], want[i], "coord %u", i);
 }
 
+/*
+ * The one-layer object from its three PDS state words (a render's background
+ * with a layer) is the copy's object built from those words.
+ */
+static void sgx_xfer_test_bgobj_copy_words(struct kunit *test)
+{
+	static const struct sgx_xfer_rect src = { 8, 4, 40, 20 };
+	u32 want[SGX_XFER_BGOBJ1_DWORDS], bg[SGX_XFER_BGOBJ1_DWORDS + 1];
+	unsigned int i;
+
+	sgx_xfer_bgobj_copy(want, 0x2e000000, 0x2e000000, 0x30, 0x2e000020, 0x10,
+			    &rect64x32, &src, 48, 32);
+	memset(bg, 0xa5, sizeof(bg));
+	sgx_xfer_bgobj_copy_words(bg, want, &rect64x32, &src, 48, 32);
+	for (i = 0; i < SGX_XFER_BGOBJ1_DWORDS; i++)
+		KUNIT_EXPECT_EQ_MSG(test, bg[i], want[i], "dword %u", i);
+	KUNIT_EXPECT_EQ(test, bg[SGX_XFER_BGOBJ1_DWORDS], 0xa5a5a5a5u);	/* no further */
+}
+
 /* A copy's command differs from the fill only in the tag's layer count. */
 static void sgx_xfer_test_copy_cmd(struct kunit *test)
 {
@@ -347,6 +366,7 @@ static struct kunit_case sgx_xfer_test_cases[] = {
 	KUNIT_CASE(sgx_xfer_test_render_box),
 	KUNIT_CASE(sgx_xfer_test_bgobj_copy),
 	KUNIT_CASE(sgx_xfer_test_bgobj_copy_coords),
+	KUNIT_CASE(sgx_xfer_test_bgobj_copy_words),
 	KUNIT_CASE(sgx_xfer_test_copy_cmd),
 	KUNIT_CASE(sgx_xfer_test_add_update),
 	{}

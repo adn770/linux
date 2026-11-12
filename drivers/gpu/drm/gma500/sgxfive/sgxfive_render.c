@@ -594,9 +594,48 @@ void sgxfive_render_job_build(struct sgxfive_ctx *ctx, struct sgxfive_job *job)
 }
 
 /*
+ * The texture layers of the background object's tag in a render image's
+ * render details (0 unless debugfs render_bg_layer set one at submission),
+ * which say the object's form (sgx_render_bgobj).
+ */
+u32 sgxfive_render_img_bg_layers(const u8 *img)
+{
+	u32 tag;
+
+	memcpy(&tag, img + SGXFIVE_RENDER_IMG_RD + SGX_RENDER_RD_BGTAG, 4);
+	return sgx_render_bgtag_layers(tag);
+}
+
+void sgxfive_render_img_set_bg_layers(u8 *img, u32 layers)
+{
+	u8 *at = img + SGXFIVE_RENDER_IMG_RD + SGX_RENDER_RD_BGTAG;
+	u32 tag;
+
+	memcpy(&tag, at, 4);
+	tag = sgx_render_bgtag_set_layers(tag, layers);
+	memcpy(at, &tag, 4);
+}
+
+/*
+ * The background object of a render image (the copy in its fence) at bg: its
+ * inputs, the PDS words and target size its TA command carries, into c, and
+ * its form from its tag's layers.
+ */
+void sgxfive_render_img_bg(u32 *bg, struct drm_sgxfive_render_cmd *c, const u8 *img)
+{
+	unsigned int i;
+
+	for (i = 0; i < 3; i++)
+		memcpy(&c->bgobj_words[i], img + SGX_RENDER_CMD_SPEC + 4 * i, 4);
+	memcpy(&c->mte_screen, img + SGX_RENDER_CMD_TAREGS + SGX_RENDER_TA_MTESCREEN, 4);
+	sgx_render_bgobj(bg, c, sgxfive_render_img_bg_layers(img));
+}
+
+/*
  * Under the device lock, with the context's previous render finished, the
  * words a render job's run writes before its kick, in order: its render
- * details (from its image cmd) and its background object (at bg) in place,
+ * details (from its image cmd) and its background object (at bg, in the form
+ * its details' tag gives) in place,
  * the RT data's size words for its target (its TE words were checked against
  * the same layout), its out-of-memory counters cleared (sgx_render_rtds_job;
  * neither with the debug option's rtds_keep), the kick in the RT data set's
@@ -613,7 +652,7 @@ void sgxfive_render_write(struct sgxfive_ctx *ctx, u32 *bg,
 
 	memcpy(rctx(ctx, SGXFIVE_RCTX_RD_OFF), cmd + SGXFIVE_RENDER_IMG_RD,
 	       SGX_RENDER_RD_SIZE);
-	sgx_render_bgobj(bg, rc);
+	sgx_render_bgobj(bg, rc, sgxfive_render_img_bg_layers(cmd));
 	*rctx(ctx, SGXFIVE_RCTX_BGPRI_OFF) = rc->bgobj_words[2];
 	if (!sgxfive_rtds_keep(ctx->sgx)) {
 		sgx_render_rtds_resize(rctx(ctx, SGXFIVE_RCTX_RTDS_OFF), rc->mte_screen);
@@ -678,7 +717,7 @@ u32 sgxfive_render_reset(struct sgxfive_ctx *ctx)
 	struct drm_sgxfive_render_cmd c = { 0 };
 	struct sgxfive_fence *f;
 	unsigned long flags;
-	u32 n, i;
+	u32 n;
 
 	sgxfive_render_init_mem(r);
 	n = sgxfive_ctx_rewind(ctx);
@@ -688,12 +727,8 @@ u32 sgxfive_render_reset(struct sgxfive_ctx *ctx)
 	if (f) {
 		memcpy(rctx(ctx, SGXFIVE_RCTX_RD_OFF), f->cmd + SGXFIVE_RENDER_IMG_RD,
 		       SGX_RENDER_RD_SIZE);
-		/* The background object's inputs, as the command carries them. */
-		for (i = 0; i < 3; i++)
-			memcpy(&c.bgobj_words[i], f->cmd + SGX_RENDER_CMD_SPEC + 4 * i, 4);
-		memcpy(&c.mte_screen, f->cmd + SGX_RENDER_CMD_TAREGS +
-		       SGX_RENDER_TA_MTESCREEN, 4);
-		sgx_render_bgobj(render_bg(r), &c);
+		/* The background object from its inputs, as the command carries them. */
+		sgxfive_render_img_bg(render_bg(r), &c, f->cmd);
 		*rctx(ctx, SGXFIVE_RCTX_BGPRI_OFF) = c.bgobj_words[2];
 		sgx_render_rtds_resize(rctx(ctx, SGXFIVE_RCTX_RTDS_OFF), c.mte_screen);
 	}

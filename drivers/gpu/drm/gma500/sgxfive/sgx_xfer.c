@@ -208,13 +208,28 @@ void sgx_xfer_bgobj_copy(u32 bg[SGX_XFER_BGOBJ1_DWORDS], u32 pds_base,
 			 const struct sgx_xfer_rect *dst,
 			 const struct sgx_xfer_rect *src, u32 src_w, u32 src_h)
 {
+	u32 words[3];
+
+	put_pds_state(words, pds_base, pri, pri_data, sec, sec_data, 1);
+	sgx_xfer_bgobj_copy_words(bg, words, dst, src, src_w, src_h);
+}
+
+/*
+ * The same one-layer object from its three PDS state words, as a render
+ * command gives them (a render's background with a layer).
+ */
+void sgx_xfer_bgobj_copy_words(u32 bg[SGX_XFER_BGOBJ1_DWORDS], const u32 words[3],
+			       const struct sgx_xfer_rect *dst,
+			       const struct sgx_xfer_rect *src, u32 src_w, u32 src_h)
+{
 	u32 u0 = coord(src->x0, src_w), u1 = coord(src->x1, src_w);
 	u32 v0 = coord(src->y0, src_h), v1 = coord(src->y1, src_h);
 	unsigned int i;
 
 	for (i = 0; i < SGX_XFER_BGOBJ1_DWORDS; i++)
 		bg[i] = 0;
-	put_pds_state(bg, pds_base, pri, pri_data, sec, sec_data, 1);
+	for (i = 0; i < 3; i++)
+		bg[i] = words[i];
 	bg[3] = u0;
 	bg[4] = v0;
 	bg[5] = u1;

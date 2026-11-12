@@ -22,6 +22,7 @@
 #include "sgx_mmu.h"
 #include "sgx_render.h"
 #include "sgx_seq.h"
+#include "sgx_xfer.h"
 #include "sgxfive_ctx.h"
 #include "sgxfive_kpoke.h"
 #include "sgxfive_priv.h"
@@ -916,6 +917,7 @@ static void sgxfive_debug_test_render_run(struct kunit *test)
 	u32 *pending = sgxfive_ctx_cpu(ctx, SGXFIVE_RCTX_PENDING_OFF);
 	u32 *ctl = sgxfive_ctx_cpu(ctx, SGXFIVE_CTX_CTL_OFF);
 	u32 want[SGX_RENDER_RTDS_SIZE / 4], kept[SGX_RENDER_RTDS_SIZE / 4];
+	u32 obj[SGX_XFER_BGOBJ1_DWORDS];
 	struct sgxfive_kpoke p[ARRAY_SIZE(lines)];
 	struct drm_sgxfive_render_cmd c = { };
 	struct sgx_render_tadata td;
@@ -979,6 +981,22 @@ static void sgxfive_debug_test_render_run(struct kunit *test)
 	sgx->rtds_keep = false;
 	sgxfive_render_write(ctx, bg, &c, img, size);
 	KUNIT_EXPECT_EQ(test, memcmp(rtds, want, sizeof(want)), 0);
+
+	/* A layer in the image's tag: the one-layer object, 23 dwords, nothing past. */
+	memset(bg, 0xa5, PAGE_SIZE);
+	sgxfive_render_img_set_bg_layers(img, 1);
+	sgxfive_render_write(ctx, bg, &c, img, size);
+	sgx_render_bgobj(obj, &c, 1);
+	KUNIT_EXPECT_EQ(test, memcmp(bg, obj, sizeof(obj)), 0);
+	KUNIT_EXPECT_EQ(test, bg[SGX_XFER_BGOBJ1_DWORDS], 0xa5a5a5a5u);
+	KUNIT_EXPECT_EQ(test, *(u32 *)sgxfive_ctx_cpu(ctx, SGXFIVE_RCTX_BGPRI_OFF), 0x103u);
+	/* and without it the 17 of before, the six after them as they were */
+	sgxfive_render_img_set_bg_layers(img, 0);
+	sgxfive_render_write(ctx, bg, &c, img, size);
+	for (i = SGX_XFER_BGOBJ_DWORDS; i < SGX_XFER_BGOBJ1_DWORDS; i++)
+		KUNIT_EXPECT_EQ_MSG(test, bg[i], obj[i], "dword %u", i);
+	sgx_render_bgobj(obj, &c, 0);
+	KUNIT_EXPECT_EQ(test, memcmp(bg, obj, 4 * SGX_XFER_BGOBJ_DWORDS), 0);
 }
 
 /*

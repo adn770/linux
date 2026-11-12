@@ -190,6 +190,9 @@ u32 sgxfive_render_reset(struct sgxfive_ctx *ctx);
 int sgxfive_render_job_error(struct sgxfive_ctx *ctx);
 void sgxfive_render_job_scene(struct sgxfive_ctx *ctx, struct sgxfive_job *job, bool geometry);
 void sgxfive_render_job_build(struct sgxfive_ctx *ctx, struct sgxfive_job *job);
+u32 sgxfive_render_img_bg_layers(const u8 *img);
+void sgxfive_render_img_set_bg_layers(u8 *img, u32 layers);
+void sgxfive_render_img_bg(u32 *bg, struct drm_sgxfive_render_cmd *c, const u8 *img);
 #if IS_ENABLED(CONFIG_DRM_GMA500_SGXFIVE_DEBUG)
 size_t sgxfive_pages_copy(struct page **pages, unsigned int n, void *dst, size_t len,
 			  loff_t off);
