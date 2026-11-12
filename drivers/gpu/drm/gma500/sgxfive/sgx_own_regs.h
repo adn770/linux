@@ -36,7 +36,7 @@ enum sgx_own_kind {
 
 static const u16 sgx_own_clockgate_regs[] __maybe_unused = { 0, 1, 2, 3 };
 static const u16 sgx_own_str_regs[] __maybe_unused = { 69, 77, 517, 670, 691 };
-static const u16 sgx_own_ldr_regs[] __maybe_unused = { 7, 8, 81, 517, 670 };
+static const u16 sgx_own_ldr_regs[] __maybe_unused = { 7, 8, 81, 457, 459, 517, 670 };
 
 /* every register offset a deny row names, for the tests: lo, hi */
 static const u16 sgx_own_deny[][2] __maybe_unused = {

@@ -121,6 +121,18 @@ static void sgxfive_owntask_test_register_lists(struct kunit *test)
 	/* and of the EDM timer, which the closed tick handler writes */
 	KUNIT_EXPECT_TRUE(test, sgx_own_reg_ok(0x0acc / 4, true));
 	KUNIT_EXPECT_FALSE(test, sgx_own_reg_ok(0x0acc / 4, false));
+	/* ldr, never str, of the two DPM page status registers */
+	KUNIT_EXPECT_TRUE(test, sgx_own_reg_ok(0x0724 / 4, false));
+	KUNIT_EXPECT_TRUE(test, sgx_own_reg_ok(0x072c / 4, false));
+	KUNIT_EXPECT_FALSE(test, sgx_own_reg_ok(0x0724 / 4, true));
+	KUNIT_EXPECT_FALSE(test, sgx_own_reg_ok(0x072c / 4, true));
+	/* and nothing around them */
+	for (i = 0; i < 4; i++) {
+		static const u16 off[] = { 0x0720, 0x0728, 0x0730, 0x0734 };
+
+		KUNIT_EXPECT_FALSE(test, sgx_own_reg_ok(off[i] / 4, true));
+		KUNIT_EXPECT_FALSE(test, sgx_own_reg_ok(off[i] / 4, false));
+	}
 }
 
 static bool own_in_deny_row(unsigned int off)
