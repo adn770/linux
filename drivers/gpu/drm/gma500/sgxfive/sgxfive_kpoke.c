@@ -395,6 +395,30 @@ int sgxfive_kregnow_parse(const char *s, u32 *off, bool *flip, u32 *value)
 	return *flip && sgxfive_kregnow_wo(*off) ? -EINVAL : 0;
 }
 
+const u32 sgxfive_peek_allowed[SGXFIVE_PEEK_COUNT] = { SGX_DPM_TASK_STATE };
+
+bool sgxfive_peek_ok(u32 off)
+{
+	unsigned int i;
+
+	for (i = 0; i < SGXFIVE_PEEK_COUNT; i++)
+		if (sgxfive_peek_allowed[i] == off)
+			return true;
+	return false;
+}
+
+int sgxfive_peek_parse(const char *s, u32 *off)
+{
+	u32 v;
+
+	if (kstrtou32(s, 0, &v))
+		return -EINVAL;
+	if (!sgxfive_peek_ok(v))
+		return -EPERM;
+	*off = v;
+	return 0;
+}
+
 int sgxfive_kicker_parse(const char *s, u32 *value)
 {
 	u32 v;

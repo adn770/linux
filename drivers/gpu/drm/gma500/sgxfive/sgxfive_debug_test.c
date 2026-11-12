@@ -25,6 +25,7 @@
 #include "sgxfive_ctx.h"
 #include "sgxfive_kpoke.h"
 #include "sgxfive_priv.h"
+#include "sgxfive_regdump.h"
 
 static const struct sgx_render_addrs addrs = {
 	.param_base = 0x10000000, .pbdesc = 0x32152300, .pbblock = 0x32152340,
@@ -506,6 +507,85 @@ static void sgxfive_debug_test_kregnow_bif(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, regs[SGX_BIF_INT_STAT / 4], 0x80000u);
 	sgxfive_fence_fail_all(ctx, -EIO);
 	dma_fence_put(f);
+}
+
+/*
+ * debugfs peek: one read of 0x0694 (CR_DPM_TASK_STATE), which the regs file
+ * skips. Every register on its list is a skipped firmware register of the
+ * snapshot table; 0x0690, the other skipped ones, the host's write registers
+ * and anything off the table are refused (-EPERM), with nothing read; while no
+ * firmware runs, -ENODEV.
+ */
+static void sgxfive_debug_test_peek(struct kunit *test)
+{
+	static const u32 refused[] = {
+		0x0690, 0x0698, 0x0680, 0x0684, 0x069c, 0x0695, 0x0696, SGX_DPM_TASK_FIELDS,
+		SGX_EVENT_HOST_CLEAR, SGX_EVENT_HOST_CLEAR2, SGX_EVENT_HOST_ENABLE,
+		SGX_EVENT_HOST_ENABLE2, SGX_CLKGATECTL2, SGX_BIF_CTRL, SGX_BIF_INT_STAT,
+		0x1000, 0xfffffffc,
+	};
+	struct sgxfive *sgx = kunit_kzalloc(test, sizeof(*sgx), GFP_KERNEL);
+	u32 *regs = kunit_kzalloc(test, SZ_4K, GFP_KERNEL);
+	unsigned int i, j, skipped = 0;
+	u32 off, v;
+
+	KUNIT_ASSERT_NOT_NULL(test, sgx);
+	KUNIT_ASSERT_NOT_NULL(test, regs);
+	KUNIT_EXPECT_EQ(test, SGX_DPM_TASK_STATE, 0x0694);
+	KUNIT_EXPECT_EQ(test, SGXFIVE_PEEK_COUNT, 1);
+	KUNIT_EXPECT_EQ(test, sgxfive_peek_allowed[0], (u32)SGX_DPM_TASK_STATE);
+	for (i = 0; i < SGXFIVE_PEEK_COUNT; i++) {
+		bool skip = false;
+
+		for (j = 0; j < SGXFIVE_REGDUMP_NREGS; j++)
+			if (sgxfive_regdump_regs[j].off == sgxfive_peek_allowed[i])
+				skip = sgxfive_regdump_regs[j].flags ==
+				       (SGXFIVE_REGDUMP_FW | SGXFIVE_REGDUMP_SKIP);
+		KUNIT_EXPECT_TRUE_MSG(test, skip, "%#x", sgxfive_peek_allowed[i]);
+	}
+	for (j = 0; j < SGXFIVE_REGDUMP_NREGS; j++) {
+		const struct sgxfive_regdump_reg *r = &sgxfive_regdump_regs[j];
+
+		if (!(r->flags & SGXFIVE_REGDUMP_SKIP))
+			continue;
+		skipped++;
+		KUNIT_EXPECT_EQ_MSG(test, sgxfive_peek_ok(r->off), r->off == SGX_DPM_TASK_STATE,
+				    "%#x", r->off);
+	}
+	KUNIT_EXPECT_EQ(test, skipped, 21u);
+	for (i = 0; i < ARRAY_SIZE(refused); i++)
+		KUNIT_EXPECT_FALSE_MSG(test, sgxfive_peek_ok(refused[i]), "%#x", refused[i]);
+
+	/* the offset as written */
+	KUNIT_EXPECT_EQ(test, sgxfive_peek_parse("0x0694", &off), 0);
+	KUNIT_EXPECT_EQ(test, off, 0x0694u);
+	KUNIT_EXPECT_EQ(test, sgxfive_peek_parse("0x694", &off), 0);
+	KUNIT_EXPECT_EQ(test, sgxfive_peek_parse("1684", &off), 0);
+	KUNIT_EXPECT_EQ(test, off, 0x0694u);
+	off = 0x0694;
+	KUNIT_EXPECT_EQ(test, sgxfive_peek_parse("0x0690", &off), -EPERM);
+	KUNIT_EXPECT_EQ(test, sgxfive_peek_parse("0x0c00", &off), -EPERM);
+	KUNIT_EXPECT_EQ(test, sgxfive_peek_parse("", &off), -EINVAL);
+	KUNIT_EXPECT_EQ(test, sgxfive_peek_parse("0x0694=1", &off), -EINVAL);
+	KUNIT_EXPECT_EQ(test, sgxfive_peek_parse("dpm", &off), -EINVAL);
+	KUNIT_EXPECT_EQ(test, off, 0x0694u);
+
+	/* the read */
+	sgx->regs = (void __iomem *)regs;
+	mutex_init(&sgx->lock);
+	regs[SGX_DPM_TASK_STATE / 4] = 0x2;
+	regs[0x0690 / 4] = 0x55;
+	v = 0xa5a5a5a5;
+	KUNIT_EXPECT_EQ(test, sgxfive_peek_read(sgx, SGX_DPM_TASK_STATE, &v), -ENODEV);
+	KUNIT_EXPECT_EQ(test, v, 0xa5a5a5a5u);
+	sgx->live = true;
+	KUNIT_EXPECT_EQ(test, sgxfive_peek_read(sgx, SGX_DPM_TASK_STATE, &v), 0);
+	KUNIT_EXPECT_EQ(test, v, 0x2u);
+	v = 0xa5a5a5a5;
+	KUNIT_EXPECT_EQ(test, sgxfive_peek_read(sgx, 0x0690, &v), -EPERM);
+	KUNIT_EXPECT_EQ(test, sgxfive_peek_read(sgx, SGX_BIF_CTRL, &v), -EPERM);
+	KUNIT_EXPECT_EQ(test, v, 0xa5a5a5a5u);
+	KUNIT_EXPECT_EQ(test, regs[SGX_DPM_TASK_STATE / 4], 0x2u);	/* read, not written */
 }
 
 /* A running device whose registers and kernel CCB are plain memory, idle. */
@@ -1084,6 +1164,7 @@ static struct kunit_case sgxfive_debug_test_cases[] = {
 	KUNIT_CASE(sgxfive_debug_test_held_reset),
 	KUNIT_CASE(sgxfive_debug_test_held_reset_closed),
 	KUNIT_CASE(sgxfive_debug_test_kregnow_bif),
+	KUNIT_CASE(sgxfive_debug_test_peek),
 	KUNIT_CASE(sgxfive_debug_test_kicker_parse),
 	KUNIT_CASE(sgxfive_debug_test_kicker_write),
 	KUNIT_CASE(sgxfive_debug_test_kick_no_bump),

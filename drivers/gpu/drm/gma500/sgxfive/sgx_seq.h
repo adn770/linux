@@ -24,6 +24,7 @@
 #define SGX_EVENT_HOST_CLEAR	0x134
 #define SGX_EVENT_SW		0x00004000	/* EVENT_STATUS: the EDM's software event */
 #define SGX_EVENT_MASTER	0x80000000
+#define SGX_DPM_TASK_STATE	0x694	/* CR_DPM_TASK_STATE; a write starts a DPM task */
 #define SGX_DPM_TASK_FIELDS	0x740	/* the TA kick reads its DPM store and load task indexes */
 #define SGX_EVENT_KICK		0xac8
 #define SGX_EVENT_KICK2		0xae8

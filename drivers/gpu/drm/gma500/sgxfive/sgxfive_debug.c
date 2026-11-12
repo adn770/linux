@@ -1290,6 +1290,67 @@ static const struct file_operations sgxfive_kicker_fops = {
 	.write = sgxfive_kicker_fwrite, .llseek = seq_lseek, .release = single_release,
 };
 
+/*
+ * debugfs peek (sgxfive_kpoke.h): CR_DPM_TASK_STATE is skipped by the regs file
+ * with the registers whose write starts work, since nothing showed a read of
+ * them harmless; the firmware reads this one itself, so the host may too.
+ */
+int sgxfive_peek_read(struct sgxfive *sgx, u32 off, u32 *val)
+{
+	int ret = 0;
+
+	if (!sgxfive_peek_ok(off))
+		return -EPERM;
+	mutex_lock(&sgx->lock);
+	if (!sgx->live)
+		ret = -ENODEV;
+	else
+		*val = sgxfive_rd(sgx, off);
+	mutex_unlock(&sgx->lock);
+	return ret;
+}
+
+static int sgxfive_peek_show(struct seq_file *m, void *unused)
+{
+	struct sgxfive *sgx = m->private;
+	u32 off = READ_ONCE(sgx->peek_off), val;
+	int ret = sgxfive_peek_read(sgx, off, &val);
+
+	if (!ret)
+		seq_printf(m, "reg 0x%04x 0x%08x\n", off, val);
+	return ret;
+}
+
+static int sgxfive_peek_open(struct inode *inode, struct file *f)
+{
+	return single_open(f, sgxfive_peek_show, inode->i_private);
+}
+
+static ssize_t sgxfive_peek_fwrite(struct file *f, const char __user *ubuf, size_t len,
+				   loff_t *ppos)
+{
+	struct sgxfive *sgx = file_inode(f)->i_private;
+	char buf[16];
+	u32 off;
+	int ret;
+
+	if (!len || len >= sizeof(buf))
+		return -EINVAL;
+	if (copy_from_user(buf, ubuf, len))
+		return -EFAULT;
+	buf[len] = '\0';
+	ret = sgxfive_peek_parse(strim(buf), &off);
+	if (ret)
+		return ret;
+	WRITE_ONCE(sgx->peek_off, off);
+	return len;
+}
+
+static const struct file_operations sgxfive_peek_fops = {
+	.owner = THIS_MODULE, .open = sgxfive_peek_open, .read = seq_read,
+	.write = sgxfive_peek_fwrite, .llseek = seq_lseek, .release = single_release,
+};
+
 /* From the host's SGX interrupt, before the driver acts on it. */
 void sgxfive_debug_irq(struct sgxfive *sgx, u32 stat_1, u32 stat_2)
 {
@@ -1938,6 +1999,9 @@ void sgxfive_debug_init(struct sgxfive *sgx, struct dentry *dir)
 	debugfs_create_file("kreg", 0600, dir, sgx, &sgxfive_kreg_fops);
 	debugfs_create_file("tadata_fill", 0600, dir, sgx, &sgxfive_tdfill_fops);
 	debugfs_create_file("kregnow", 0600, dir, sgx, &sgxfive_kregnow_fops);
+	/* One read of a register the regs file skips: CR_DPM_TASK_STATE. */
+	sgx->peek_off = SGX_DPM_TASK_STATE;
+	debugfs_create_file("peek", 0600, dir, sgx, &sgxfive_peek_fops);
 	debugfs_create_file("kicker", 0600, dir, sgx, &sgxfive_kicker_fops);
 	debugfs_create_bool("kick_no_bump", 0600, dir, &sgx->kick_no_bump);
 	/* Pages of the PB of render contexts created from now on. */

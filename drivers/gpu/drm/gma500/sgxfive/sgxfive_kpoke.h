@@ -165,6 +165,20 @@ int sgxfive_kregnow_parse(const char *s, u32 *off, bool *flip, u32 *value);
 int sgxfive_kregnow_write(struct sgxfive *sgx, u32 off, bool flip, u32 value);
 
 /*
+ * debugfs peek: one read of a register the regs file skips because its write
+ * starts work (SGXFIVE_REGDUMP_SKIP), from a list of those the firmware
+ * itself reads: 0x0694, CR_DPM_TASK_STATE, only. Write the offset ("0x0694";
+ * -EINVAL if not a number, -EPERM off the list), read "reg 0x0694 0x...".
+ * The read (sgxfive_debug.c): a plain MMIO read under the device lock, never
+ * a write; -ENODEV while no firmware runs, -EPERM off the list.
+ */
+#define SGXFIVE_PEEK_COUNT	1
+extern const u32 sgxfive_peek_allowed[SGXFIVE_PEEK_COUNT];
+bool sgxfive_peek_ok(u32 off);
+int sgxfive_peek_parse(const char *s, u32 *off);
+int sgxfive_peek_read(struct sgxfive *sgx, u32 off, u32 *val);
+
+/*
  * debugfs kicker: "=N" sets the event-kicker word to N (0 to 255), with no
  * command and no kick (-EINVAL for anything else). The write
  * (sgxfive_debug.c): -ENODEV before the firmware runs, -EBUSY while a job is

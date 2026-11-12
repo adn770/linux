@@ -158,6 +158,7 @@ struct sgxfive {
 	struct sgxfive_keep kept;	/* the kept ones (debugfs render_keep) */
 	bool kick_no_bump;		/* the next command leaves the kicker word, once */
 	u32 event_kicks;		/* EVENT_KICK writes since the kicker word was zeroed */
+	u32 peek_off;			/* debugfs peek's register */
 	struct sgxfive_tdfill tdfill;	/* the next render's TA data page fill */
 	struct sgxfive_hostirq hostirq;	/* host interrupts, kregnow's enables */
 	struct sgxfive_own own;		/* our own firmware task: blob and arming */
