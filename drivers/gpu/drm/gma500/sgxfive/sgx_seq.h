@@ -80,6 +80,11 @@ struct sgx_seq {
 };
 
 int sgx_seq_boot(const struct sgx_seq *s);
+/*
+ * Invalidate the BIF's caches on a running GPU: CR_BIF_CTRL's INVALDC set and
+ * cleared, the register's other bits kept, then the boot sequence's delay.
+ */
+void sgx_seq_bif_flush(const struct sgx_seq *s);
 
 /*
  * The kernel CCB: 256 commands of eight dwords each, {service, cache

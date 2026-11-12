@@ -1351,6 +1351,79 @@ static const struct file_operations sgxfive_peek_fops = {
 	.write = sgxfive_peek_fwrite, .llseek = seq_lseek, .release = single_release,
 };
 
+static u32 bif_flush_rd(void *ctx, u32 reg)
+{
+	return sgxfive_rd(ctx, reg);
+}
+
+static void bif_flush_wr(void *ctx, u32 reg, u32 val)
+{
+	struct sgxfive *sgx = ctx;
+
+	iowrite32(val, sgx->regs + reg);
+	(void)sgxfive_rd(sgx, reg);	/* post */
+}
+
+static void bif_flush_udelay(void *ctx, unsigned int us)
+{
+	udelay(us);
+}
+
+/*
+ * debugfs bif_flush (sgxfive_kpoke.h): E848 saw resets that end a held
+ * recovery time out (-110); whether the BIF's caches still hold the faulted
+ * job's translations then is not known. Only while a recovery is held, so the
+ * firmware has stopped on the fault and nothing else runs; the hold stays.
+ */
+int sgxfive_bif_flush(struct sgxfive *sgx)
+{
+	const struct sgx_seq s = {
+		.rd = bif_flush_rd, .wr = bif_flush_wr, .udelay = bif_flush_udelay, .ctx = sgx,
+	};
+	int ret = 0;
+	u32 old;
+
+	if (!READ_ONCE(sgx->live))
+		return -ENODEV;
+	mutex_lock(&sgx->lock);
+	if (!sgx->live) {
+		ret = -ENODEV;
+	} else if (!sgxfive_recovery_held(sgx)) {
+		ret = -EBUSY;
+	} else {
+		old = sgxfive_rd(sgx, SGX_BIF_CTRL);
+		sgx_seq_bif_flush(&s);
+		drm_info(sgx->dev, "sgxfive: bif_flush: BIF_CTRL 0x%08x -> 0x%08x, BIF_INT_STAT 0x%08x BIF_FAULT 0x%08x MEM_REQ_STAT 0x%08x\n",
+			 old, sgxfive_rd(sgx, SGX_BIF_CTRL), sgxfive_rd(sgx, SGX_BIF_INT_STAT),
+			 sgxfive_rd(sgx, SGX_BIF_FAULT), sgxfive_rd(sgx, SGX_BIF_MEM_REQ_STAT));
+	}
+	mutex_unlock(&sgx->lock);
+	return ret;
+}
+
+static ssize_t sgxfive_bif_flush_fwrite(struct file *f, const char __user *ubuf, size_t len,
+					loff_t *ppos)
+{
+	struct sgxfive *sgx = file_inode(f)->i_private;
+	char buf[8];
+	int ret;
+
+	if (!len || len >= sizeof(buf))
+		return -EINVAL;
+	if (copy_from_user(buf, ubuf, len))
+		return -EFAULT;
+	buf[len] = '\0';
+	ret = sgxfive_bif_flush_parse(strim(buf));
+	if (!ret)
+		ret = sgxfive_bif_flush(sgx);
+	return ret ? ret : len;
+}
+
+static const struct file_operations sgxfive_bif_flush_fops = {
+	.owner = THIS_MODULE,
+	.write = sgxfive_bif_flush_fwrite,
+};
+
 /* From the host's SGX interrupt, before the driver acts on it. */
 void sgxfive_debug_irq(struct sgxfive *sgx, u32 stat_1, u32 stat_2)
 {
@@ -2040,6 +2113,8 @@ void sgxfive_debug_init(struct sgxfive *sgx, struct dentry *dir)
 	debugfs_create_x32("timer_clock", 0600, dir, &sgx->timer_clock);
 	/* Hangs and faults reported, not recovered, until reset is written. */
 	debugfs_create_bool("hold_recovery", 0600, dir, &sgx->hold_recovery);
+	/* "1": invalidate the BIF's caches while a recovery is held, before its reset. */
+	debugfs_create_file("bif_flush", 0200, dir, sgx, &sgxfive_bif_flush_fops);
 	/* Renders leave the RT data set's size words and counters as they are. */
 	debugfs_create_bool("rtds_keep", 0600, dir, &sgx->rtds_keep);
 	/* Our own firmware task: its code, its results page and what is armed (sgxfive_owntask.h). */

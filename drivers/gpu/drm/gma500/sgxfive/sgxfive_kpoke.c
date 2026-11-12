@@ -419,6 +419,13 @@ int sgxfive_peek_parse(const char *s, u32 *off)
 	return 0;
 }
 
+int sgxfive_bif_flush_parse(const char *s)
+{
+	u32 v;
+
+	return kstrtou32(s, 0, &v) || v != 1 ? -EINVAL : 0;
+}
+
 int sgxfive_kicker_parse(const char *s, u32 *value)
 {
 	u32 v;

@@ -41,6 +41,20 @@ static void inval_dc(const struct sgx_seq *s)
 	delay(s);
 }
 
+/*
+ * The same invalidate with the other bits of CR_BIF_CTRL kept, for a running
+ * GPU: the firmware reaches the register too (debugfs bif_flush, before the
+ * reset that ends a held recovery).
+ */
+void sgx_seq_bif_flush(const struct sgx_seq *s)
+{
+	const u32 ctrl = s->rd(s->ctx, SGX_BIF_CTRL) & ~SGX_BIF_CTRL_INVALDC;
+
+	wr(s, SGX_BIF_CTRL, ctrl | SGX_BIF_CTRL_INVALDC);
+	wr(s, SGX_BIF_CTRL, ctrl);
+	delay(s);
+}
+
 int sgx_seq_boot(const struct sgx_seq *s)
 {
 	unsigned int i;

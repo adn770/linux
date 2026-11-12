@@ -179,6 +179,16 @@ int sgxfive_peek_parse(const char *s, u32 *off);
 int sgxfive_peek_read(struct sgxfive *sgx, u32 off, u32 *val);
 
 /*
+ * debugfs bif_flush: "1" invalidates the BIF's caches (sgx_seq_bif_flush(),
+ * no clock-gate write) while a recovery is held, before the reset written to
+ * debugfs reset ends it; -EINVAL for anything else. The flush
+ * (sgxfive_debug.c): -ENODEV while no firmware runs, -EBUSY with nothing
+ * held; logged with the BIF status registers as read right after it.
+ */
+int sgxfive_bif_flush_parse(const char *s);
+int sgxfive_bif_flush(struct sgxfive *sgx);
+
+/*
  * debugfs kicker: "=N" sets the event-kicker word to N (0 to 255), with no
  * command and no kick (-EINVAL for anything else). The write
  * (sgxfive_debug.c): -ENODEV before the firmware runs, -EBUSY while a job is

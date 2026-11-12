@@ -22,6 +22,7 @@ struct rec {
 	u32 op[MAX_OPS][2];
 	unsigned int n;
 	u32 int_stat;		/* what BIF_INT_STAT reads as */
+	u32 ctrl;		/* what BIF_CTRL reads as */
 };
 
 static void rec_add(struct rec *r, u32 a, u32 b)
@@ -38,6 +39,8 @@ static u32 rec_rd(void *ctx, u32 reg)
 	struct rec *r = ctx;
 
 	rec_add(r, OP_READ, reg);
+	if (reg == SGX_BIF_CTRL)
+		return r->ctrl;
 	return reg == SGX_BIF_INT_STAT ? r->int_stat : 0xffffffff;
 }
 
@@ -204,10 +207,44 @@ static void sgx_seq_test_ccb_errors(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, kicker, 0u);
 }
 
+/*
+ * The BIF flush before a held reset (debugfs bif_flush): CR_BIF_CTRL read, its
+ * invalidate bit (INVALDC, the boot sequence's) set and cleared again with the
+ * other bits as they were, then the boot sequence's delay; no other register.
+ */
+static void sgx_seq_test_bif_flush(struct kunit *test)
+{
+	static const struct { u32 ctrl, set, clear; } want[] = {
+		{ 0, 0x8, 0 }, { 0x10, 0x18, 0x10 }, { 0x8, 0x8, 0 }, { 0x1c, 0x1c, 0x14 },
+	};
+	struct sgx_seq s;
+	struct rec *r = kunit_kzalloc(test, sizeof(*r), GFP_KERNEL);
+	unsigned int i;
+
+	KUNIT_ASSERT_NOT_NULL(test, r);
+	for (i = 0; i < ARRAY_SIZE(want); i++) {
+		memset(r, 0, sizeof(*r));
+		seq(&s, r);
+		r->ctrl = want[i].ctrl;
+		sgx_seq_bif_flush(&s);
+		KUNIT_ASSERT_EQ(test, r->n, 4u);
+		KUNIT_EXPECT_EQ(test, r->op[0][0], OP_READ);
+		KUNIT_EXPECT_EQ(test, r->op[0][1], (u32)SGX_BIF_CTRL);
+		KUNIT_EXPECT_EQ(test, r->op[1][0], (u32)SGX_BIF_CTRL);
+		KUNIT_EXPECT_EQ_MSG(test, r->op[1][1], want[i].set, "%#x", want[i].ctrl);
+		KUNIT_EXPECT_EQ(test, r->op[2][0], (u32)SGX_BIF_CTRL);
+		KUNIT_EXPECT_EQ_MSG(test, r->op[2][1], want[i].clear, "%#x", want[i].ctrl);
+		KUNIT_EXPECT_EQ(test, r->op[3][0], OP_DELAY);
+		KUNIT_EXPECT_EQ(test, r->op[3][1], 1u);
+	}
+	KUNIT_EXPECT_EQ(test, SGX_BIF_CTRL_INVALDC, 0x8);
+}
+
 static struct kunit_case sgx_seq_test_cases[] = {
 	KUNIT_CASE(sgx_seq_test_boot),
 	KUNIT_CASE(sgx_seq_test_bif_fault),
 	KUNIT_CASE(sgx_seq_test_dir_list),
+	KUNIT_CASE(sgx_seq_test_bif_flush),
 	KUNIT_CASE(sgx_seq_test_ccb_submit),
 	KUNIT_CASE(sgx_seq_test_ccb_errors),
 	{}

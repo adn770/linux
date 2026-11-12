@@ -588,6 +588,52 @@ static void sgxfive_debug_test_peek(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, regs[SGX_DPM_TASK_STATE / 4], 0x2u);	/* read, not written */
 }
 
+/*
+ * debugfs bif_flush: "1" flushes the BIF's caches (sgx_seq_bif_flush()) while
+ * a recovery is held, before the reset that ends it; -EBUSY with nothing
+ * held, -ENODEV while no firmware runs, nothing written either way. The
+ * other bits of CR_BIF_CTRL stay as they were.
+ */
+static void sgxfive_debug_test_bif_flush(struct kunit *test)
+{
+	struct sgxfive *sgx = kunit_kzalloc(test, sizeof(*sgx), GFP_KERNEL);
+	u32 *regs = kunit_kzalloc(test, SZ_4K, GFP_KERNEL);
+
+	KUNIT_ASSERT_NOT_NULL(test, sgx);
+	KUNIT_ASSERT_NOT_NULL(test, regs);
+	sgx->dev = kunit_kzalloc(test, sizeof(*sgx->dev), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, sgx->dev);
+	sgx->regs = (void __iomem *)regs;
+	mutex_init(&sgx->lock);
+	regs[SGX_BIF_CTRL / 4] = 0x18;
+
+	KUNIT_EXPECT_EQ(test, sgxfive_bif_flush_parse("1"), 0);
+	KUNIT_EXPECT_EQ(test, sgxfive_bif_flush_parse("0"), -EINVAL);
+	KUNIT_EXPECT_EQ(test, sgxfive_bif_flush_parse("2"), -EINVAL);
+	KUNIT_EXPECT_EQ(test, sgxfive_bif_flush_parse(""), -EINVAL);
+	KUNIT_EXPECT_EQ(test, sgxfive_bif_flush_parse("flush"), -EINVAL);
+
+	/* no firmware */
+	WRITE_ONCE(sgx->recovery_held, true);
+	KUNIT_EXPECT_EQ(test, sgxfive_bif_flush(sgx), -ENODEV);
+	KUNIT_EXPECT_EQ(test, regs[SGX_BIF_CTRL / 4], 0x18u);
+
+	/* nothing held */
+	sgx->live = true;
+	WRITE_ONCE(sgx->recovery_held, false);
+	KUNIT_EXPECT_EQ(test, sgxfive_bif_flush(sgx), -EBUSY);
+	KUNIT_EXPECT_EQ(test, regs[SGX_BIF_CTRL / 4], 0x18u);
+
+	/* held: the invalidate bit set and cleared, the rest kept, the hold left */
+	WRITE_ONCE(sgx->recovery_held, true);
+	KUNIT_EXPECT_EQ(test, sgxfive_bif_flush(sgx), 0);
+	KUNIT_EXPECT_EQ(test, regs[SGX_BIF_CTRL / 4], 0x10u);
+	KUNIT_EXPECT_TRUE(test, sgxfive_recovery_held(sgx));
+	regs[SGX_BIF_CTRL / 4] = 0;
+	KUNIT_EXPECT_EQ(test, sgxfive_bif_flush(sgx), 0);
+	KUNIT_EXPECT_EQ(test, regs[SGX_BIF_CTRL / 4], 0u);
+}
+
 /* A running device whose registers and kernel CCB are plain memory, idle. */
 static struct sgxfive *fake_ccb_sgx(struct kunit *test, u32 **regs)
 {
@@ -1165,6 +1211,7 @@ static struct kunit_case sgxfive_debug_test_cases[] = {
 	KUNIT_CASE(sgxfive_debug_test_held_reset_closed),
 	KUNIT_CASE(sgxfive_debug_test_kregnow_bif),
 	KUNIT_CASE(sgxfive_debug_test_peek),
+	KUNIT_CASE(sgxfive_debug_test_bif_flush),
 	KUNIT_CASE(sgxfive_debug_test_kicker_parse),
 	KUNIT_CASE(sgxfive_debug_test_kicker_write),
 	KUNIT_CASE(sgxfive_debug_test_kick_no_bump),
