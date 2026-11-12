@@ -127,9 +127,46 @@ static void sgxfive_vm_test_reap(struct kunit *test)
 	KUNIT_EXPECT_TRUE(test, list_empty(&list));
 }
 
+/*
+ * debugfs vm_pte_flags and vm_pte_addr: the PTE flags of a VM_MAP are READONLY
+ * as the user asks, and the knob's flags only for the mapping that starts at
+ * the knob's address; at address 0 (off) or flags 0 every mapping is as
+ * before. RO and WO together are taken (a reading row). Only the knob's bits
+ * (WO, CACHED, EDMPROT) pass, whatever it holds.
+ */
+static void sgxfive_vm_test_pte_flags(struct kunit *test)
+{
+	const u32 a = 0x3e100000;
+
+	KUNIT_EXPECT_EQ(test, sgxfive_vm_pte_flags(false, a, 0, 0), 0u);
+	KUNIT_EXPECT_EQ(test, sgxfive_vm_pte_flags(true, a, 0, 0), (u32)SGX_MMU_RO);
+	KUNIT_EXPECT_EQ(test, sgxfive_vm_pte_flags(false, a, a, 0), 0u);
+	KUNIT_EXPECT_EQ(test, sgxfive_vm_pte_flags(true, a, a, 0), (u32)SGX_MMU_RO);
+	/* off: address 0, whatever the flags */
+	KUNIT_EXPECT_EQ(test, sgxfive_vm_pte_flags(false, a, 0, SGX_MMU_WO), 0u);
+	KUNIT_EXPECT_EQ(test, sgxfive_vm_pte_flags(false, 0, 0, SGX_MMU_WO), 0u);
+	/* only the mapping that starts there */
+	KUNIT_EXPECT_EQ(test, sgxfive_vm_pte_flags(false, a, a, SGX_MMU_WO), (u32)SGX_MMU_WO);
+	KUNIT_EXPECT_EQ(test, sgxfive_vm_pte_flags(false, a + 0x1000, a, SGX_MMU_WO), 0u);
+	KUNIT_EXPECT_EQ(test, sgxfive_vm_pte_flags(true, a - 0x1000, a, SGX_MMU_WO),
+			(u32)SGX_MMU_RO);
+	KUNIT_EXPECT_EQ(test, sgxfive_vm_pte_flags(false, a, a, SGX_MMU_CACHED),
+			(u32)SGX_MMU_CACHED);
+	KUNIT_EXPECT_EQ(test, sgxfive_vm_pte_flags(false, a, a, SGX_MMU_EDMPROT),
+			(u32)SGX_MMU_EDMPROT);
+	KUNIT_EXPECT_EQ(test, sgxfive_vm_pte_flags(false, a, a, 0x1a), 0x1au);
+	KUNIT_EXPECT_EQ(test, sgxfive_vm_pte_flags(true, a, a, SGX_MMU_WO),
+			(u32)(SGX_MMU_RO | SGX_MMU_WO));
+	/* VALID, READONLY and the bits above EDMPROT never come from the knob */
+	KUNIT_EXPECT_EQ(test, sgxfive_vm_pte_flags(false, a, a, ~0u), 0x1au);
+	KUNIT_EXPECT_EQ(test, sgxfive_vm_pte_flags(false, a, a, SGX_MMU_RO), 0u);
+	KUNIT_EXPECT_EQ(test, (u32)SGXFIVE_VM_PTE_KNOB, 0x1au);
+}
+
 static struct kunit_case sgxfive_vm_test_cases[] = {
 	KUNIT_CASE(sgxfive_vm_test_range),
 	KUNIT_CASE(sgxfive_vm_test_render_heaps),
+	KUNIT_CASE(sgxfive_vm_test_pte_flags),
 	KUNIT_CASE(sgxfive_vm_test_ccb_done),
 	KUNIT_CASE(sgxfive_vm_test_reap),
 	{}

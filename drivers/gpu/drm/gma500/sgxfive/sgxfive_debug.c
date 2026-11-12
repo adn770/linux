@@ -1833,6 +1833,52 @@ DEFINE_DEBUGFS_ATTRIBUTE(sgxfive_alias_skip_fops, sgxfive_alias_skip_get,
 			 sgxfive_alias_skip_set, "0x%08llx\n");
 
 /*
+ * debugfs vm_pte_flags and vm_pte_addr (sgxfive_vm_pte_flags): PTE flags a
+ * VM_MAP that starts at vm_pte_addr gets besides its own. Only WRITEONLY (0x2),
+ * CACHECONSISTENT (0x8) and EDMPROTECT (0x10): VALID, READONLY (the user's
+ * flag) and any other bit are refused. The address is a page's, 0 for off.
+ */
+static int sgxfive_vm_pte_flags_get(void *data, u64 *val)
+{
+	struct sgxfive *sgx = data;
+
+	*val = READ_ONCE(sgx->vm_pte_flags);
+	return 0;
+}
+
+int sgxfive_vm_pte_flags_set(void *data, u64 val)
+{
+	struct sgxfive *sgx = data;
+
+	if (val & ~(u64)SGXFIVE_VM_PTE_KNOB)
+		return -EINVAL;
+	WRITE_ONCE(sgx->vm_pte_flags, val);
+	return 0;
+}
+DEFINE_DEBUGFS_ATTRIBUTE(sgxfive_vm_pte_flags_fops, sgxfive_vm_pte_flags_get,
+			 sgxfive_vm_pte_flags_set, "0x%02llx\n");
+
+static int sgxfive_vm_pte_addr_get(void *data, u64 *val)
+{
+	struct sgxfive *sgx = data;
+
+	*val = READ_ONCE(sgx->vm_pte_addr);
+	return 0;
+}
+
+int sgxfive_vm_pte_addr_set(void *data, u64 val)
+{
+	struct sgxfive *sgx = data;
+
+	if (val > U32_MAX || val & (SZ_4K - 1))
+		return -EINVAL;
+	WRITE_ONCE(sgx->vm_pte_addr, val);
+	return 0;
+}
+DEFINE_DEBUGFS_ATTRIBUTE(sgxfive_vm_pte_addr_fops, sgxfive_vm_pte_addr_get,
+			 sgxfive_vm_pte_addr_set, "0x%08llx\n");
+
+/*
  * debugfs own_code, own_res and own_arm: a firmware task of our own (sgxfive_owntask.h).
  *
  * own_code takes a blob of tools/fwtask, once per write, and keeps it only if the verifier
@@ -2105,6 +2151,12 @@ void sgxfive_debug_init(struct sgxfive *sgx, struct dentry *dir)
 	debugfs_create_file("render_words", 0400, dir, sgx, &sgxfive_render_words_fops);
 	debugfs_create_file("render_kept", 0400, dir, sgx, &sgxfive_render_kept_fops);
 	debugfs_create_bool("vm_low", 0600, dir, &sgx->vm_low);
+	/*
+	 * PTE flags (WO 0x2, CACHED 0x8, EDMPROT 0x10) of the VM_MAP made from now on that
+	 * starts at vm_pte_addr (0: off), until written again; a reset leaves both.
+	 */
+	debugfs_create_file_unsafe("vm_pte_flags", 0600, dir, sgx, &sgxfive_vm_pte_flags_fops);
+	debugfs_create_file_unsafe("vm_pte_addr", 0600, dir, sgx, &sgxfive_vm_pte_addr_fops);
 	debugfs_create_file("hwperf", 0600, dir, sgx, &sgxfive_hwperf_fops);
 	/* Flags besides NEW of render contexts created from now on. */
 	debugfs_create_x32("render_ctx_flags", 0600, dir, &sgx->render_ctx_flags);

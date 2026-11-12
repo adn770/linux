@@ -15,6 +15,9 @@ static void sgx_mmu_test_encoding(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, sgx_mmu_pte(0x05678000, 0), 0x05678001u);
 	KUNIT_EXPECT_EQ(test, sgx_mmu_pte(0x05678000, SGX_MMU_RO), 0x05678005u);
 	KUNIT_EXPECT_EQ(test, sgx_mmu_pte(0x05678000, SGX_MMU_CACHED), 0x05678009u);
+	KUNIT_EXPECT_EQ(test, sgx_mmu_pte(0x05678000, SGX_MMU_WO), 0x05678003u);
+	KUNIT_EXPECT_EQ(test, sgx_mmu_pte(0x05678000, SGX_MMU_EDMPROT), 0x05678011u);
+	KUNIT_EXPECT_EQ(test, (u32)(SGX_MMU_WO | SGX_MMU_CACHED | SGX_MMU_EDMPROT), 0x1au);
 	KUNIT_EXPECT_EQ(test, sgx_mmu_pd_index(0x32104000), 0xc8u);
 	KUNIT_EXPECT_EQ(test, sgx_mmu_pt_index(0x32104000), 0x104u);
 }
@@ -53,6 +56,14 @@ static void sgx_mmu_test_map_unmap(struct kunit *test)
 
 	/* Misaligned addresses are refused. */
 	KUNIT_EXPECT_EQ(test, sgx_mmu_map(pd, 0x32400800, pages, 1, 0), -EINVAL);
+
+	/* Every flag bit lands in the PTE as given, RO and WO together too. */
+	KUNIT_EXPECT_EQ(test, sgx_mmu_map(pd, 0x32402000, &pages[1], 1,
+					  SGX_MMU_RO | SGX_MMU_WO | SGX_MMU_CACHED |
+					  SGX_MMU_EDMPROT), 0);
+	KUNIT_EXPECT_EQ(test, sgx_mmu_lookup(pd, 0x32402000),
+			page_to_phys(pages[1]) | 0x1fu);
+	sgx_mmu_unmap(pd, 0x32402000, 1);
 
 	sgx_mmu_pd_destroy(pd);
 	for (i = 0; i < ARRAY_SIZE(pages); i++)

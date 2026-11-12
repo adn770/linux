@@ -144,6 +144,8 @@ struct sgxfive {
 	u32 render_rgn_arrays;		/* region-header arrays of new render contexts */
 	u32 render_tail_room;		/* tail-pointer bytes of new render contexts */
 	bool vm_low;			/* VM_MAP also takes the first MiB */
+	u32 vm_pte_flags;		/* VM_MAP: PTE flags of the mapping at vm_pte_addr */
+	u32 vm_pte_addr;		/* ... 0: off */
 	u32 render_ctx_flags;		/* new render contexts' extra flags */
 	struct sgxfive_cleanup_trace cleanup;	/* the last one's, under lock */
 	u32 timer_clock;		/* HostCtl's timer clock at boot, 0: default */
@@ -375,6 +377,10 @@ int sgxfive_alias_flags(unsigned int id, bool ta3d_ro, u32 skip);
 int sgxfive_vm_check_range(const struct drm_sgxfive_heap *heaps, unsigned int n,
 			   u64 addr, u64 size);
 int sgxfive_vm_check_low(u64 addr, u64 size);
+
+/* The PTE flags debugfs vm_pte_flags may add: WRITEONLY, CACHECONSISTENT, EDMPROTECT. */
+#define SGXFIVE_VM_PTE_KNOB	(SGX_MMU_WO | SGX_MMU_CACHED | SGX_MMU_EDMPROT)
+u32 sgxfive_vm_pte_flags(bool ro, u32 addr, u32 knob_addr, u32 knob_flags);
 int sgxfive_vm_render_attach(struct sgxfive_vm *vm, unsigned int *slot);
 void sgxfive_vm_render_detach(struct sgxfive_vm *vm, unsigned int slot);
 int sgxfive_vm_map_pages(struct sgxfive_vm *vm, u32 addr, struct page **pages,
@@ -398,6 +404,8 @@ void sgxfive_debug_disarm(struct sgxfive *sgx);
 int sgxfive_debug_own_apply(struct sgxfive *sgx, u8 *const bufs[]);
 void sgxfive_debug_irq(struct sgxfive *sgx, u32 stat_1, u32 stat_2);
 int sgxfive_alias_skip_set(void *data, u64 val);
+int sgxfive_vm_pte_flags_set(void *data, u64 val);
+int sgxfive_vm_pte_addr_set(void *data, u64 val);
 
 static inline bool sgxfive_alias_ta3d_ro(struct sgxfive *sgx)
 {
@@ -483,6 +491,13 @@ static inline u32 sgxfive_render_tail_room(struct sgxfive *sgx)
 static inline bool sgxfive_vm_low(struct sgxfive *sgx)
 {
 	return READ_ONCE(sgx->vm_low);
+}
+
+/* debugfs vm_pte_flags, and at *addr vm_pte_addr: the mapping they apply to (0: none). */
+static inline u32 sgxfive_vm_pte_knob(struct sgxfive *sgx, u32 *addr)
+{
+	*addr = READ_ONCE(sgx->vm_pte_addr);
+	return READ_ONCE(sgx->vm_pte_flags);
 }
 
 static inline u32 sgxfive_render_ctx_flags(struct sgxfive *sgx)
@@ -634,6 +649,12 @@ static inline u32 sgxfive_ctx_page_flags(bool rw)
 static inline bool sgxfive_vm_low(struct sgxfive *sgx)
 {
 	return false;
+}
+
+static inline u32 sgxfive_vm_pte_knob(struct sgxfive *sgx, u32 *addr)
+{
+	*addr = 0;
+	return 0;
 }
 
 static inline u32 sgxfive_render_ctx_flags(struct sgxfive *sgx)

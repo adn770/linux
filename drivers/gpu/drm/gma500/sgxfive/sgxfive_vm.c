@@ -23,6 +23,7 @@
 #include <drm/drm_file.h>
 #include <drm/drm_gem_shmem_helper.h>
 #include <drm/drm_mm.h>
+#include <drm/drm_print.h>
 
 #include "sgx_mmu.h"
 #include "sgx_seq.h"
@@ -290,6 +291,20 @@ int sgxfive_ioctl_destroy_vm(struct sgxfive *sgx, void *data,
 	return 0;
 }
 
+/*
+ * The PTE flags of a VM_MAP at addr: READONLY as the user asks, and the flags
+ * of debugfs vm_pte_flags (only WRITEONLY, CACHECONSISTENT and EDMPROTECT) when
+ * the mapping starts at its vm_pte_addr (0: off). RO and WO may come together.
+ */
+u32 sgxfive_vm_pte_flags(bool ro, u32 addr, u32 knob_addr, u32 knob_flags)
+{
+	u32 flags = ro ? SGX_MMU_RO : 0;
+
+	if (knob_addr && addr == knob_addr)
+		flags |= knob_flags & SGXFIVE_VM_PTE_KNOB;
+	return flags;
+}
+
 int sgxfive_ioctl_vm_map(struct sgxfive *sgx, void *data, struct drm_file *file)
 {
 	struct drm_sgxfive_vm_map_args *a = data;
@@ -298,6 +313,7 @@ int sgxfive_ioctl_vm_map(struct sgxfive *sgx, void *data, struct drm_file *file)
 	struct sgxfive_mapping *m = NULL;
 	struct drm_gem_object *obj;
 	struct sgxfive_vm *vm;
+	u32 knob_addr, knob_flags, flags;
 	int ret;
 
 	if (a->_padding_14 || (a->flags & ~DRM_SGXFIVE_VM_MAP_FLAGS_MASK) ||
@@ -330,6 +346,9 @@ int sgxfive_ioctl_vm_map(struct sgxfive *sgx, void *data, struct drm_file *file)
 	m->shmem = shmem;
 	m->node.start = a->device_addr;
 	m->node.size = a->size;
+	knob_flags = sgxfive_vm_pte_knob(sgx, &knob_addr);
+	flags = sgxfive_vm_pte_flags(a->flags & DRM_SGXFIVE_VM_MAP_READ_ONLY, a->device_addr,
+				     knob_addr, knob_flags);
 
 	mutex_lock(&vm->lock);
 	ret = drm_mm_reserve_node(&vm->mm, &m->node);
@@ -338,9 +357,7 @@ int sgxfive_ioctl_vm_map(struct sgxfive *sgx, void *data, struct drm_file *file)
 	if (!ret) {
 		ret = sgx_mmu_map(vm->pd, a->device_addr,
 				  shmem->pages + (a->offset >> PAGE_SHIFT),
-				  a->size >> PAGE_SHIFT,
-				  a->flags & DRM_SGXFIVE_VM_MAP_READ_ONLY ?
-				  SGX_MMU_RO : 0);
+				  a->size >> PAGE_SHIFT, flags);
 		if (ret)
 			drm_mm_remove_node(&m->node);
 	}
@@ -349,6 +366,9 @@ int sgxfive_ioctl_vm_map(struct sgxfive *sgx, void *data, struct drm_file *file)
 		drm_gem_shmem_unpin(shmem);
 		goto err;
 	}
+	if (flags & SGXFIVE_VM_PTE_KNOB)
+		drm_info(sgx->dev, "sgxfive: vm_map 0x%08llx +0x%llx: PTE flags 0x%x (debugfs vm_pte_flags)\n",
+			 a->device_addr, a->size, flags);
 	/* The BIF must refetch the page tables (next command's cache control). */
 	sgxfive_need_bif_inval(sgx);
 	sgxfive_vm_put(vm);

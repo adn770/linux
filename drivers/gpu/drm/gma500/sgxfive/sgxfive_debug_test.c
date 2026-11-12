@@ -1150,6 +1150,49 @@ static void sgxfive_debug_test_alias_skip_set(struct kunit *test)
 }
 
 /*
+ * debugfs vm_pte_flags takes only WO, CACHED and EDMPROT (0x1a) and refuses
+ * VALID, READONLY and every bit above EDMPROT; vm_pte_addr takes a page
+ * address (0: off). A refused write leaves the knob as it was, and a recovery
+ * reset leaves both.
+ */
+static void sgxfive_debug_test_vm_pte_knobs(struct kunit *test)
+{
+	struct sgxfive *sgx = kunit_kzalloc(test, sizeof(*sgx), GFP_KERNEL);
+	static const u64 good[] = { 0, 0x2, 0x8, 0x10, 0xa, 0x12, 0x18, 0x1a };
+	static const u64 bad[] = {
+		0x1, 0x4, 0x6, 0x1b, 0x1e, 0x20, 0x3a, 0x80000000, BIT_ULL(32), ~0ull,
+	};
+	unsigned int i;
+	u32 addr;
+
+	KUNIT_ASSERT_NOT_NULL(test, sgx);
+	spin_lock_init(&sgx->kpoke_lock);
+	sgxfive_hostirq_init(&sgx->hostirq);
+	for (i = 0; i < ARRAY_SIZE(good); i++) {
+		KUNIT_EXPECT_EQ(test, sgxfive_vm_pte_flags_set(sgx, good[i]), 0);
+		KUNIT_EXPECT_EQ(test, sgx->vm_pte_flags, (u32)good[i]);
+	}
+	for (i = 0; i < ARRAY_SIZE(bad); i++) {
+		KUNIT_EXPECT_EQ_MSG(test, sgxfive_vm_pte_flags_set(sgx, bad[i]), -EINVAL,
+				    "0x%llx", bad[i]);
+		KUNIT_EXPECT_EQ(test, sgx->vm_pte_flags, 0x1au);
+	}
+	KUNIT_EXPECT_EQ(test, sgxfive_vm_pte_addr_set(sgx, 0x3e100000), 0);
+	KUNIT_EXPECT_EQ(test, sgx->vm_pte_addr, 0x3e100000u);
+	KUNIT_EXPECT_EQ(test, sgxfive_vm_pte_addr_set(sgx, 0x3e100800), -EINVAL);
+	KUNIT_EXPECT_EQ(test, sgxfive_vm_pte_addr_set(sgx, BIT_ULL(32)), -EINVAL);
+	KUNIT_EXPECT_EQ(test, sgx->vm_pte_addr, 0x3e100000u);
+	KUNIT_EXPECT_EQ(test, sgxfive_vm_pte_knob(sgx, &addr), 0x1au);
+	KUNIT_EXPECT_EQ(test, addr, 0x3e100000u);
+	KUNIT_EXPECT_FALSE(test, sgxfive_debug_reset(sgx));
+	KUNIT_EXPECT_EQ(test, sgx->vm_pte_flags, 0x1au);
+	KUNIT_EXPECT_EQ(test, sgx->vm_pte_addr, 0x3e100000u);
+	KUNIT_EXPECT_EQ(test, sgxfive_vm_pte_addr_set(sgx, 0), 0);
+	KUNIT_EXPECT_EQ(test, sgxfive_vm_pte_knob(sgx, &addr), 0x1au);
+	KUNIT_EXPECT_EQ(test, addr, 0u);
+}
+
+/*
  * A recovery reset (and a boot) leave alias_skip and alias_ta3d_ro as they
  * were: they are modes that stay until written, not one-shot controls.
  */
@@ -1221,6 +1264,7 @@ static struct kunit_case sgxfive_debug_test_cases[] = {
 	KUNIT_CASE(sgxfive_debug_test_alias_flags),
 	KUNIT_CASE(sgxfive_debug_test_alias_skip),
 	KUNIT_CASE(sgxfive_debug_test_alias_skip_set),
+	KUNIT_CASE(sgxfive_debug_test_vm_pte_knobs),
 	KUNIT_CASE(sgxfive_debug_test_alias_skip_reset),
 	KUNIT_CASE(sgxfive_debug_test_own_arm),
 	{}

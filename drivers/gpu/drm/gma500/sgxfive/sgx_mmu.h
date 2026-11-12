@@ -16,6 +16,7 @@ struct sgx_mmu_pd;
 #define SGX_MMU_WO	0x2	/* write-only */
 #define SGX_MMU_RO	0x4	/* read-only */
 #define SGX_MMU_CACHED	0x8	/* cache-coherent (snooped) */
+#define SGX_MMU_EDMPROT	0x10	/* EDM-protected (sgxmmu.h EDMPROTECT) */
 
 static inline u32 sgx_mmu_pde(u32 pt_phys)
 {
