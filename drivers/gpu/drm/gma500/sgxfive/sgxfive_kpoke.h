@@ -17,7 +17,9 @@
  *   th:N   word N of a transfer context's HW context (SGX_XFER_CTX_SIZE):
  *          its flags, priority, page directory, client CCB and control block
  *   bg:N   word N of a render's background object (SGX_XFER_BGOBJ_DWORDS):
- *          the three PDS state words, six zero words, the rectangle's vertices
+ *          the three PDS state words, six zero words, the rectangle's vertices;
+ *          with debugfs render_bg_layer the one-layer form, 23 words
+ *          (SGX_XFER_BGOBJ1_DWORDS), bg:17 to bg:22 taken only then
  *   par:N  word N of a render context's parameter buffer, from its first page,
  *          the first SGXFIVE_KPOKE_PAR_PAGES pages only (what the TA wrote)
  *
@@ -82,14 +84,24 @@ struct sgxfive_kpokes {
 	struct sgxfive_kpoke p[SGXFIVE_KPOKE_MAX];
 };
 
-/* The words of a space; 0 for no space. */
+/* The words of a space; 0 for no space. bg's with a layer (render_bg_layer): 23, else 17. */
+u32 sgxfive_kpoke_space_words(u32 space, bool bg_layer);
+/* ... without the layer. */
 u32 sgxfive_kpoke_words(u32 space);
 
-/* SPACE:INDEX=VALUE or ^=VALUE (numbers as kstrtou32 base 0): -EINVAL, -ERANGE. */
+/*
+ * SPACE:INDEX=VALUE or ^=VALUE (numbers as kstrtou32 base 0): -EINVAL, -ERANGE;
+ * the index within the space's words, bg's with or without the layer.
+ */
+int sgxfive_kpoke_parse_layer(const char *s, struct sgxfive_kpoke *p, bool bg_layer);
+/* ... without the layer. */
 int sgxfive_kpoke_parse(const char *s, struct sgxfive_kpoke *p);
 void sgxfive_kpoke_format(const struct sgxfive_kpoke *p, char *buf, size_t size);
 
-/* Arm n pokes after those armed, all or none: -ENOSPC, -ERANGE. */
+/*
+ * Arm n pokes after those armed, all or none: -ENOSPC, -ERANGE (past the
+ * space's words, bg's with the layer: the object's page has room for them).
+ */
 int sgxfive_kpoke_arm(struct sgxfive_kpokes *k, const struct sgxfive_kpoke *p,
 		      unsigned int n);
 

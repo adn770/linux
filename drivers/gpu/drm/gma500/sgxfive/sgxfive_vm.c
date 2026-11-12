@@ -179,6 +179,17 @@ void sgxfive_vm_put(struct sgxfive_vm *vm)
 	kref_put(&vm->ref, sgxfive_vm_release);
 }
 
+/* The PTE at addr in the VM's page tables, 0 for none. */
+u32 sgxfive_vm_lookup(struct sgxfive_vm *vm, u32 addr)
+{
+	u32 pte;
+
+	mutex_lock(&vm->lock);
+	pte = sgx_mmu_lookup(vm->pd, addr);
+	mutex_unlock(&vm->lock);
+	return pte;
+}
+
 u32 sgxfive_vm_pd_phys(const struct sgxfive_vm *vm)
 {
 	return sgx_mmu_pd_phys(vm->pd);

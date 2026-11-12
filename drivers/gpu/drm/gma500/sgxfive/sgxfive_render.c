@@ -590,6 +590,9 @@ void sgxfive_render_job_build(struct sgxfive_ctx *ctx, struct sgxfive_job *job)
 {
 	job->size = sgxfive_render_build(job->hw->cmd, &ctx->render->a, &job->rc,
 					 job->seqno, job->first, job->last);
+	/* debugfs render_bg_layer: the tag says one layer, the run builds its object */
+	if (job->bg_layer)
+		sgxfive_render_img_set_bg_layers(job->hw->cmd, 1);
 	job->hw->ta_only = !job->last;
 }
 

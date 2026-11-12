@@ -136,6 +136,19 @@ int sgxfive_render_check(const struct drm_sgxfive_render_cmd *c, u32 max_w,
 }
 
 /*
+ * A render with a one-layer background object (debugfs render_bg_layer): its
+ * source (debugfs render_bg_src, which the user's PDS program samples) must
+ * be named and mapped in the render's VM (pte, its PTE there), or the render
+ * is refused. Without the layer, nothing to check.
+ */
+int sgxfive_render_check_bg(bool layer, u32 src, u32 pte)
+{
+	if (layer && (!src || !(pte & SGX_MMU_VALID)))
+		return -EINVAL;
+	return 0;
+}
+
+/*
  * Where a render context's firmware structures are: in its kernel memory at
  * mem (the layout of sgxfive_ctx.h), and its slots in the reserved heaps,
  * the TA-data slot holding the buffers of td.

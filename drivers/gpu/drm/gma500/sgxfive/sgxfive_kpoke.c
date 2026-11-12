@@ -43,6 +43,11 @@ static bool sgxfive_kpoke_at_run(u32 space)
 
 u32 sgxfive_kpoke_words(u32 space)
 {
+	return sgxfive_kpoke_space_words(space, false);
+}
+
+u32 sgxfive_kpoke_space_words(u32 space, bool bg_layer)
+{
 	switch (space) {
 	case SGXFIVE_KPOKE_TA:
 		return SGX_RENDER_CMD_STRIDE / 4;
@@ -61,7 +66,7 @@ u32 sgxfive_kpoke_words(u32 space)
 	case SGXFIVE_KPOKE_TH:
 		return SGX_XFER_CTX_SIZE / 4;
 	case SGXFIVE_KPOKE_BG:
-		return SGX_XFER_BGOBJ_DWORDS;
+		return bg_layer ? SGX_XFER_BGOBJ1_DWORDS : SGX_XFER_BGOBJ_DWORDS;
 	case SGXFIVE_KPOKE_PAR:
 		return SGXFIVE_KPOKE_PAR_PAGES * SZ_4K / 4;
 	}
@@ -69,6 +74,11 @@ u32 sgxfive_kpoke_words(u32 space)
 }
 
 int sgxfive_kpoke_parse(const char *s, struct sgxfive_kpoke *p)
+{
+	return sgxfive_kpoke_parse_layer(s, p, false);
+}
+
+int sgxfive_kpoke_parse_layer(const char *s, struct sgxfive_kpoke *p, bool bg_layer)
 {
 	struct sgxfive_kpoke k = { .space = SGXFIVE_KPOKE_SPACES };
 	char buf[SGXFIVE_KPOKE_LINE];
@@ -94,7 +104,7 @@ int sgxfive_kpoke_parse(const char *s, struct sgxfive_kpoke *p)
 	*eq = '\0';
 	if (kstrtou32(colon + 1, 0, &k.index) || kstrtou32(eq + 1, 0, &k.value))
 		return -EINVAL;
-	if (k.index >= sgxfive_kpoke_words(k.space))
+	if (k.index >= sgxfive_kpoke_space_words(k.space, bg_layer))
 		return -ERANGE;
 	*p = k;
 	return 0;
@@ -115,7 +125,7 @@ int sgxfive_kpoke_arm(struct sgxfive_kpokes *k, const struct sgxfive_kpoke *p,
 	if (n > SGXFIVE_KPOKE_MAX - k->n)
 		return -ENOSPC;
 	for (i = 0; i < n; i++)
-		if (p[i].index >= sgxfive_kpoke_words(p[i].space))
+		if (p[i].index >= sgxfive_kpoke_space_words(p[i].space, true))
 			return -ERANGE;
 	memcpy(&k->p[k->n], p, n * sizeof(*p));
 	k->n += n;
@@ -177,10 +187,12 @@ int sgxfive_kpoke_write(struct sgxfive *sgx, char *buf)
 {
 	struct sgxfive_kpoke p[SGXFIVE_KPOKE_MAX];
 	unsigned int n = 0;
-	bool clear = false;
+	bool clear = false, bg_layer;
 	char *line;
+	u32 src;
 	int ret;
 
+	bg_layer = sgxfive_render_bg_layer(sgx, &src);	/* bg reaches 23 words with it */
 	while ((line = strsep(&buf, "\n"))) {
 		line = strim(line);
 		if (!*line)
@@ -191,7 +203,7 @@ int sgxfive_kpoke_write(struct sgxfive *sgx, char *buf)
 		}
 		if (n == SGXFIVE_KPOKE_MAX)
 			return -ENOSPC;
-		ret = sgxfive_kpoke_parse(line, &p[n]);
+		ret = sgxfive_kpoke_parse_layer(line, &p[n], bg_layer);
 		if (ret)
 			return ret;
 		n++;

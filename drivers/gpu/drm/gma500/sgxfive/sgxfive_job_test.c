@@ -309,6 +309,26 @@ static void sgxfive_job_test_render_check(struct kunit *test)
 }
 
 /*
+ * A render with a background layer (debugfs render_bg_layer): its source,
+ * debugfs render_bg_src, must be set and mapped (a valid PTE) in the render's
+ * VM, or the render is refused, never run with a half-built object. Without
+ * the layer the source is not looked at.
+ */
+static void sgxfive_job_test_render_check_bg(struct kunit *test)
+{
+	const u32 pte = 0x05678000 | SGX_MMU_VALID;
+
+	KUNIT_EXPECT_EQ(test, sgxfive_render_check_bg(false, 0, 0), 0);
+	KUNIT_EXPECT_EQ(test, sgxfive_render_check_bg(false, 0x3e100000, 0), 0);
+	KUNIT_EXPECT_EQ(test, sgxfive_render_check_bg(true, 0x3e100000, pte), 0);
+	KUNIT_EXPECT_EQ(test, sgxfive_render_check_bg(true, 0x3e100000, pte | SGX_MMU_RO), 0);
+	KUNIT_EXPECT_EQ(test, sgxfive_render_check_bg(true, 0, pte), -EINVAL);
+	KUNIT_EXPECT_EQ(test, sgxfive_render_check_bg(true, 0, 0), -EINVAL);
+	KUNIT_EXPECT_EQ(test, sgxfive_render_check_bg(true, 0x3e100000, 0), -EINVAL);
+	KUNIT_EXPECT_EQ(test, sgxfive_render_check_bg(true, 0x3e100000, 0x05678000), -EINVAL);
+}
+
+/*
  * A render context's addresses: its firmware structures in its kernel memory
  * (struct sgxfive_ctx's page after the TA CCB), its slots in the reserved
  * PARAMETERS and TA_DATA heaps.
@@ -1068,6 +1088,7 @@ static struct kunit_case sgxfive_job_test_cases[] = {
 	KUNIT_CASE(sgxfive_job_test_check),
 	KUNIT_CASE(sgxfive_job_test_ctx_args),
 	KUNIT_CASE(sgxfive_job_test_render_check),
+	KUNIT_CASE(sgxfive_job_test_render_check_bg),
 	KUNIT_CASE(sgxfive_job_test_render_addrs),
 	KUNIT_CASE(sgxfive_job_test_render_build),
 	KUNIT_CASE(sgxfive_job_test_render_img_bg),

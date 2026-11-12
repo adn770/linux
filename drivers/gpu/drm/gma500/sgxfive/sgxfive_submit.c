@@ -22,6 +22,7 @@ struct sgxfive_submit {
 	struct drm_sgxfive_job desc;
 	struct drm_sgxfive_transfer_cmd regs;
 	struct drm_sgxfive_render_cmd rc;
+	bool bg_layer;			/* debugfs render_bg_layer, read once at the check */
 	struct drm_sgxfive_sync_op ops[SGXFIVE_MAX_SYNC_OPS];
 	struct sgxfive_job *job;
 	struct dma_fence_chain *chains[SGXFIVE_MAX_SYNC_OPS];
@@ -96,19 +97,28 @@ bool sgxfive_sync_signals(const struct drm_sgxfive_sync_op *ops, u32 n,
 	return false;
 }
 
-/* A render job: its command, checked, its target within the context's maximum. */
+/*
+ * A render job: its command, checked, its target within the context's maximum;
+ * with debugfs render_bg_layer, its layer's source mapped in the context's VM.
+ */
 static int sgxfive_submit_check_render(struct sgxfive_submit *s,
 				       const struct sgxfive_ctx *ctx)
 {
 	const struct drm_sgxfive_job *d = &s->desc;
-	u32 len = d->cmd_stream_len;
+	u32 len = d->cmd_stream_len, src;
 	int ret;
 
 	if (len < sizeof(s->rc) || len > PAGE_SIZE || d->cmd_stream % 8)
 		return -EINVAL;
 	ret = copy_elem(&s->rc, sizeof(s->rc), u64_to_user_ptr(d->cmd_stream), len);
-	return ret ? ret : sgxfive_render_check(&s->rc, ctx->max_width,
-						ctx->max_height, ctx->aa_ms);
+	if (!ret)
+		ret = sgxfive_render_check(&s->rc, ctx->max_width, ctx->max_height,
+					   ctx->aa_ms);
+	if (ret)
+		return ret;
+	s->bg_layer = sgxfive_render_bg_layer(ctx->sgx, &src);
+	return sgxfive_render_check_bg(s->bg_layer, src,
+				       s->bg_layer && src ? sgxfive_vm_lookup(ctx->vm, src) : 0);
 }
 
 static int sgxfive_submit_check(struct sgxfive_submit *s, struct sgxfive_ctx *ctx)
@@ -220,6 +230,7 @@ static int sgxfive_submit_queue(struct sgxfive_submit *s, struct sgxfive_ctx *ct
 	job->seqno = ++ctx->seqno;
 	if (ctx->type == DRM_SGXFIVE_CTX_TYPE_RENDER) {
 		job->rc = s->rc;
+		job->bg_layer = s->bg_layer;
 		sgxfive_render_job_scene(ctx, job,
 					 d->flags & DRM_SGXFIVE_SUBMIT_JOB_RENDER_GEOMETRY);
 		sgxfive_render_job_build(ctx, job);

@@ -2146,6 +2146,15 @@ void sgxfive_debug_init(struct sgxfive *sgx, struct dentry *dir)
 	 */
 	sgx->render_tail_room = 0;
 	debugfs_create_x32("render_tail_room", 0600, dir, &sgx->render_tail_room);
+	/*
+	 * Renders submitted from now on get a one-layer background object (23 dwords, the
+	 * form of a transfer copy over the whole target, its tag saying one layer), their PDS
+	 * words the user's; render_bg_src names the layer's source, which must be mapped in
+	 * the render's VM, or the render is refused (-EINVAL). Until written again; a reset
+	 * leaves both, and a replayed render keeps the form it was submitted with.
+	 */
+	debugfs_create_bool("render_bg_layer", 0600, dir, &sgx->render_bg_layer);
+	debugfs_create_x32("render_bg_src", 0600, dir, &sgx->render_bg_src);
 	debugfs_create_file("render_param", 0400, dir, sgx, &sgxfive_render_param_fops);
 	debugfs_create_file("render_tadata", 0400, dir, sgx, &sgxfive_render_tadata_fops);
 	debugfs_create_file("render_words", 0400, dir, sgx, &sgxfive_render_words_fops);

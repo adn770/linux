@@ -132,6 +132,7 @@ struct sgxfive_job {
 	u32 size;			/* in the client CCB */
 	struct drm_sgxfive_render_cmd rc;	/* a render job's registers */
 	bool first, last;		/* a render job's kick of its scene */
+	bool bg_layer;			/* a render job's background object has a layer */
 };
 
 static inline void *sgxfive_ctx_cpu(struct sgxfive_ctx *ctx, u32 off)

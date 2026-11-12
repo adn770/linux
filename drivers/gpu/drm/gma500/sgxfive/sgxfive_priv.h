@@ -143,6 +143,8 @@ struct sgxfive {
 	u32 render_pb_pages;		/* PB of new render contexts */
 	u32 render_rgn_arrays;		/* region-header arrays of new render contexts */
 	u32 render_tail_room;		/* tail-pointer bytes of new render contexts */
+	bool render_bg_layer;		/* renders: a one-layer background object */
+	u32 render_bg_src;		/* ... its source, mapped in the render's VM */
 	bool vm_low;			/* VM_MAP also takes the first MiB */
 	u32 vm_pte_flags;		/* VM_MAP: PTE flags of the mapping at vm_pte_addr */
 	u32 vm_pte_addr;		/* ... 0: off */
@@ -317,6 +319,7 @@ struct sgxfive_file {
 struct sgxfive_vm *sgxfive_vm_get(struct sgxfive_file *f, u32 handle);
 void sgxfive_vm_put(struct sgxfive_vm *vm);
 u32 sgxfive_vm_pd_phys(const struct sgxfive_vm *vm);
+u32 sgxfive_vm_lookup(struct sgxfive_vm *vm, u32 addr);
 
 /* The client heap layout and its query (sgxfive_drv.c). */
 extern const struct drm_sgxfive_heap sgxfive_rev1_heaps[DRM_SGXFIVE_HEAP_COUNT];
@@ -353,6 +356,7 @@ struct sgx_render_addrs;
 struct sgx_render_tadata;
 int sgxfive_render_check(const struct drm_sgxfive_render_cmd *c, u32 max_w,
 			 u32 max_h, bool ms);
+int sgxfive_render_check_bg(bool layer, u32 src, u32 pte);
 void sgxfive_render_addrs(struct sgx_render_addrs *a, u32 mem, u32 pd_phys,
 			  unsigned int slot, const struct sgx_render_tadata *td);
 u32 sgxfive_render_build(u8 *img, const struct sgx_render_addrs *a,
@@ -488,6 +492,16 @@ static inline u32 sgxfive_render_tail_room(struct sgxfive *sgx)
 	return READ_ONCE(sgx->render_tail_room);
 }
 
+/*
+ * Whether a render submitted now has a one-layer background object (debugfs
+ * render_bg_layer), and at *src its source (debugfs render_bg_src, 0: none).
+ */
+static inline bool sgxfive_render_bg_layer(struct sgxfive *sgx, u32 *src)
+{
+	*src = READ_ONCE(sgx->render_bg_src);
+	return READ_ONCE(sgx->render_bg_layer);
+}
+
 static inline bool sgxfive_vm_low(struct sgxfive *sgx)
 {
 	return READ_ONCE(sgx->vm_low);
@@ -602,6 +616,12 @@ static inline u32 sgxfive_render_pb_pages(struct sgxfive *sgx)
 static inline u32 sgxfive_render_rgn_arrays(struct sgxfive *sgx)
 {
 	return 0;
+}
+
+static inline bool sgxfive_render_bg_layer(struct sgxfive *sgx, u32 *src)
+{
+	*src = 0;
+	return false;
 }
 
 static inline u32 sgxfive_render_tail_room(struct sgxfive *sgx)

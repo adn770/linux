@@ -361,6 +361,64 @@ static void sgxfive_kpoke_test_bg(struct kunit *test)
 }
 
 /*
+ * With debugfs render_bg_layer the background object has 23 dwords: bg pokes
+ * reach word 22, and only then; no other space changes. A bg poke armed with
+ * the layer stays armed if the knob goes back (the object's page has room).
+ */
+static void sgxfive_kpoke_test_bg_layer(struct kunit *test)
+{
+	struct sgxfive_kpokes *k = kunit_kzalloc(test, sizeof(*k), GFP_KERNEL);
+	struct sgxfive *sgx = kunit_kzalloc(test, sizeof(*sgx), GFP_KERNEL);
+	u32 bg[SGX_XFER_BGOBJ1_DWORDS] = { };
+	u32 *words[SGXFIVE_KPOKE_SPACES] = { [SGXFIVE_KPOKE_BG] = bg };
+	struct sgxfive_kpoke p, done[SGXFIVE_KPOKE_MAX];
+	char buf[32];
+	u32 s, i;
+
+	KUNIT_ASSERT_NOT_NULL(test, k);
+	KUNIT_ASSERT_NOT_NULL(test, sgx);
+	KUNIT_EXPECT_EQ(test, sgxfive_kpoke_space_words(SGXFIVE_KPOKE_BG, false), 17u);
+	KUNIT_EXPECT_EQ(test, sgxfive_kpoke_space_words(SGXFIVE_KPOKE_BG, true), 23u);
+	for (s = 0; s <= SGXFIVE_KPOKE_SPACES; s++) {
+		if (s == SGXFIVE_KPOKE_BG)
+			continue;
+		KUNIT_EXPECT_EQ(test, sgxfive_kpoke_space_words(s, true), sgxfive_kpoke_words(s));
+		KUNIT_EXPECT_EQ(test, sgxfive_kpoke_space_words(s, false), sgxfive_kpoke_words(s));
+	}
+	for (i = 17; i < 23; i++) {
+		snprintf(buf, sizeof(buf), "bg:%u=1", i);
+		KUNIT_EXPECT_EQ_MSG(test, sgxfive_kpoke_parse_layer(buf, &p, false), -ERANGE,
+				    "%s", buf);
+		KUNIT_EXPECT_EQ_MSG(test, sgxfive_kpoke_parse(buf, &p), -ERANGE, "%s", buf);
+		KUNIT_EXPECT_EQ_MSG(test, sgxfive_kpoke_parse_layer(buf, &p, true), 0, "%s", buf);
+	}
+	KUNIT_EXPECT_EQ(test, sgxfive_kpoke_parse_layer("bg:16=1", &p, false), 0);
+	KUNIT_EXPECT_EQ(test, sgxfive_kpoke_parse_layer("bg:23=1", &p, true), -ERANGE);
+	KUNIT_EXPECT_EQ(test, sgxfive_kpoke_parse_layer("ta:176=1", &p, true), -ERANGE);
+	KUNIT_EXPECT_EQ(test, sgxfive_kpoke_parse_layer("ta:175=1", &p, true), 0);
+
+	KUNIT_ASSERT_EQ(test, sgxfive_kpoke_parse_layer("bg:22^=0x3", &p, true), 0);
+	KUNIT_ASSERT_EQ(test, sgxfive_kpoke_arm(k, &p, 1), 0);
+	bg[22] = 0x10;
+	KUNIT_EXPECT_EQ(test, sgxfive_kpoke_take_run(k, words, done), 1u);
+	KUNIT_EXPECT_EQ(test, bg[22], 0x13u);
+
+	/* the debugfs file follows the knob */
+	spin_lock_init(&sgx->kpoke_lock);
+	sgx->live = true;
+	strscpy(buf, "bg:20=7\n", sizeof(buf));
+	KUNIT_EXPECT_EQ(test, sgxfive_kpoke_write(sgx, buf), -ERANGE);
+	KUNIT_EXPECT_EQ(test, sgx->kpokes.n, 0u);
+	sgx->render_bg_layer = true;
+	strscpy(buf, "bg:20=7\n", sizeof(buf));
+	KUNIT_EXPECT_EQ(test, sgxfive_kpoke_write(sgx, buf), 0);
+	KUNIT_EXPECT_EQ(test, sgx->kpokes.n, 1u);
+	KUNIT_EXPECT_EQ(test, sgx->kpokes.p[0].index, 20u);
+	strscpy(buf, "bg:23=7\n", sizeof(buf));
+	KUNIT_EXPECT_EQ(test, sgxfive_kpoke_write(sgx, buf), -ERANGE);
+}
+
+/*
  * par pokes (a render context's parameter buffer, its first 16 pages):
  * parsed and ranged by dword, applied once, in order, to the words given at
  * the render's kick, left armed with no words given and by a render's image,
@@ -1262,6 +1320,7 @@ static struct kunit_case sgxfive_kpoke_test_cases[] = {
 	KUNIT_CASE(sgxfive_kpoke_test_render),
 	KUNIT_CASE(sgxfive_kpoke_test_run),
 	KUNIT_CASE(sgxfive_kpoke_test_bg),
+	KUNIT_CASE(sgxfive_kpoke_test_bg_layer),
 	KUNIT_CASE(sgxfive_kpoke_test_par),
 	KUNIT_CASE(sgxfive_kpoke_test_xfer),
 	KUNIT_CASE(sgxfive_kpoke_test_submit_xfer),

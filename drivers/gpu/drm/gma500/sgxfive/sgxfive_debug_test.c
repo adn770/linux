@@ -1211,6 +1211,29 @@ static void sgxfive_debug_test_vm_pte_knobs(struct kunit *test)
 }
 
 /*
+ * debugfs render_bg_layer and render_bg_src: off and 0 until written, read
+ * together at a render's submission; a recovery reset leaves both.
+ */
+static void sgxfive_debug_test_render_bg_knobs(struct kunit *test)
+{
+	struct sgxfive *sgx = kunit_kzalloc(test, sizeof(*sgx), GFP_KERNEL);
+	u32 src = 0xdead;
+
+	KUNIT_ASSERT_NOT_NULL(test, sgx);
+	spin_lock_init(&sgx->kpoke_lock);
+	sgxfive_hostirq_init(&sgx->hostirq);
+	KUNIT_EXPECT_FALSE(test, sgxfive_render_bg_layer(sgx, &src));
+	KUNIT_EXPECT_EQ(test, src, 0u);
+	sgx->render_bg_layer = true;
+	sgx->render_bg_src = 0x3e100000;
+	KUNIT_EXPECT_TRUE(test, sgxfive_render_bg_layer(sgx, &src));
+	KUNIT_EXPECT_EQ(test, src, 0x3e100000u);
+	KUNIT_EXPECT_FALSE(test, sgxfive_debug_reset(sgx));
+	KUNIT_EXPECT_TRUE(test, sgx->render_bg_layer);
+	KUNIT_EXPECT_EQ(test, sgx->render_bg_src, 0x3e100000u);
+}
+
+/*
  * A recovery reset (and a boot) leave alias_skip and alias_ta3d_ro as they
  * were: they are modes that stay until written, not one-shot controls.
  */
@@ -1283,6 +1306,7 @@ static struct kunit_case sgxfive_debug_test_cases[] = {
 	KUNIT_CASE(sgxfive_debug_test_alias_skip),
 	KUNIT_CASE(sgxfive_debug_test_alias_skip_set),
 	KUNIT_CASE(sgxfive_debug_test_vm_pte_knobs),
+	KUNIT_CASE(sgxfive_debug_test_render_bg_knobs),
 	KUNIT_CASE(sgxfive_debug_test_alias_skip_reset),
 	KUNIT_CASE(sgxfive_debug_test_own_arm),
 	{}
