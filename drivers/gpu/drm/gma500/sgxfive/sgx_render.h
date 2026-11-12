@@ -191,8 +191,8 @@ static inline bool sgx_render_te_aa_ms(u32 te_aa)
 
 /* The TA data of a 4096 x 4096 maximum (struct sgx_render_tadata), one region-header array. */
 #define SGX_RENDER_TD_MAX_SIZE	0x103000
-/* The same with four region-header arrays. */
-#define SGX_RENDER_TD_MAX4_SIZE	0x223000
+/* The same with four region-header arrays and the 4x tail room (sgx_render_tail_room()). */
+#define SGX_RENDER_TD_MAX4_SIZE	0x2e3000
 /* What a context's TA data may take: its slot (SGXFIVE_RENDER_TD_SLOT, 4 MiB) */
 #define SGX_RENDER_TD_LIMIT	0x400000
 
@@ -279,7 +279,8 @@ int sgx_render_check_max(u32 max_w, u32 max_h);
 /*
  * arrays: the region-header arrays before the ZLS buffer, 1 (the default), 2 or 4 (debugfs
  * render_rgn_arrays); -EINVAL for any other, -E2BIG when the TA data passes its slot
- * (SGX_RENDER_TD_LIMIT; _in: limit bytes), with *t untouched
+ * (SGX_RENDER_TD_LIMIT; _in: limit bytes), with *t untouched. room: the tail pointers' bytes
+ * (sgx_render_tail_room()), 0 for the maximum's own.
  */
 bool sgx_render_rgn_arrays_ok(u32 arrays);
 /*
@@ -288,9 +289,16 @@ bool sgx_render_rgn_arrays_ok(u32 arrays);
  * targets (aa4), one for any other.
  */
 u32 sgx_render_rgn_arrays(u32 setting, bool aa4);
-int sgx_render_tadata_layout(struct sgx_render_tadata *t, u32 max_w, u32 max_h, u32 arrays);
+/*
+ * The tail-pointer bytes of a new render context: its maximum's (l.tail_size)
+ * for 1x, four times that for a context made for 4x targets (aa4); setting
+ * (debugfs render_tail_room) instead when it is a whole number of pages, not 0.
+ */
+u32 sgx_render_tail_room(u32 max_w, u32 max_h, bool aa4, u32 setting);
+int sgx_render_tadata_layout(struct sgx_render_tadata *t, u32 max_w, u32 max_h, u32 arrays,
+			     u32 room);
 int sgx_render_tadata_layout_in(struct sgx_render_tadata *t, u32 max_w, u32 max_h, u32 arrays,
-				u32 limit);
+				u32 room, u32 limit);
 void sgx_render_rtds(u32 *rtds, const struct sgx_render_addrs *a, u32 mte_screen);
 void sgx_render_rtds_resize(u32 *rtds, u32 mte_screen);
 void sgx_render_rtds_job(u32 *rtds);

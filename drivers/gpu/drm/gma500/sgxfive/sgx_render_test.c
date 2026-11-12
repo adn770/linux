@@ -394,7 +394,8 @@ static void sgx_render_test_tadata(struct kunit *test)
 		const unsigned int w = want[i].w, h = want[i].h;
 
 		memset(&t, 0xa5, sizeof(t));
-		KUNIT_EXPECT_EQ_MSG(test, sgx_render_tadata_layout(&t, w, h, 1), 0, "%ux%u", w, h);
+		KUNIT_EXPECT_EQ_MSG(test, sgx_render_tadata_layout(&t, w, h, 1, 0), 0, "%ux%u",
+				    w, h);
 		KUNIT_EXPECT_EQ_MSG(test, t.tail, want[i].t.tail, "%ux%u", w, h);
 		KUNIT_EXPECT_EQ_MSG(test, t.control, want[i].t.control, "%ux%u", w, h);
 		KUNIT_EXPECT_EQ_MSG(test, t.otpm, want[i].t.otpm, "%ux%u", w, h);
@@ -414,12 +415,12 @@ static void sgx_render_test_tadata(struct kunit *test)
 	}
 	KUNIT_EXPECT_EQ(test, want[0].t.size, (u32)SGX_RENDER_TD_MAX_SIZE);
 	/* Each dimension 1 to the device's 4096; 0 is no size. */
-	KUNIT_EXPECT_EQ(test, sgx_render_tadata_layout(&t, 0, 64, 1), -EINVAL);
-	KUNIT_EXPECT_EQ(test, sgx_render_tadata_layout(&t, 64, 0, 1), -EINVAL);
-	KUNIT_EXPECT_EQ(test, sgx_render_tadata_layout(&t, 0, 0, 1), -EINVAL);
-	KUNIT_EXPECT_EQ(test, sgx_render_tadata_layout(&t, 4097, 64, 1), -EINVAL);
-	KUNIT_EXPECT_EQ(test, sgx_render_tadata_layout(&t, 64, 4097, 1), -EINVAL);
-	KUNIT_EXPECT_EQ(test, sgx_render_tadata_layout(&t, 0xffffffff, 1, 1), -EINVAL);
+	KUNIT_EXPECT_EQ(test, sgx_render_tadata_layout(&t, 0, 64, 1, 0), -EINVAL);
+	KUNIT_EXPECT_EQ(test, sgx_render_tadata_layout(&t, 64, 0, 1, 0), -EINVAL);
+	KUNIT_EXPECT_EQ(test, sgx_render_tadata_layout(&t, 0, 0, 1, 0), -EINVAL);
+	KUNIT_EXPECT_EQ(test, sgx_render_tadata_layout(&t, 4097, 64, 1, 0), -EINVAL);
+	KUNIT_EXPECT_EQ(test, sgx_render_tadata_layout(&t, 64, 4097, 1, 0), -EINVAL);
+	KUNIT_EXPECT_EQ(test, sgx_render_tadata_layout(&t, 0xffffffff, 1, 1, 0), -EINVAL);
 	KUNIT_EXPECT_EQ(test, sgx_render_check_max(1, 1), 0);
 	KUNIT_EXPECT_EQ(test, sgx_render_check_max(4096, 4096), 0);
 	KUNIT_EXPECT_EQ(test, sgx_render_check_max(0, 1), -EINVAL);
@@ -433,9 +434,11 @@ static void sgx_render_test_tadata(struct kunit *test)
  * up past four times the region headers, rounded to a page, and keeps one
  * array's size; nothing below it moves. Sizes of the offline fit of the
  * recorded faults (round 3). A maximum whose TA data would not fit its 4 MiB
- * slot is -E2BIG (none does: 4096 x 4096 at four arrays takes 0x223000, so the
- * bound is checked with sgx_render_tadata_layout_in()'s own limit); only 1, 2
- * and 4 arrays are taken.
+ * slot is -E2BIG (none does: 4096 x 4096 at four arrays takes 0x223000 with the
+ * 1x tail room and 0x2e3000 with the 4x one, so the bound is checked with
+ * sgx_render_tadata_layout_in()'s own limit); only 1, 2 and 4 arrays are
+ * taken. The tail room and the arrays are independent: the room moves the DPM
+ * pages and everything after them, the arrays only the ZLS buffer.
  */
 static void sgx_render_test_tadata_arrays(struct kunit *test)
 {
@@ -448,12 +451,14 @@ static void sgx_render_test_tadata_arrays(struct kunit *test)
 	struct sgx_render_tadata t, one;
 	struct sgx_render_layout l;
 	unsigned int i;
+	u32 room;
 
 	for (i = 0; i < ARRAY_SIZE(want); i++) {
 		const unsigned int w = want[i].w, h = want[i].h;
 
-		KUNIT_ASSERT_EQ(test, sgx_render_tadata_layout(&one, w, h, 1), 0);
-		KUNIT_ASSERT_EQ_MSG(test, sgx_render_tadata_layout(&t, w, h, 4), 0, "%ux%u", w, h);
+		KUNIT_ASSERT_EQ(test, sgx_render_tadata_layout(&one, w, h, 1, 0), 0);
+		KUNIT_ASSERT_EQ_MSG(test, sgx_render_tadata_layout(&t, w, h, 4, 0), 0, "%ux%u",
+				    w, h);
 		sgx_render_layout(&l, w, h);
 		KUNIT_EXPECT_EQ_MSG(test, t.size, want[i].size, "%ux%u", w, h);
 		KUNIT_EXPECT_EQ(test, t.tail, one.tail);
@@ -464,28 +469,54 @@ static void sgx_render_test_tadata_arrays(struct kunit *test)
 		KUNIT_EXPECT_EQ(test, t.zls, t.rgn + round_up(4 * l.rgn_size, SZ_4K));
 		KUNIT_EXPECT_EQ(test, t.size, t.zls + round_up(l.rgn_size, SZ_4K));
 		KUNIT_EXPECT_LE(test, t.size, (u32)SGX_RENDER_TD_LIMIT);
-		KUNIT_ASSERT_EQ(test, sgx_render_tadata_layout(&t, w, h, 2), 0);
+		KUNIT_ASSERT_EQ(test, sgx_render_tadata_layout(&t, w, h, 2, 0), 0);
 		KUNIT_EXPECT_EQ(test, t.zls, t.rgn + round_up(2 * l.rgn_size, SZ_4K));
 	}
-	/* 4096 x 4096 at four arrays fits the 4 MiB slot; it did not fit the old 2 MiB one. */
-	KUNIT_ASSERT_EQ(test, sgx_render_tadata_layout(&t, 4096, 4096, 4), 0);
+	/*
+	 * 4096 x 4096 at four arrays with the 4x room (0x100000) fits the 4 MiB slot at
+	 * 0x2e3000; with the 1x room (0x40000) it keeps the old 0x223000.
+	 */
+	room = sgx_render_tail_room(4096, 4096, true, 0);
+	KUNIT_EXPECT_EQ(test, room, 0x100000u);
+	KUNIT_ASSERT_EQ(test, sgx_render_tadata_layout(&t, 4096, 4096, 4, room), 0);
 	KUNIT_EXPECT_EQ(test, t.size, (u32)SGX_RENDER_TD_MAX4_SIZE);
-	KUNIT_EXPECT_EQ(test, (u32)SGX_RENDER_TD_MAX4_SIZE, 0x223000u);
-	KUNIT_EXPECT_EQ(test, sgx_render_tadata_layout_in(&t, 4096, 4096, 4, SZ_2M), -E2BIG);
-	KUNIT_EXPECT_EQ(test, sgx_render_tadata_layout(&t, 4096, 4096, 2), 0);
+	KUNIT_EXPECT_EQ(test, (u32)SGX_RENDER_TD_MAX4_SIZE, 0x2e3000u);
+	KUNIT_EXPECT_EQ(test, t.tail, 0u);
+	KUNIT_EXPECT_EQ(test, t.control, room);
+	KUNIT_EXPECT_EQ(test, t.otpm, room + 0x1000);
+	KUNIT_EXPECT_EQ(test, t.state, room + 0x2000);
+	KUNIT_EXPECT_EQ(test, t.rgn, room + 0x3000);
+	KUNIT_ASSERT_EQ(test, sgx_render_tadata_layout(&one, 4096, 4096, 4, 0), 0);
+	KUNIT_EXPECT_EQ(test, one.size, 0x223000u);
+	KUNIT_EXPECT_EQ(test, one.control, 0x40000u);
+	KUNIT_EXPECT_EQ(test, t.zls - t.rgn, one.zls - one.rgn);	/* the arrays alike */
+	KUNIT_EXPECT_EQ(test, t.size - t.zls, one.size - one.zls);
+	KUNIT_ASSERT_EQ(test, sgx_render_tadata_layout(&t, 4096, 4096, 4, 0x40000), 0);
+	KUNIT_EXPECT_EQ(test, memcmp(&t, &one, sizeof(t)), 0);	/* 0 is the 1x room */
+	KUNIT_EXPECT_EQ(test, sgx_render_tadata_layout_in(&t, 4096, 4096, 4, 0, SZ_2M), -E2BIG);
+	KUNIT_EXPECT_EQ(test, sgx_render_tadata_layout(&t, 4096, 4096, 2, 0), 0);
 	/* The limit is a bound: a TA data of exactly the limit fits, a byte less is -E2BIG. */
-	KUNIT_EXPECT_EQ(test, sgx_render_tadata_layout_in(&t, 4096, 4096, 4, 0x223000), 0);
+	KUNIT_EXPECT_EQ(test, sgx_render_tadata_layout_in(&t, 4096, 4096, 4, room, 0x2e3000), 0);
+	KUNIT_EXPECT_EQ(test, sgx_render_tadata_layout_in(&t, 4096, 4096, 4, 0, 0x223000), 0);
 	memset(&one, 0xa5, sizeof(one));
 	t = one;
-	KUNIT_EXPECT_EQ(test, sgx_render_tadata_layout_in(&t, 4096, 4096, 4, 0x222fff), -E2BIG);
+	KUNIT_EXPECT_EQ(test, sgx_render_tadata_layout_in(&t, 4096, 4096, 4, room, 0x2e2fff),
+			-E2BIG);
+	KUNIT_EXPECT_EQ(test, sgx_render_tadata_layout_in(&t, 4096, 4096, 4, 0, 0x222fff), -E2BIG);
 	KUNIT_EXPECT_EQ(test, memcmp(&t, &one, sizeof(t)), 0);	/* untouched */
-	KUNIT_EXPECT_EQ(test, sgx_render_tadata_layout_in(&t, 4096, 4096, 1,
+	KUNIT_EXPECT_EQ(test, sgx_render_tadata_layout_in(&t, 4096, 4096, 1, 0,
 							  SGX_RENDER_TD_MAX_SIZE), 0);
-	KUNIT_EXPECT_EQ(test, sgx_render_tadata_layout_in(&t, 4096, 4096, 1,
+	KUNIT_EXPECT_EQ(test, sgx_render_tadata_layout_in(&t, 4096, 4096, 1, 0,
 							  SGX_RENDER_TD_MAX_SIZE - 1), -E2BIG);
-	KUNIT_EXPECT_EQ(test, sgx_render_tadata_layout(&t, 64, 64, 0), -EINVAL);
-	KUNIT_EXPECT_EQ(test, sgx_render_tadata_layout(&t, 64, 64, 3), -EINVAL);
-	KUNIT_EXPECT_EQ(test, sgx_render_tadata_layout(&t, 64, 64, 8), -EINVAL);
+	/* A room past the limit is -E2BIG, also where rounding it up would wrap. */
+	t = one;
+	KUNIT_EXPECT_EQ(test, sgx_render_tadata_layout(&t, 64, 64, 1, SGX_RENDER_TD_LIMIT), -E2BIG);
+	KUNIT_EXPECT_EQ(test, sgx_render_tadata_layout(&t, 64, 64, 1, 0xfffff001), -E2BIG);
+	KUNIT_EXPECT_EQ(test, sgx_render_tadata_layout(&t, 64, 64, 1, 0xffffffff), -E2BIG);
+	KUNIT_EXPECT_EQ(test, memcmp(&t, &one, sizeof(t)), 0);	/* untouched */
+	KUNIT_EXPECT_EQ(test, sgx_render_tadata_layout(&t, 64, 64, 0, 0), -EINVAL);
+	KUNIT_EXPECT_EQ(test, sgx_render_tadata_layout(&t, 64, 64, 3, 0), -EINVAL);
+	KUNIT_EXPECT_EQ(test, sgx_render_tadata_layout(&t, 64, 64, 8, 0), -EINVAL);
 	KUNIT_EXPECT_TRUE(test, sgx_render_rgn_arrays_ok(1));
 	KUNIT_EXPECT_TRUE(test, sgx_render_rgn_arrays_ok(2));
 	KUNIT_EXPECT_TRUE(test, sgx_render_rgn_arrays_ok(4));
@@ -513,19 +544,22 @@ static void sgx_render_test_rgn_arrays(struct kunit *test)
 	struct sgx_render_tadata t;
 	struct sgx_render_layout l;
 	unsigned int i;
+	u32 room;
 
 	for (i = 0; i < ARRAY_SIZE(want); i++)
 		KUNIT_EXPECT_EQ_MSG(test, sgx_render_rgn_arrays(want[i].setting, want[i].aa4),
 				    want[i].arrays, "%u %d", want[i].setting, want[i].aa4);
 	/* The automatic 4x maximum fits its slot; a 1x one keeps its size. */
+	room = sgx_render_tail_room(4096, 4096, true, 0);
 	KUNIT_ASSERT_EQ(test, sgx_render_tadata_layout(&t, 4096, 4096,
-						       sgx_render_rgn_arrays(0, true)), 0);
-	KUNIT_EXPECT_EQ(test, t.size, 0x223000u);
+						       sgx_render_rgn_arrays(0, true), room), 0);
+	KUNIT_EXPECT_EQ(test, t.size, 0x2e3000u);
+	room = sgx_render_tail_room(4096, 4096, false, 0);
 	KUNIT_ASSERT_EQ(test, sgx_render_tadata_layout(&t, 4096, 4096,
-						       sgx_render_rgn_arrays(0, false)), 0);
+						       sgx_render_rgn_arrays(0, false), room), 0);
 	KUNIT_EXPECT_EQ(test, t.size, (u32)SGX_RENDER_TD_MAX_SIZE);
 	KUNIT_ASSERT_EQ(test, sgx_render_tadata_layout(&t, 288, 144,
-						       sgx_render_rgn_arrays(1, true)), 0);
+						       sgx_render_rgn_arrays(1, true), 0), 0);
 	sgx_render_layout(&l, 288, 144);
 	KUNIT_EXPECT_EQ(test, t.zls, t.rgn + round_up(l.rgn_size, SZ_4K));	/* E729's one array */
 	KUNIT_EXPECT_FALSE(test, sgx_render_te_aa_ms(0x20000000));
@@ -582,6 +616,175 @@ static void sgx_render_test_tadata_covers(struct kunit *test)
 }
 
 /*
+ * The tail room of a render context (sgx_render_tail_room()): a 1x context's
+ * is its maximum's tail pointers, l.tail_size, as before; a 4x context's is
+ * four times that, the square of twice the side (Q292's bound). A setting
+ * (debugfs render_tail_room) of a whole number of pages, non-zero, is taken
+ * as it is for either kind; any other is automatic.
+ */
+static void sgx_render_test_tail_room(struct kunit *test)
+{
+	static const struct { u16 w, h; } one[] = {
+		{ 4096, 4096 }, { 64, 64 }, { 1, 1 }, { 1024, 600 }, { 333, 777 },
+		{ 640, 475 }, { 640, 480 }, { 2048, 2048 }, { 4096, 1 }, { 1, 4096 },
+	};
+	static const struct { u16 w, h; u32 room; } four[] = {
+		{ 1024, 768, 0x10000 }, { 1280, 1024, 0x10000 }, { 2048, 240, 0x10000 },
+		{ 768, 2048, 0x40000 }, { 2048, 1536, 0x40000 }, { 4096, 4096, 0x100000 },
+		{ 64, 64, 0x400 },
+	};
+	static const u32 ignored[] = { 0, 0x800, 0xb001, 0xfff, 0x1 };
+	struct sgx_render_layout l;
+	unsigned int i, j;
+
+	for (i = 0; i < ARRAY_SIZE(one); i++) {
+		sgx_render_layout(&l, one[i].w, one[i].h);
+		KUNIT_EXPECT_EQ_MSG(test, sgx_render_tail_room(one[i].w, one[i].h, false, 0),
+				    l.tail_size, "%ux%u", one[i].w, one[i].h);
+		KUNIT_EXPECT_EQ_MSG(test, sgx_render_tail_room(one[i].w, one[i].h, true, 0),
+				    4 * l.tail_size, "%ux%u", one[i].w, one[i].h);
+	}
+	for (i = 0; i < ARRAY_SIZE(four); i++)
+		KUNIT_EXPECT_EQ_MSG(test, sgx_render_tail_room(four[i].w, four[i].h, true, 0),
+				    four[i].room, "%ux%u", four[i].w, four[i].h);
+	KUNIT_EXPECT_EQ(test, sgx_render_tail_room(1280, 1024, true, 0xb000), 0xb000u);
+	KUNIT_EXPECT_EQ(test, sgx_render_tail_room(1280, 1024, false, 0xb000), 0xb000u);
+	KUNIT_EXPECT_EQ(test, sgx_render_tail_room(1024, 768, true, 0x4000), 0x4000u);
+	KUNIT_EXPECT_EQ(test, sgx_render_tail_room(64, 64, false, 0x1000), 0x1000u);
+	for (j = 0; j < ARRAY_SIZE(ignored); j++) {
+		KUNIT_EXPECT_EQ_MSG(test, sgx_render_tail_room(1280, 1024, true, ignored[j]),
+				    0x10000u, "%#x", ignored[j]);
+		KUNIT_EXPECT_EQ_MSG(test, sgx_render_tail_room(1280, 1024, false, ignored[j]),
+				    0x4000u, "%#x", ignored[j]);
+	}
+}
+
+/*
+ * The tail-pointer entry of a tile, as resgx545's round-6 fit has it: the
+ * dword at 4 x Z(x, y), Z the bit interleave with y on the even bits and x on
+ * the odd ones; a 4x target's tiles are those of the doubled grid. The end of
+ * a target's entries is past its far corner's.
+ */
+static u32 zorder(u32 x, u32 y)
+{
+	u32 z = 0, b;
+
+	for (b = 0; b < 16; b++)
+		z |= ((y >> b) & 1) << (2 * b) | ((x >> b) & 1) << (2 * b + 1);
+	return z;
+}
+
+static u32 tail_end(u32 w, u32 h, bool aa4)
+{
+	const u32 k = aa4 ? 2 : 1;
+
+	return 4 * (zorder(k * DIV_ROUND_UP(w, 32) - 1, k * DIV_ROUND_UP(h, 16) - 1) + 1);
+}
+
+/*
+ * The 26 four-array 4x cells on record: a target on a context's maximum, and
+ * whether the job faulted (the last two also overflow).
+ */
+static const struct tail_cell {
+	u16 w, h, mw, mh;
+	bool fault;
+	const char *rec;
+} tail_cells[] = {
+	{ 64, 64, 64, 64, false, "E824 c2" },
+	{ 288, 144, 288, 144, false, "E824 h1, E828 j1r" },
+	{ 256, 288, 256, 288, false, "E824 h2" },
+	{ 384, 384, 384, 384, false, "E824 h3" },
+	{ 320, 160, 320, 160, false, "E824 h4" },
+	{ 512, 384, 512, 384, false, "E824 h5" },
+	{ 640, 480, 640, 480, false, "E824 h6" },
+	{ 320, 400, 320, 400, false, "E824 h7" },
+	{ 1024, 768, 1024, 768, false, "E824 h8" },
+	{ 1280, 1024, 1280, 1024, true, "E845, E869 d" },
+	{ 2048, 1536, 2048, 1536, true, "E845" },
+	{ 1024, 768, 2048, 2048, false, "E867 m0" },
+	{ 1280, 1024, 1280, 1040, false, "E867 m1" },
+	{ 1280, 1024, 2048, 2048, false, "E867 m2" },
+	{ 1280, 1024, 2048, 1024, true, "E867 m3" },
+	{ 2048, 1536, 4096, 4096, false, "E867 m4" },
+	{ 2048, 240, 2048, 240, true, "E868 l1" },
+	{ 256, 1536, 256, 1536, false, "E868 l2" },
+	{ 768, 2048, 768, 2048, true, "E868 l3" },
+	{ 1280, 768, 1280, 768, true, "E868 l4" },
+	{ 1024, 1024, 1024, 1024, true, "E868 l5" },
+	{ 1024, 512, 1024, 512, false, "E868 x1" },
+	{ 1184, 768, 1184, 768, true, "E868 x2" },
+	{ 1024, 800, 1024, 800, true, "E868 x3" },
+	{ 4096, 1152, 4096, 1152, true, "E846 o7" },
+	{ 4096, 4096, 4096, 4096, true, "E828 j4" },
+};
+
+/*
+ * The room covers every target's entries: for each maximum of a 32 x 16
+ * lattice up to 4096 x 4096 and each recorded cell, a 4x context's room holds
+ * its maximum's doubled-grid entries and a 1x context's its own.
+ */
+static void sgx_render_test_tail_covers(struct kunit *test)
+{
+	u32 w, h, fails = 0;
+	unsigned int i;
+
+	for (w = 32; w <= 4096; w += 32)
+		for (h = 16; h <= 4096; h += 16) {
+			fails += tail_end(w, h, true) > sgx_render_tail_room(w, h, true, 0);
+			fails += tail_end(w, h, false) > sgx_render_tail_room(w, h, false, 0);
+		}
+	KUNIT_EXPECT_EQ(test, fails, 0u);
+	for (i = 0; i < ARRAY_SIZE(tail_cells); i++) {
+		const struct tail_cell *c = &tail_cells[i];
+
+		KUNIT_EXPECT_LE_MSG(test, tail_end(c->w, c->h, true),
+				    sgx_render_tail_room(c->mw, c->mh, true, 0), "%s", c->rec);
+	}
+	/* the exact need at the device's maximum is half the bound */
+	KUNIT_EXPECT_EQ(test, tail_end(4096, 4096, true), 0x80000u);
+	KUNIT_EXPECT_EQ(test, tail_end(4096, 4096, false), 0x20000u);
+}
+
+/*
+ * The recorded cells with the old room (a 1x context's, what the four-array
+ * contexts had): a job faulted exactly when its entries passed the context's
+ * region headers, td.rgn, cell by cell. The fork keeps the evidence of the
+ * room's form; a change of the layout fails it.
+ */
+static void sgx_render_test_tail_records(struct kunit *test)
+{
+	struct sgx_render_tadata t;
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(tail_cells); i++) {
+		const struct tail_cell *c = &tail_cells[i];
+		const u32 old = sgx_render_tail_room(c->mw, c->mh, false, 0);
+		const u32 end = tail_end(c->w, c->h, true);
+
+		KUNIT_ASSERT_EQ_MSG(test, sgx_render_tadata_layout(&t, c->mw, c->mh, 4, old), 0,
+				    "%s", c->rec);
+		KUNIT_EXPECT_EQ_MSG(test, (bool)(end > t.rgn), c->fault, "%s: end %#x rgn %#x",
+				    c->rec, end, t.rgn);
+		/* the new room holds every one below the DPM pages */
+		KUNIT_ASSERT_EQ(test, sgx_render_tadata_layout(&t, c->mw, c->mh, 4,
+							       sgx_render_tail_room(c->mw, c->mh,
+										    true, 0)), 0);
+		KUNIT_EXPECT_LE_MSG(test, end, t.control, "%s", c->rec);
+	}
+	/* at the limit: 1024 x 768 and 1024 x 512 end at td.rgn and completed */
+	KUNIT_ASSERT_EQ(test, sgx_render_tadata_layout(&t, 1024, 768, 4, 0), 0);
+	KUNIT_EXPECT_EQ(test, tail_end(1024, 768, true), t.rgn);
+	KUNIT_ASSERT_EQ(test, sgx_render_tadata_layout(&t, 1024, 512, 4, 0), 0);
+	KUNIT_EXPECT_EQ(test, tail_end(1024, 512, true), t.rgn);
+	/* the knob reproduces the old layout: 1280 x 1024 at 0x4000 has E869's td.rgn */
+	KUNIT_ASSERT_EQ(test, sgx_render_tadata_layout(&t, 1280, 1024, 4,
+						       sgx_render_tail_room(1280, 1024, true,
+									    0x4000)), 0);
+	KUNIT_EXPECT_EQ(test, t.rgn, 0x7000u);
+	KUNIT_EXPECT_EQ(test, tail_end(1280, 1024, true), 0xd800u);
+}
+
+/*
  * The builders place the TA-data buffers where the context's layout says:
  * the tail pointers, the DPM pages and the region headers of a small
  * maximum sit closer to the slot base than for 4096 x 4096.
@@ -598,7 +801,7 @@ static void sgx_render_test_tadata_addrs(struct kunit *test)
 	KUNIT_ASSERT_NOT_NULL(test, r);
 	KUNIT_ASSERT_NOT_NULL(test, rd);
 	KUNIT_ASSERT_NOT_NULL(test, cmd);
-	KUNIT_ASSERT_EQ(test, sgx_render_tadata_layout(&a.td, 1024, 600, 1), 0);
+	KUNIT_ASSERT_EQ(test, sgx_render_tadata_layout(&a.td, 1024, 600, 1, 0), 0);
 	sgx_render_rtds(r, &a, cmd64.mte_screen);
 	rt = (const u8 *)r + SGX_RENDER_RTDS_RT;
 	KUNIT_EXPECT_EQ(test, dw(rt, SGX_RENDER_RT_TAIL), 0x20001000u);
@@ -614,7 +817,7 @@ static void sgx_render_test_tadata_addrs(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, dw(cmd, SGX_RENDER_CMD_TAREGS + SGX_RENDER_TA_TPC),
 			0x20001000u);
 	/* four region-header arrays: the region headers stay, the ZLS buffer moves past them */
-	KUNIT_ASSERT_EQ(test, sgx_render_tadata_layout(&a.td, 1024, 600, 4), 0);
+	KUNIT_ASSERT_EQ(test, sgx_render_tadata_layout(&a.td, 1024, 600, 4, 0), 0);
 	sgx_render_rd(rd, &a, &cmd64);
 	KUNIT_EXPECT_EQ(test, dw(rd, SGX_RENDER_RD_RGNBASE), 0x20008000u);
 	KUNIT_EXPECT_EQ(test, dw(rd, SGX_RENDER_RD_ZLSEXTZ), 0x2001a000u);
@@ -1078,6 +1281,9 @@ static struct kunit_case sgx_render_test_cases[] = {
 	KUNIT_CASE(sgx_render_test_tadata_arrays),
 	KUNIT_CASE(sgx_render_test_rgn_arrays),
 	KUNIT_CASE(sgx_render_test_tadata_covers),
+	KUNIT_CASE(sgx_render_test_tail_room),
+	KUNIT_CASE(sgx_render_test_tail_covers),
+	KUNIT_CASE(sgx_render_test_tail_records),
 	KUNIT_CASE(sgx_render_test_tadata_addrs),
 	KUNIT_CASE(sgx_render_test_rd),
 	KUNIT_CASE(sgx_render_test_rd_user),

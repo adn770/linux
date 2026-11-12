@@ -224,7 +224,10 @@ int sgxfive_render_init(struct sgxfive_ctx *ctx)
 	/* Forced arrays (debug option) also let its jobs set any TE_AA, as E729's control. */
 	ctx->aa_ms = ctx->aa4 || setting;
 	ret = sgx_render_tadata_layout(&td, ctx->max_width, ctx->max_height,
-				       sgx_render_rgn_arrays(setting, ctx->aa4));
+				       sgx_render_rgn_arrays(setting, ctx->aa4),
+				       sgx_render_tail_room(ctx->max_width, ctx->max_height,
+							    ctx->aa4,
+							    sgxfive_render_tail_room(ctx->sgx)));
 	if (ret) {
 		kfree(r);
 		return ret;

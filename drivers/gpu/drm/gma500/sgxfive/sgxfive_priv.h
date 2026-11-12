@@ -142,6 +142,7 @@ struct sgxfive {
 	struct sgxfive_kpokes kpokes;
 	u32 render_pb_pages;		/* PB of new render contexts */
 	u32 render_rgn_arrays;		/* region-header arrays of new render contexts */
+	u32 render_tail_room;		/* tail-pointer bytes of new render contexts */
 	bool vm_low;			/* VM_MAP also takes the first MiB */
 	u32 render_ctx_flags;		/* new render contexts' extra flags */
 	struct sgxfive_cleanup_trace cleanup;	/* the last one's, under lock */
@@ -469,6 +470,15 @@ static inline u32 sgxfive_render_rgn_arrays(struct sgxfive *sgx)
 	return sgx_render_rgn_arrays_ok(n) ? n : 0;
 }
 
+/*
+ * debugfs render_tail_room: the setting as written; sgx_render_tail_room()
+ * takes a whole number of pages, not 0, and any other value as automatic.
+ */
+static inline u32 sgxfive_render_tail_room(struct sgxfive *sgx)
+{
+	return READ_ONCE(sgx->render_tail_room);
+}
+
 static inline bool sgxfive_vm_low(struct sgxfive *sgx)
 {
 	return READ_ONCE(sgx->vm_low);
@@ -574,6 +584,11 @@ static inline u32 sgxfive_render_pb_pages(struct sgxfive *sgx)
 }
 
 static inline u32 sgxfive_render_rgn_arrays(struct sgxfive *sgx)
+{
+	return 0;
+}
+
+static inline u32 sgxfive_render_tail_room(struct sgxfive *sgx)
 {
 	return 0;
 }

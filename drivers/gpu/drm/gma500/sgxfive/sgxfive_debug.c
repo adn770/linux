@@ -1953,6 +1953,16 @@ void sgxfive_debug_init(struct sgxfive *sgx, struct dentry *dir)
 	 */
 	sgx->render_rgn_arrays = 0;
 	debugfs_create_x32("render_rgn_arrays", 0600, dir, &sgx->render_rgn_arrays);
+	/*
+	 * Tail-pointer bytes of render contexts created from now on, before the DPM pages. 0,
+	 * the default, is automatic: the maximum's 1x room (4 x side^2), four times that for a
+	 * context created with DRM_SGXFIVE_CTX_RENDER_AA_4X. A whole number of pages takes
+	 * that many bytes for either kind (the maximum's 1x room reproduces the old 4x
+	 * layout); any other value is taken as 0. The RT data's tail-size word stays the
+	 * target's. A room past the 4 MiB slot is refused at the context's creation (-E2BIG).
+	 */
+	sgx->render_tail_room = 0;
+	debugfs_create_x32("render_tail_room", 0600, dir, &sgx->render_tail_room);
 	debugfs_create_file("render_param", 0400, dir, sgx, &sgxfive_render_param_fops);
 	debugfs_create_file("render_tadata", 0400, dir, sgx, &sgxfive_render_tadata_fops);
 	debugfs_create_file("render_words", 0400, dir, sgx, &sgxfive_render_words_fops);

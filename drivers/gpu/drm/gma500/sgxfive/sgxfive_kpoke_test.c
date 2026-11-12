@@ -239,7 +239,7 @@ static void sgxfive_kpoke_test_render(struct kunit *test)
 	KUNIT_ASSERT_NOT_NULL(test, want);
 	c->mte_screen = 0x003f003f;
 	c->pixelbe = 0x80;
-	KUNIT_ASSERT_EQ(test, sgx_render_tadata_layout(&td, 64, 64, 1), 0);
+	KUNIT_ASSERT_EQ(test, sgx_render_tadata_layout(&td, 64, 64, 1, 0), 0);
 	sgxfive_render_addrs(&a, 0x32500000, 0x01234000, 0, &td);
 	sgxfive_render_build(img, &a, c, 9, true, true);
 	memcpy(want, img, SGX_XFER_CMD_SIZE);

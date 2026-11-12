@@ -96,6 +96,36 @@ static void sgxfive_debug_test_rgn_arrays(struct kunit *test)
 	}
 }
 
+/*
+ * debugfs render_tail_room: 0 (the default) is automatic, the 4x room for a
+ * 4x context; a whole number of pages is that many bytes for either kind, the
+ * 1x room of the maximum reproducing the old 4x layout; anything else is
+ * automatic.
+ */
+static void sgxfive_debug_test_tail_room(struct kunit *test)
+{
+	static const struct { u32 set; u32 room4, room1; } want[] = {
+		{ 0, 0x10000, 0x4000 }, { 0x4000, 0x4000, 0x4000 }, { 0xb000, 0xb000, 0xb000 },
+		{ 0xb001, 0x10000, 0x4000 }, { 0x800, 0x10000, 0x4000 },
+		{ 0x100000, 0x100000, 0x100000 },
+	};
+	struct sgxfive *sgx = kunit_kzalloc(test, sizeof(*sgx), GFP_KERNEL);
+	unsigned int i;
+
+	KUNIT_ASSERT_NOT_NULL(test, sgx);
+	KUNIT_EXPECT_EQ(test, sgxfive_render_tail_room(sgx), 0u);
+	for (i = 0; i < ARRAY_SIZE(want); i++) {
+		sgx->render_tail_room = want[i].set;
+		KUNIT_EXPECT_EQ(test, sgxfive_render_tail_room(sgx), want[i].set);
+		KUNIT_EXPECT_EQ_MSG(test, sgx_render_tail_room(1280, 1024, true,
+							       sgxfive_render_tail_room(sgx)),
+				    want[i].room4, "%#x", want[i].set);
+		KUNIT_EXPECT_EQ_MSG(test, sgx_render_tail_room(1280, 1024, false,
+							       sgxfive_render_tail_room(sgx)),
+				    want[i].room1, "%#x", want[i].set);
+	}
+}
+
 /* A context with its memory in a plain buffer, as far as the dumps need one. */
 static struct sgxfive_ctx *fake_ctx(struct kunit *test)
 {
@@ -777,7 +807,7 @@ static void sgxfive_debug_test_render_run(struct kunit *test)
 	c.bgobj_words[0] = 0x101;
 	c.bgobj_words[1] = 0x102;
 	c.bgobj_words[2] = 0x103;
-	KUNIT_ASSERT_EQ(test, sgx_render_tadata_layout(&td, 300, 200, 1), 0);
+	KUNIT_ASSERT_EQ(test, sgx_render_tadata_layout(&td, 300, 200, 1, 0), 0);
 	sgxfive_render_addrs(&a, 0x32500000, 0x01234000, 0, &td);
 	size = sgxfive_render_build(img, &a, &c, 1, true, true);
 	sgx_render_rtds(rtds, &a, 0);		/* as at creation */
@@ -1042,6 +1072,7 @@ static struct kunit_case sgxfive_debug_test_cases[] = {
 	KUNIT_CASE(sgxfive_debug_test_pb_small),
 	KUNIT_CASE(sgxfive_debug_test_pb_pages),
 	KUNIT_CASE(sgxfive_debug_test_rgn_arrays),
+	KUNIT_CASE(sgxfive_debug_test_tail_room),
 	KUNIT_CASE(sgxfive_debug_test_pages_copy),
 	KUNIT_CASE(sgxfive_debug_test_render_newest),
 	KUNIT_CASE(sgxfive_debug_test_render_donor),

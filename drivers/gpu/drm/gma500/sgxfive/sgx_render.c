@@ -171,19 +171,23 @@ u32 sgx_render_rgn_arrays(u32 setting, bool aa4)
  * With arrays > 1 the region-header buffer is that many times the layout's
  * (four for a 4x context, where the TA writes four arrays: E788, E824); the
  * ZLS buffer after it keeps one array's size (whether 4x needs more is not
- * known).
+ * known). room is the tail pointers' bytes (sgx_render_tail_room()), 0 for
+ * the maximum's own (a 1x context's); the DPM pages follow it, rounded up to
+ * a page, and everything after them moves with it.
  */
 int sgx_render_tadata_layout_in(struct sgx_render_tadata *t, u32 max_w, u32 max_h, u32 arrays,
-				u32 limit)
+				u32 room, u32 limit)
 {
 	struct sgx_render_layout l;
 	struct sgx_render_tadata n;
 
 	if (sgx_render_check_max(max_w, max_h) || !sgx_render_rgn_arrays_ok(arrays))
 		return -EINVAL;
+	if (room > limit)
+		return -E2BIG;	/* also where rounding it up would wrap */
 	sgx_render_layout(&l, max_w, max_h);
 	n.tail = 0;
-	n.control = n.tail + round_up(l.tail_size, SZ_4K);
+	n.control = n.tail + round_up(room ? room : l.tail_size, SZ_4K);
 	n.otpm = n.control + SZ_4K;
 	n.state = n.otpm + SZ_4K;
 	n.rgn = n.state + SZ_4K;
@@ -195,9 +199,31 @@ int sgx_render_tadata_layout_in(struct sgx_render_tadata *t, u32 max_w, u32 max_
 	return 0;
 }
 
-int sgx_render_tadata_layout(struct sgx_render_tadata *t, u32 max_w, u32 max_h, u32 arrays)
+/*
+ * The tail room of a new render context. At 4x the TA keeps a tail pointer
+ * for each tile of the doubled grid (resgx545's round-6 fit: the entry of
+ * tile (x, y) at 4 x Z(x, y), y on the even bits); with a 1x maximum's room
+ * a job faulted once its entries passed the region headers (E845, E868,
+ * E869). Four times the 1x room, the square of twice the side, holds every
+ * entry of any target within the maximum, whatever the order. setting
+ * (debugfs render_tail_room): a whole number of pages, non-zero, taken as it
+ * is for either kind (the maximum's 1x room reproduces the old layout); any
+ * other value is automatic.
+ */
+u32 sgx_render_tail_room(u32 max_w, u32 max_h, bool aa4, u32 setting)
 {
-	return sgx_render_tadata_layout_in(t, max_w, max_h, arrays, SGX_RENDER_TD_LIMIT);
+	struct sgx_render_layout l;
+
+	if (setting && IS_ALIGNED(setting, SZ_4K))
+		return setting;
+	sgx_render_layout(&l, max_w, max_h);
+	return aa4 ? 4 * l.tail_size : l.tail_size;
+}
+
+int sgx_render_tadata_layout(struct sgx_render_tadata *t, u32 max_w, u32 max_h, u32 arrays,
+			     u32 room)
+{
+	return sgx_render_tadata_layout_in(t, max_w, max_h, arrays, room, SGX_RENDER_TD_LIMIT);
 }
 
 static void sgx_render_screen(struct sgx_render_layout *l, u32 mte_screen)

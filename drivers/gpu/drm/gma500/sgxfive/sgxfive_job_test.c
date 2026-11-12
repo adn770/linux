@@ -319,7 +319,7 @@ static void sgxfive_job_test_render_addrs(struct kunit *test)
 	struct sgx_render_tadata td;
 	const u32 m = 0x32500000, pg = m + SGXFIVE_CTX_PAGE_OFF;
 
-	KUNIT_ASSERT_EQ(test, sgx_render_tadata_layout(&td, 1024, 600, 1), 0);
+	KUNIT_ASSERT_EQ(test, sgx_render_tadata_layout(&td, 1024, 600, 1, 0), 0);
 	sgxfive_render_addrs(&a, m, 0x01234000, 3, &td);
 	KUNIT_EXPECT_EQ(test, a.pd_phys, 0x01234000u);
 	KUNIT_EXPECT_EQ(test, a.param_base, 0x10000000u + 3 * SZ_8M);
@@ -374,7 +374,7 @@ static void sgxfive_job_test_render_build(struct kunit *test)
 	KUNIT_EXPECT_LE(test, SGXFIVE_RENDER_IMG_RD + SGX_RENDER_RD_SIZE,
 			SGX_XFER_CMD_SIZE);
 	test_cmd(&c);
-	KUNIT_ASSERT_EQ(test, sgx_render_tadata_layout(&td, 64, 64, 1), 0);
+	KUNIT_ASSERT_EQ(test, sgx_render_tadata_layout(&td, 64, 64, 1, 0), 0);
 	sgxfive_render_addrs(&a, 0x32500000, 0x01234000, 0, &td);
 	memset(img, 0xa5, SGX_XFER_CMD_SIZE);
 	KUNIT_EXPECT_EQ(test, sgxfive_render_build(img, &a, &c, 9, true, true),
@@ -987,7 +987,7 @@ static void sgxfive_job_test_render_replay(struct kunit *test)
 
 	ctx->type = DRM_SGXFIVE_CTX_TYPE_RENDER;
 	test_cmd(&c);
-	KUNIT_ASSERT_EQ(test, sgx_render_tadata_layout(&td, 64, 64, 1), 0);
+	KUNIT_ASSERT_EQ(test, sgx_render_tadata_layout(&td, 64, 64, 1, 0), 0);
 	sgxfive_render_addrs(&a, 0x32500000, 0x01234000, 0, &td);
 	KUNIT_EXPECT_EQ(test, sgxfive_render_replay_pending(ctx), 0u);
 	for (i = 0; i < ARRAY_SIZE(kicks); i++) {

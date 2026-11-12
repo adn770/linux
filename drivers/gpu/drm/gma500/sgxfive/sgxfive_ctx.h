@@ -66,8 +66,9 @@ struct sgxfive_client {
 #define SGXFIVE_RENDER_SLOTS		32
 #define SGXFIVE_RENDER_PARAM_SLOT	SZ_8M
 /*
- * SGX_RENDER_TD_MAX4_SIZE (four region-header arrays at 4096 x 4096), rounded
- * to the span of one page table: 32 slots end at 0x28000000, in the TA_DATA heap.
+ * SGX_RENDER_TD_MAX4_SIZE (four region-header arrays and the 4x tail room at
+ * 4096 x 4096), rounded to the span of one page table: 32 slots end at
+ * 0x28000000, in the TA_DATA heap.
  */
 #define SGXFIVE_RENDER_TD_SLOT		SZ_4M
 
