@@ -90,6 +90,7 @@ void sgxfive_debug_disarm(struct sgxfive *sgx)
 	sgxfive_hostirq_reset(&sgx->hostirq);
 	WRITE_ONCE(sgx->alias_ctx_rw, false);
 	WRITE_ONCE(sgx->render_share_pb, false);
+	WRITE_ONCE(sgx->render_final_pb_pages, 0);
 	WRITE_ONCE(sgx->render_keep, false);
 	WRITE_ONCE(sgx->kick_no_bump, false);
 	spin_lock(&sgx->kpoke_lock);
@@ -1858,6 +1859,31 @@ int sgxfive_vm_pte_flags_set(void *data, u64 val)
 DEFINE_DEBUGFS_ATTRIBUTE(sgxfive_vm_pte_flags_fops, sgxfive_vm_pte_flags_get,
 			 sgxfive_vm_pte_flags_set, "0x%02llx\n");
 
+/*
+ * debugfs render_final_pb_pages (sgxfive_take_final_pb): 0 or a PB's page count, from the
+ * smallest with a ZLS threshold to the parameter slot's; any other value is refused
+ * (-EINVAL) and leaves the knob as it was.
+ */
+static int sgxfive_final_pb_get(void *data, u64 *val)
+{
+	struct sgxfive *sgx = data;
+
+	*val = READ_ONCE(sgx->render_final_pb_pages);
+	return 0;
+}
+
+int sgxfive_final_pb_set(void *data, u64 val)
+{
+	struct sgxfive *sgx = data;
+
+	if (val && (val < SGX_RENDER_PB_MIN_PAGES || val > SGX_RENDER_PB_PAGES))
+		return -EINVAL;
+	WRITE_ONCE(sgx->render_final_pb_pages, val);
+	return 0;
+}
+DEFINE_DEBUGFS_ATTRIBUTE(sgxfive_final_pb_fops, sgxfive_final_pb_get, sgxfive_final_pb_set,
+			 "0x%llx\n");
+
 static int sgxfive_vm_pte_addr_get(void *data, u64 *val)
 {
 	struct sgxfive *sgx = data;
@@ -2126,6 +2152,16 @@ void sgxfive_debug_init(struct sgxfive *sgx, struct dentry *dir)
 	/* Pages of the PB of render contexts created from now on. */
 	sgx->render_pb_pages = SGX_RENDER_PB_PAGES;
 	debugfs_create_x32("render_pb_pages", 0600, dir, &sgx->render_pb_pages);
+	/*
+	 * The PB whose thresholds the final kicks of the next render context take, once: 0 (the
+	 * default) or 0x23 to 0x422 pages, any other value refused. That context's free list
+	 * holds the larger of the two PBs; its thresholds are render_pb_pages' until a scene's
+	 * last kick after a geometry kick, whose TA command sets this PB's, and the next scene's
+	 * first kick sets render_pb_pages' back. A reset drops it; a context sharing a PB
+	 * (render_share_pb) takes it and ignores it.
+	 */
+	debugfs_create_file_unsafe("render_final_pb_pages", 0600, dir, sgx,
+				   &sgxfive_final_pb_fops);
 	/*
 	 * Region-header arrays before the ZLS buffer in the TA data of render contexts created
 	 * from now on. 0, the default, is automatic: four for a context created with

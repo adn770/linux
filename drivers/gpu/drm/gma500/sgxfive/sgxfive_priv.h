@@ -141,6 +141,7 @@ struct sgxfive {
 	spinlock_t kpoke_lock;		/* pokes for the next jobs' commands */
 	struct sgxfive_kpokes kpokes;
 	u32 render_pb_pages;		/* PB of new render contexts */
+	u32 render_final_pb_pages;	/* the next one's final kicks' PB, once */
 	u32 render_rgn_arrays;		/* region-header arrays of new render contexts */
 	u32 render_tail_room;		/* tail-pointer bytes of new render contexts */
 	bool render_bg_layer;		/* renders: a one-layer background object */
@@ -410,6 +411,7 @@ void sgxfive_debug_irq(struct sgxfive *sgx, u32 stat_1, u32 stat_2);
 int sgxfive_alias_skip_set(void *data, u64 val);
 int sgxfive_vm_pte_flags_set(void *data, u64 val);
 int sgxfive_vm_pte_addr_set(void *data, u64 val);
+int sgxfive_final_pb_set(void *data, u64 val);
 
 static inline bool sgxfive_alias_ta3d_ro(struct sgxfive *sgx)
 {
@@ -435,6 +437,15 @@ static inline bool sgxfive_take_ctx_rw(struct sgxfive *sgx)
 static inline bool sgxfive_take_render_keep(struct sgxfive *sgx)
 {
 	return sgxfive_oneshot_take(&sgx->render_keep);
+}
+
+/*
+ * The PB whose thresholds the next render context's final kicks after a geometry kick take:
+ * taken once (debugfs render_final_pb_pages), 0 for none.
+ */
+static inline u32 sgxfive_take_final_pb(struct sgxfive *sgx)
+{
+	return xchg(&sgx->render_final_pb_pages, 0);
 }
 
 /* Whether the next render context runs on a sibling's PB: taken once (debugfs render_share_pb). */
@@ -637,6 +648,11 @@ static inline bool sgxfive_take_ctx_rw(struct sgxfive *sgx)
 static inline bool sgxfive_take_render_keep(struct sgxfive *sgx)
 {
 	return false;
+}
+
+static inline u32 sgxfive_take_final_pb(struct sgxfive *sgx)
+{
+	return 0;
 }
 
 static inline bool sgxfive_take_share_pb(struct sgxfive *sgx)

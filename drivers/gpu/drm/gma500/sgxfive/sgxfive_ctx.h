@@ -103,6 +103,9 @@ struct sgxfive_ctx {
 	bool lost;			/* a job of it hung: no more jobs */
 	bool closed;			/* destroyed: under submit_lock, read by a reset */
 	bool scene_open;		/* render: a geometry job left its scene open */
+	bool pb_raised;			/* render: a job set pb_final's thresholds */
+	u32 pb_pages;			/* render: its PB's thresholds, as at creation */
+	u32 pb_final;			/* render: a final job's after a geometry job, 0: none */
 	u32 replay;			/* jobs to re-run after a reset */
 };
 
@@ -133,6 +136,7 @@ struct sgxfive_job {
 	struct drm_sgxfive_render_cmd rc;	/* a render job's registers */
 	bool first, last;		/* a render job's kick of its scene */
 	bool bg_layer;			/* a render job's background object has a layer */
+	u32 pb;				/* a render job sets the thresholds of this PB, 0: none */
 };
 
 static inline void *sgxfive_ctx_cpu(struct sgxfive_ctx *ctx, u32 off)

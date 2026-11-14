@@ -1211,6 +1211,39 @@ static void sgxfive_debug_test_vm_pte_knobs(struct kunit *test)
 }
 
 /*
+ * debugfs render_final_pb_pages takes 0 or a PB's page count (0x23 to the
+ * slot's 0x422) and refuses any other, leaving the knob as it was. The next
+ * render context takes it once; a recovery reset drops it.
+ */
+static void sgxfive_debug_test_final_pb_knob(struct kunit *test)
+{
+	struct sgxfive *sgx = kunit_kzalloc(test, sizeof(*sgx), GFP_KERNEL);
+	static const u64 good[] = { 0, 0x23, 0x62, 0x200, 0x422 };
+	static const u64 bad[] = { 1, 0x22, 0x423, 0x1000, BIT_ULL(32), ~0ull };
+	unsigned int i;
+
+	KUNIT_ASSERT_NOT_NULL(test, sgx);
+	spin_lock_init(&sgx->kpoke_lock);
+	sgxfive_hostirq_init(&sgx->hostirq);
+	KUNIT_EXPECT_EQ(test, sgxfive_take_final_pb(sgx), 0u);
+	for (i = 0; i < ARRAY_SIZE(good); i++) {
+		KUNIT_EXPECT_EQ(test, sgxfive_final_pb_set(sgx, good[i]), 0);
+		KUNIT_EXPECT_EQ(test, sgx->render_final_pb_pages, (u32)good[i]);
+	}
+	for (i = 0; i < ARRAY_SIZE(bad); i++) {
+		KUNIT_EXPECT_EQ_MSG(test, sgxfive_final_pb_set(sgx, bad[i]), -EINVAL,
+				    "0x%llx", bad[i]);
+		KUNIT_EXPECT_EQ(test, sgx->render_final_pb_pages, 0x422u);
+	}
+	KUNIT_EXPECT_EQ(test, sgxfive_take_final_pb(sgx), 0x422u);
+	KUNIT_EXPECT_EQ(test, sgxfive_take_final_pb(sgx), 0u);	/* taken once */
+	KUNIT_EXPECT_EQ(test, sgxfive_final_pb_set(sgx, 0x200), 0);
+	KUNIT_EXPECT_FALSE(test, sgxfive_debug_reset(sgx));
+	KUNIT_EXPECT_EQ(test, sgx->render_final_pb_pages, 0u);	/* the reset drops it */
+	KUNIT_EXPECT_EQ(test, sgxfive_take_final_pb(sgx), 0u);
+}
+
+/*
  * debugfs render_bg_layer and render_bg_src: off and 0 until written, read
  * together at a render's submission; a recovery reset leaves both.
  */
@@ -1306,6 +1339,7 @@ static struct kunit_case sgxfive_debug_test_cases[] = {
 	KUNIT_CASE(sgxfive_debug_test_alias_skip),
 	KUNIT_CASE(sgxfive_debug_test_alias_skip_set),
 	KUNIT_CASE(sgxfive_debug_test_vm_pte_knobs),
+	KUNIT_CASE(sgxfive_debug_test_final_pb_knob),
 	KUNIT_CASE(sgxfive_debug_test_render_bg_knobs),
 	KUNIT_CASE(sgxfive_debug_test_alias_skip_reset),
 	KUNIT_CASE(sgxfive_debug_test_own_arm),

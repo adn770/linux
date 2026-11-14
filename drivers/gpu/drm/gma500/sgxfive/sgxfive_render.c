@@ -44,7 +44,6 @@ struct sgxfive_render {
 	u8 *cpu;			/* page table, scratch, background */
 	u8 *tdva;			/* the RT data's buffers */
 	bool mapped;			/* in the VM */
-	u32 pb_pages;			/* its PB, as set at creation */
 	bool pb_shared;			/* it runs on a sibling's PB (debug option) */
 	struct sgxfive_ctx *donor;	/* that PB's context, referenced until this is freed */
 	struct sgxfive_deferred release;
@@ -135,9 +134,9 @@ static void sgxfive_render_init_mem(struct sgxfive_render *r)
 	ctl[1] = 0;
 	/* Sized for the smallest target until a job says otherwise. */
 	sgx_render_rtds(rctx(ctx, SGXFIVE_RCTX_RTDS_OFF), &r->a, 0);
-	sgx_render_pb(rctx(ctx, SGXFIVE_RCTX_PBDESC_OFF),
-		      rctx(ctx, SGXFIVE_RCTX_PBBLOCK_OFF), (u32 *)r->cpu, &r->a,
-		      r->pb_pages);
+	sgx_render_pb_list(rctx(ctx, SGXFIVE_RCTX_PBDESC_OFF),
+			   rctx(ctx, SGXFIVE_RCTX_PBBLOCK_OFF), (u32 *)r->cpu, &r->a,
+			   ctx->pb_pages, ctx->pb_final);
 	*rctx(ctx, SGXFIVE_RCTX_ACCESS_OFF) = 0;
 	*rctx(ctx, SGXFIVE_RCTX_PENDING_OFF) = 0;
 	*rctx(ctx, SGXFIVE_RCTX_RTSTATUS_OFF) = 0;
@@ -248,7 +247,16 @@ int sgxfive_render_init(struct sgxfive_ctx *ctx)
 	sgxfive_render_addrs(&r->a, ctx->mem.addr, sgxfive_vm_pd_phys(ctx->vm), r->slot,
 			     &td);
 	r->pb_shared = sgxfive_render_share_pb(ctx, r);
-	r->pb_pages = sgxfive_render_pb_pages(ctx->sgx);
+	ctx->pb_pages = sgxfive_render_pb_pages(ctx->sgx);
+	/* Taken also by a context on a sibling's PB, which leaves that PB as it is. */
+	ctx->pb_final = sgx_render_final_pb(ctx->pb_pages, sgxfive_take_final_pb(ctx->sgx));
+	if (r->pb_shared)
+		ctx->pb_final = 0;
+	if (ctx->pb_final)
+		drm_info(ctx->sgx->dev,
+			 "sgxfive: render context: PB %#x, final kicks' PB %#x, list %#x pages\n",
+			 sgx_render_pb_pages(ctx->pb_pages), ctx->pb_final,
+			 sgx_render_pb_list_pages(ctx->pb_pages, ctx->pb_final));
 	r->a.ctx_flags = sgxfive_render_ctx_flags(ctx->sgx);
 	ret = alloc_pages_wc(r->param, PARAM_PAGES);
 	if (!ret)
@@ -576,13 +584,18 @@ static bool sgxfive_render_share_pb(struct sgxfive_ctx *ctx, struct sgxfive_rend
 /*
  * At submission, in the context's job order: which kick of its scene the job
  * is. A geometry job leaves the scene open for the next; the first job after a
- * closed scene opens one.
+ * closed scene opens one. With a final PB (debugfs render_final_pb_pages) the
+ * job that closes a scene a geometry job opened sets that PB's thresholds,
+ * the next scene's first job the context's own (sgx_render_pb_kick()); the
+ * job's image keeps it, so a recovery's replay sets them again.
  */
 void sgxfive_render_job_scene(struct sgxfive_ctx *ctx, struct sgxfive_job *job, bool geometry)
 {
 	job->first = !ctx->scene_open;
 	job->last = !geometry;
 	ctx->scene_open = geometry;
+	job->pb = sgx_render_pb_kick(&ctx->pb_raised, ctx->pb_pages, ctx->pb_final, job->first,
+				     job->last);
 }
 
 /* At submission: the job's firmware image, into its hardware fence. */
@@ -593,6 +606,10 @@ void sgxfive_render_job_build(struct sgxfive_ctx *ctx, struct sgxfive_job *job)
 	/* debugfs render_bg_layer: the tag says one layer, the run builds its object */
 	if (job->bg_layer)
 		sgxfive_render_img_set_bg_layers(job->hw->cmd, 1);
+	/* debugfs render_final_pb_pages: the EDM sets the PB's thresholds at this kick */
+	if (job->pb)
+		sgx_render_cmd_pb(job->hw->cmd, job->pb,
+				  sgx_render_pb_list_pages(ctx->pb_pages, ctx->pb_final));
 	job->hw->ta_only = !job->last;
 }
 

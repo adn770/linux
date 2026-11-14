@@ -996,6 +996,32 @@ static void sgxfive_job_test_render_scene(struct kunit *test)
 		sgxfive_render_job_scene(ctx, &job, seq[i].geometry);
 		KUNIT_EXPECT_EQ(test, job.first, seq[i].first);
 		KUNIT_EXPECT_EQ(test, job.last, seq[i].last);
+		KUNIT_EXPECT_EQ(test, job.pb, 0u);	/* no final PB: no kick sets one */
+	}
+}
+
+/*
+ * A context created with a final PB (debugfs render_final_pb_pages): the job
+ * that closes a scene a geometry job opened sets the final PB's thresholds,
+ * the next scene's first job the context's own, once (sgx_render_pb_kick()).
+ */
+static void sgxfive_job_test_render_scene_pb(struct kunit *test)
+{
+	static const struct { bool geometry; u32 pb; } seq[] = {
+		{ false, 0 }, { true, 0 }, { false, 0x200 }, { false, 0x62 }, { false, 0 },
+		{ true, 0 }, { true, 0 }, { false, 0x200 }, { true, 0x62 }, { false, 0x200 },
+	};
+	struct sgxfive_ctx *ctx = fake_ctx(test);
+	struct sgxfive_job job;
+	unsigned int i;
+
+	ctx->type = DRM_SGXFIVE_CTX_TYPE_RENDER;
+	ctx->pb_pages = 0x62;
+	ctx->pb_final = 0x200;
+	for (i = 0; i < ARRAY_SIZE(seq); i++) {
+		job.pb = 0xa5;
+		sgxfive_render_job_scene(ctx, &job, seq[i].geometry);
+		KUNIT_EXPECT_EQ_MSG(test, job.pb, seq[i].pb, "job %u", i);
 	}
 }
 
@@ -1093,6 +1119,7 @@ static struct kunit_case sgxfive_job_test_cases[] = {
 	KUNIT_CASE(sgxfive_job_test_render_build),
 	KUNIT_CASE(sgxfive_job_test_render_img_bg),
 	KUNIT_CASE(sgxfive_job_test_render_scene),
+	KUNIT_CASE(sgxfive_job_test_render_scene_pb),
 	KUNIT_CASE(sgxfive_job_test_geometry_fence),
 	KUNIT_CASE(sgxfive_job_test_seqno),
 	KUNIT_CASE(sgxfive_job_test_copy_array),
