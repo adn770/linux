@@ -31,6 +31,7 @@
 #define SGX_RENDER_CMD_RFLAGS	0x01c
 #define SGX_RENDER_CMD_FRAME	0x020
 #define SGX_RENDER_CMD_PBDESC	0x024
+#define SGX_RENDER_CMD_PB_THRESH 0x028	/* TA, ZLS, global, PDS (SGX_RENDER_TA_PB_THRESH) */
 #define SGX_RENDER_CMD_RD	0x038
 #define SGX_RENDER_CMD_DSTSYNC	0x03c
 #define SGX_RENDER_CMD_RTDS	0x040
@@ -78,6 +79,7 @@ static inline bool sgx_render_te_aa_ms(u32 te_aa)
 #define SGX_RENDER_TA_FIRST	0x01
 #define SGX_RENDER_TA_LAST	0x02
 #define SGX_RENDER_TA_INVAL	0x70	/* USE, PDS and data caches */
+#define SGX_RENDER_TA_PB_THRESH	0x2000	/* the command's PB thresholds replace the PB's */
 #define SGX_RENDER_SCENE	0x400	/* render flag: render the scene, counted */
 #define SGX_RENDER_TEPSG_END	0x400000	/* the scene's last kick */
 
@@ -282,6 +284,33 @@ void sgx_render_ctx(u32 *ctx, const struct sgx_render_addrs *a);
 void sgx_render_pb(u32 *desc, u32 *block, u32 *pt, const struct sgx_render_addrs *a,
 		   u32 pages);
 u32 sgx_render_pb_pages(u32 want);
+/*
+ * A PB whose free list holds more pages than its thresholds count (debugfs
+ * render_final_pb_pages): list, 0 or a page count up to the slot's, chains
+ * sgx_render_pb_list_pages() pages; the thresholds are those of a PB of pages
+ * (sgx_render_pb_thresholds()). sgx_render_pb() is the list of pages' own.
+ */
+void sgx_render_pb_list(u32 *desc, u32 *block, u32 *pt, const struct sgx_render_addrs *a,
+			u32 pages, u32 list);
+u32 sgx_render_pb_list_pages(u32 pages, u32 list);
+/* TA, ZLS, global and PDS thresholds of a PB of pages whose list is list's (above). */
+void sgx_render_pb_thresholds(u32 thr[4], u32 pages, u32 list);
+/*
+ * The PB a context's final kicks after a geometry kick take their thresholds
+ * from (debugfs render_final_pb_pages): final when it is a page count
+ * sgx_render_pb_pages() takes and not the context's own PB of pages; 0, none,
+ * otherwise.
+ */
+u32 sgx_render_final_pb(u32 pages, u32 final);
+/*
+ * At submission, in the context's job order: the PB whose thresholds a kick's
+ * TA command sets (sgx_render_cmd_pb()), 0 for none. A scene's last kick after
+ * a geometry kick takes final's; the next scene's first kick puts pages' back.
+ * *raised says that final's are in place; with final 0 nothing changes.
+ */
+u32 sgx_render_pb_kick(bool *raised, u32 pages, u32 final, bool first, bool last);
+/* A TA command that sets its PB's thresholds to those of a PB of pages, list as above. */
+void sgx_render_cmd_pb(u8 *cmd, u32 pages, u32 list);
 /*
  * Run a context on another's parameter buffer (debugfs render_share_pb; built without
  * the debug option too, so that KUnit checks it): its HW context and TA command then

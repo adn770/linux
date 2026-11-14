@@ -53,19 +53,51 @@ u32 sgx_render_pb_pages(u32 want)
 }
 
 /*
+ * The pages of a PB's free list: pages' (sgx_render_pb_pages()) or a longer
+ * list's, up to the slot's (debugfs render_final_pb_pages); 0 or any other
+ * list is pages'.
+ */
+u32 sgx_render_pb_list_pages(u32 pages, u32 list)
+{
+	const u32 n = sgx_render_pb_pages(pages);
+
+	return list > n && list <= SGX_RENDER_PB_PAGES ? list : n;
+}
+
+/*
+ * The thresholds follow the PB's size: TA = pages + 0x10, ZLS = global =
+ * pages - 0x22, PDS = global - 0x100 when that is positive, else 0. With a
+ * longer list the TA's follows the list, so it stays past every page the
+ * list holds, as in a PB of the list's size.
+ */
+void sgx_render_pb_thresholds(u32 thr[4], u32 pages, u32 list)
+{
+	const u32 global = sgx_render_pb_pages(pages) - 0x22;
+
+	thr[0] = sgx_render_pb_list_pages(pages, list) + 0x10;
+	thr[1] = global;
+	thr[2] = global;
+	thr[3] = global > 0x100 ? global - 0x100 : 0;
+}
+
+/*
  * A PB of the first pages of the parameter slot, contiguous from its PB and
  * chained in order: the host builds the page table, one entry per page of
  * the slot, linking them {previous << 16 | next} with 0xffff at both ends,
- * and the descriptor's free list {tail << 16 | head}. The thresholds follow
- * the PB's size: TA = pages + 0x10, ZLS = global = pages - 0x22, PDS =
- * global - 0x100 when that is positive, else 0.
+ * and the descriptor's free list {tail << 16 | head}; the thresholds of
+ * sgx_render_pb_thresholds().
  */
 void sgx_render_pb(u32 *desc, u32 *block, u32 *pt, const struct sgx_render_addrs *a,
 		   u32 pages)
 {
+	sgx_render_pb_list(desc, block, pt, a, pages, 0);
+}
+
+void sgx_render_pb_list(u32 *desc, u32 *block, u32 *pt, const struct sgx_render_addrs *a,
+			u32 pages, u32 list)
+{
 	const u32 head = SGX_RENDER_PARAM_PB >> 12;
-	const u32 tail = head + sgx_render_pb_pages(pages) - 1;
-	const u32 global = tail - head + 1 - 0x22;
+	const u32 tail = head + sgx_render_pb_list_pages(pages, list) - 1;
 	const u32 ht = tail << 16 | head, prev = (tail - 1) << 16;
 	u32 i;
 
@@ -82,16 +114,54 @@ void sgx_render_pb(u32 *desc, u32 *block, u32 *pt, const struct sgx_render_addrs
 	desc[SGX_RENDER_PB_HT / 4] = ht;
 	desc[SGX_RENDER_PB_PREV / 4] = prev;
 	/* TA, ZLS, global, PDS */
-	desc[SGX_RENDER_PB_TA_THRESH / 4] = tail - head + 1 + 0x10;
-	desc[SGX_RENDER_PB_TA_THRESH / 4 + 1] = global;
-	desc[SGX_RENDER_PB_TA_THRESH / 4 + 2] = global;
-	desc[SGX_RENDER_PB_TA_THRESH / 4 + 3] = global > 0x100 ? global - 0x100 : 0;
+	sgx_render_pb_thresholds(&desc[SGX_RENDER_PB_TA_THRESH / 4], pages, list);
 	desc[SGX_RENDER_PB_BLOCKS / 4] = a->pbblock;
 
 	block[0] = tail - head + 1;
 	block[1] = ht;
 	block[2] = a->pbdesc;
 	block[3] = 0;
+}
+
+u32 sgx_render_final_pb(u32 pages, u32 final)
+{
+	if (final < SGX_RENDER_PB_MIN_PAGES || final > SGX_RENDER_PB_PAGES ||
+	    final == sgx_render_pb_pages(pages))
+		return 0;
+	return final;
+}
+
+u32 sgx_render_pb_kick(bool *raised, u32 pages, u32 final, bool first, bool last)
+{
+	if (!final)
+		return 0;
+	if (!first && last) {
+		*raised = true;
+		return final;
+	}
+	if (first && *raised) {
+		*raised = false;
+		return sgx_render_pb_pages(pages);
+	}
+	return 0;
+}
+
+/*
+ * The EDM stores a command's thresholds (dwords 10 to 13) into its PB
+ * descriptor when the command's flags have 0x2000 (geom_flags bit 13), and
+ * loads them into the DPM's threshold registers before the kick's TA, the
+ * free list and the pages the scene holds as they are (edm_dataflow.md).
+ */
+void sgx_render_cmd_pb(u8 *cmd, u32 pages, u32 list)
+{
+	u32 thr[4];
+	unsigned int i;
+
+	sgx_render_pb_thresholds(thr, pages, list);
+	put32(cmd, SGX_RENDER_CMD_FLAGS,
+	      get32(cmd, SGX_RENDER_CMD_FLAGS) | SGX_RENDER_TA_PB_THRESH);
+	for (i = 0; i < 4; i++)
+		put32(cmd, SGX_RENDER_CMD_PB_THRESH + 4 * i, thr[i]);
 }
 
 bool sgx_render_share_pb(struct sgx_render_addrs *a, const struct sgx_render_addrs *donor)

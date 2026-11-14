@@ -174,6 +174,189 @@ static void sgx_render_test_pb(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, nonzero, 0x422u);
 }
 
+/*
+ * A free list longer than the thresholds' PB (debugfs render_final_pb_pages):
+ * 0x200 pages chained and counted, the thresholds of 0x62 pages but the TA's,
+ * which follows the list (pages + 0x10, as for every PB). A list of 0, one
+ * shorter than the PB or past the slot is the PB's own: sgx_render_pb().
+ */
+static void sgx_render_test_pb_list(struct kunit *test)
+{
+	u32 *desc = kunit_kzalloc(test, SGX_RENDER_PBDESC_SIZE, GFP_KERNEL);
+	u32 *block = kunit_kzalloc(test, SGX_RENDER_PBBLOCK_SIZE, GFP_KERNEL);
+	u32 *pt = kunit_kzalloc(test, SGX_RENDER_PT_BYTES, GFP_KERNEL);
+	u32 *desc0 = kunit_kzalloc(test, SGX_RENDER_PBDESC_SIZE, GFP_KERNEL);
+	u32 *block0 = kunit_kzalloc(test, SGX_RENDER_PBBLOCK_SIZE, GFP_KERNEL);
+	u32 *pt0 = kunit_kzalloc(test, SGX_RENDER_PT_BYTES, GFP_KERNEL);
+	static const u32 same[] = { 0, 0x40, 0x62, 0x423, 0xffffffff };
+	const u32 ht = 0x200 << 16 | 1;
+	unsigned int i, nonzero = 0;
+
+	KUNIT_ASSERT_NOT_NULL(test, desc);
+	KUNIT_ASSERT_NOT_NULL(test, block);
+	KUNIT_ASSERT_NOT_NULL(test, pt);
+	KUNIT_ASSERT_NOT_NULL(test, desc0);
+	KUNIT_ASSERT_NOT_NULL(test, block0);
+	KUNIT_ASSERT_NOT_NULL(test, pt0);
+	memset(pt, 0xa5, SGX_RENDER_PT_BYTES);
+	sgx_render_pb_list(desc, block, pt, &addrs, 0x62, 0x200);
+	KUNIT_EXPECT_EQ(test, desc[SGX_RENDER_PB_NUMPAGES / 4], 0x200u);
+	KUNIT_EXPECT_EQ(test, desc[SGX_RENDER_PB_INIT_HT / 4], ht);
+	KUNIT_EXPECT_EQ(test, desc[SGX_RENDER_PB_INIT_PREV / 4], 0x1ffu << 16);
+	KUNIT_EXPECT_EQ(test, desc[SGX_RENDER_PB_HT / 4], ht);
+	KUNIT_EXPECT_EQ(test, desc[SGX_RENDER_PB_PREV / 4], 0x1ffu << 16);
+	KUNIT_EXPECT_EQ(test, desc[SGX_RENDER_PB_TA_THRESH / 4], 0x210u);
+	KUNIT_EXPECT_EQ(test, desc[SGX_RENDER_PB_TA_THRESH / 4 + 1], 0x40u);
+	KUNIT_EXPECT_EQ(test, desc[SGX_RENDER_PB_TA_THRESH / 4 + 2], 0x40u);
+	KUNIT_EXPECT_EQ(test, desc[SGX_RENDER_PB_TA_THRESH / 4 + 3], 0u);
+	KUNIT_EXPECT_EQ(test, block[0], 0x200u);
+	KUNIT_EXPECT_EQ(test, block[1], ht);
+	KUNIT_EXPECT_EQ(test, pt[1], 0xffff0002u);
+	KUNIT_EXPECT_EQ(test, pt[0x62], 0x00610063u);
+	KUNIT_EXPECT_EQ(test, pt[0x200], 0x01ffffffu);
+	for (i = 0; i < SGX_RENDER_PT_BYTES / 4; i++)
+		nonzero += pt[i] != 0;
+	KUNIT_EXPECT_EQ(test, nonzero, 0x200u);
+
+	sgx_render_pb(desc0, block0, pt0, &addrs, 0x62);
+	for (i = 0; i < ARRAY_SIZE(same); i++) {
+		memset(pt, 0xa5, SGX_RENDER_PT_BYTES);
+		memset(desc, 0xa5, SGX_RENDER_PBDESC_SIZE);
+		sgx_render_pb_list(desc, block, pt, &addrs, 0x62, same[i]);
+		KUNIT_EXPECT_EQ_MSG(test, memcmp(desc, desc0, SGX_RENDER_PBDESC_SIZE), 0,
+				    "list %#x", same[i]);
+		KUNIT_EXPECT_EQ_MSG(test, memcmp(block, block0, SGX_RENDER_PBBLOCK_SIZE), 0,
+				    "list %#x", same[i]);
+		KUNIT_EXPECT_EQ_MSG(test, memcmp(pt, pt0, SGX_RENDER_PT_BYTES), 0,
+				    "list %#x", same[i]);
+	}
+}
+
+/*
+ * The thresholds of a PB (TA = list + 0x10, ZLS = global = pages - 0x22, PDS =
+ * global - 0x100 when positive) and its list's pages: pages as
+ * sgx_render_pb_pages() takes them, a longer list up to the slot's.
+ */
+static void sgx_render_test_pb_thresholds(struct kunit *test)
+{
+	static const struct { u32 pages, list, n, thr[4]; } t[] = {
+		{ 0x62, 0, 0x62, { 0x72, 0x40, 0x40, 0 } },
+		{ 0x62, 0x200, 0x200, { 0x210, 0x40, 0x40, 0 } },
+		{ 0x200, 0x62, 0x200, { 0x210, 0x1de, 0x1de, 0xde } },
+		{ 0x200, 0x200, 0x200, { 0x210, 0x1de, 0x1de, 0xde } },
+		{ 0x23, 0x422, 0x422, { 0x432, 1, 1, 0 } },
+		{ 0, 0, 0x422, { 0x432, 0x400, 0x400, 0x300 } },
+		{ 0x22, 0x62, 0x422, { 0x432, 0x400, 0x400, 0x300 } },
+		{ 0x62, 0x423, 0x62, { 0x72, 0x40, 0x40, 0 } },
+	};
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(t); i++) {
+		u32 thr[4] = { 0xa5, 0xa5, 0xa5, 0xa5 };
+
+		KUNIT_EXPECT_EQ_MSG(test, sgx_render_pb_list_pages(t[i].pages, t[i].list), t[i].n,
+				    "row %u", i);
+		sgx_render_pb_thresholds(thr, t[i].pages, t[i].list);
+		KUNIT_EXPECT_EQ_MSG(test, memcmp(thr, t[i].thr, sizeof(thr)), 0,
+				    "row %u: %#x %#x %#x %#x", i, thr[0], thr[1], thr[2], thr[3]);
+	}
+}
+
+/*
+ * A final kick's PB (debugfs render_final_pb_pages): a page count the PB takes
+ * (0x23 to the slot's 0x422), bigger or smaller than the context's own; 0
+ * when unset, out of range or the context's own (0 is the slot's 0x422).
+ */
+static void sgx_render_test_final_pb(struct kunit *test)
+{
+	KUNIT_EXPECT_EQ(test, sgx_render_final_pb(0x62, 0x200), 0x200u);
+	KUNIT_EXPECT_EQ(test, sgx_render_final_pb(0x62, 0x422), 0x422u);
+	KUNIT_EXPECT_EQ(test, sgx_render_final_pb(0x62, 0x23), 0x23u);
+	KUNIT_EXPECT_EQ(test, sgx_render_final_pb(0x200, 0x62), 0x62u);
+	KUNIT_EXPECT_EQ(test, sgx_render_final_pb(0, 0x62), 0x62u);
+	KUNIT_EXPECT_EQ(test, sgx_render_final_pb(0x62, 0), 0u);
+	KUNIT_EXPECT_EQ(test, sgx_render_final_pb(0x62, 0x62), 0u);
+	KUNIT_EXPECT_EQ(test, sgx_render_final_pb(0, 0x422), 0u);
+	KUNIT_EXPECT_EQ(test, sgx_render_final_pb(0x22, 0x422), 0u);
+	KUNIT_EXPECT_EQ(test, sgx_render_final_pb(0x62, 0x22), 0u);
+	KUNIT_EXPECT_EQ(test, sgx_render_final_pb(0x62, 0x423), 0u);
+	KUNIT_EXPECT_EQ(test, sgx_render_final_pb(0x62, 0xffffffff), 0u);
+}
+
+/*
+ * Which kicks set thresholds: the last kick of a scene a geometry kick opened
+ * takes the final PB's, the first kick of the next scene (alone or opening)
+ * puts the context's back, once; a whole scene or a geometry kick changes
+ * nothing while the context's are in place, and with no final PB no kick does.
+ */
+static void sgx_render_test_pb_kick(struct kunit *test)
+{
+	static const struct { bool first, last; u32 pb; bool raised; } seq[] = {
+		{ true, true, 0, false },	/* a whole scene */
+		{ true, false, 0, false },	/* a geometry kick opens one */
+		{ false, false, 0, false },	/* another */
+		{ false, true, 0x200, true },	/* its final render */
+		{ true, true, 0x62, false },	/* the next scene puts them back */
+		{ true, true, 0, false },
+		{ true, false, 0, false },
+		{ false, true, 0x200, true },
+		{ true, false, 0x62, false },	/* also when it opens with a geometry kick */
+		{ false, true, 0x200, true },
+	};
+	bool raised = false;
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(seq); i++) {
+		KUNIT_EXPECT_EQ_MSG(test, sgx_render_pb_kick(&raised, 0x62, 0x200, seq[i].first,
+							     seq[i].last), seq[i].pb, "kick %u", i);
+		KUNIT_EXPECT_EQ_MSG(test, raised, seq[i].raised, "kick %u", i);
+	}
+	raised = false;
+	for (i = 0; i < ARRAY_SIZE(seq); i++) {
+		KUNIT_EXPECT_EQ_MSG(test, sgx_render_pb_kick(&raised, 0x62, 0, seq[i].first,
+							     seq[i].last), 0u, "kick %u", i);
+		KUNIT_EXPECT_FALSE(test, raised);
+	}
+}
+
+/*
+ * A TA command that sets its PB's thresholds: flag 0x2000 (geom_flags bit 13)
+ * and the four thresholds at dwords 10 to 13, where the EDM reads them; no
+ * other word changes. A command built without it has neither.
+ */
+static void sgx_render_test_cmd_pb(struct kunit *test)
+{
+	static const struct sgx_render_kick k = {
+		.flags = SGX_RENDER_TA_LAST | SGX_RENDER_TA_INVAL,
+		.render_flags = SGX_RENDER_SCENE, .te_psg = SGX_RENDER_TEPSG_END,
+		.frame = 7, .ta_val = 7, .td_val = 7,
+	};
+	u8 *cmd = kunit_kzalloc(test, SGX_RENDER_CMD_STRIDE, GFP_KERNEL);
+	u8 *ref = kunit_kzalloc(test, SGX_RENDER_CMD_STRIDE, GFP_KERNEL);
+	const u32 thr[4] = { 0x210, 0x1de, 0x1de, 0xde };
+	unsigned int off;
+
+	KUNIT_ASSERT_NOT_NULL(test, cmd);
+	KUNIT_ASSERT_NOT_NULL(test, ref);
+	KUNIT_EXPECT_EQ(test, SGX_RENDER_CMD_PB_THRESH, 4 * 10);
+	KUNIT_EXPECT_EQ(test, SGX_RENDER_TA_PB_THRESH, 1 << 13);
+	sgx_render_cmd(ref, &addrs, &cmd64, &k);
+	for (off = 0; off < 16; off += 4)
+		KUNIT_EXPECT_EQ(test, dw(ref, SGX_RENDER_CMD_PB_THRESH + off), 0u);
+	KUNIT_EXPECT_EQ(test, dw(ref, SGX_RENDER_CMD_FLAGS) & SGX_RENDER_TA_PB_THRESH, 0u);
+	memcpy(cmd, ref, SGX_RENDER_CMD_STRIDE);
+	sgx_render_cmd_pb(cmd, 0x200, 0x62);
+	KUNIT_EXPECT_EQ(test, dw(cmd, SGX_RENDER_CMD_FLAGS), k.flags | SGX_RENDER_TA_PB_THRESH);
+	for (off = 0; off < 16; off += 4)
+		KUNIT_EXPECT_EQ(test, dw(cmd, SGX_RENDER_CMD_PB_THRESH + off), thr[off / 4]);
+	for (off = 0; off < SGX_RENDER_CMD_STRIDE; off += 4) {
+		if (off == SGX_RENDER_CMD_FLAGS ||
+		    (off >= SGX_RENDER_CMD_PB_THRESH && off < SGX_RENDER_CMD_PB_THRESH + 16))
+			continue;
+		KUNIT_EXPECT_EQ_MSG(test, dw(cmd, off), dw(ref, off), "offset %#x", off);
+	}
+}
+
 static void sgx_render_test_rtds(struct kunit *test)
 {
 	u32 *r = kunit_kzalloc(test, SGX_RENDER_RTDS_SIZE, GFP_KERNEL);
@@ -1334,6 +1517,11 @@ static struct kunit_case sgx_render_test_cases[] = {
 	KUNIT_CASE(sgx_render_test_ctx),
 	KUNIT_CASE(sgx_render_test_share_pb),
 	KUNIT_CASE(sgx_render_test_pb),
+	KUNIT_CASE(sgx_render_test_pb_list),
+	KUNIT_CASE(sgx_render_test_pb_thresholds),
+	KUNIT_CASE(sgx_render_test_final_pb),
+	KUNIT_CASE(sgx_render_test_pb_kick),
+	KUNIT_CASE(sgx_render_test_cmd_pb),
 	KUNIT_CASE(sgx_render_test_rtds),
 	KUNIT_CASE(sgx_render_test_rtds_resize),
 	KUNIT_CASE(sgx_render_test_overflow),
