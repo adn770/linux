@@ -12,7 +12,7 @@
 #include <linux/types.h>
 
 enum sgx_own_kind {
-	SGX_OWN_PLAIN, SGX_OWN_LDR, SGX_OWN_STR, SGX_OWN_BR, SGX_OWN_LAPC, SGX_OWN_MOVLIMM, SGX_OWN_MOVREG, SGX_OWN_MOVPCLINK, SGX_OWN_MOVFROMPC, SGX_OWN_NOP, SGX_OWN_IMA32, SGX_OWN_LOAD_ABS, SGX_OWN_STORE_ABS, SGX_OWN_DENY, SGX_OWN_MOVPA,
+	SGX_OWN_PLAIN, SGX_OWN_LDR, SGX_OWN_STR, SGX_OWN_BR, SGX_OWN_LAPC, SGX_OWN_MOVLIMM, SGX_OWN_MOVREG, SGX_OWN_MOVPCLINK, SGX_OWN_MOVFROMPC, SGX_OWN_NOP, SGX_OWN_IMA32, SGX_OWN_LOAD_ABS, SGX_OWN_STORE_ABS, SGX_OWN_DENY, SGX_OWN_MOVPA, SGX_OWN_EMITPDS,
 };
 
 #define SGX_OWN_WHY_CLOCK "clock gate register"
@@ -33,6 +33,9 @@ enum sgx_own_kind {
 #define SGX_OWN_WHY_ENTRY "entry outside the blob or inside a continue triple"
 #define SGX_OWN_WHY_BASE "load or store base is not the results page"
 #define SGX_OWN_WHY_PA "mov to a pa register not on the list"
+#define SGX_OWN_WHY_EMIT_ARGS "emitpds sources are not the kernel's image"
+#define SGX_OWN_WHY_EMIT_ONCE "emitpds can run twice"
+#define SGX_OWN_WHY_EMIT_ENTRY "emitpds without the started task's entry"
 
 static const u16 sgx_own_clockgate_regs[] __maybe_unused = { 0, 1, 2, 3 };
 static const u16 sgx_own_str_regs[] __maybe_unused = { 69, 77, 517, 670, 691 };
@@ -85,6 +88,7 @@ static const struct { u64 mask, value; u8 kind; } sgx_own_forms[] __maybe_unused
 	{ 0xffffffffffffffffULL, 0xf800008000000000ULL, SGX_OWN_LAPC },	/* lapc */
 	{ 0xfffefcf3cfff4000ULL, 0x48081081000c0000ULL, SGX_OWN_PLAIN },	/* alu-test */
 	{ 0xffffffffffffffffULL, 0xd002008081020089ULL, SGX_OWN_IMA32 },	/* ima32 */
+	{ 0xffffffffffffffffULL, 0xfb20b00000008184ULL, SGX_OWN_EMITPDS },	/* emitpds-own */
 	{ 0xfffffffff000007fULL, 0xe82b0002a0000000ULL, SGX_OWN_LOAD_ABS },	/* ldad */
 	{ 0xffffffffffe00000ULL, 0xf022000080000000ULL, SGX_OWN_STORE_ABS },	/* stad */
 	{ 0xfffffffff0003f80ULL, 0xfe21000020000000ULL, SGX_OWN_LDR },	/* ldr-imm */

@@ -567,6 +567,60 @@ static void sgxfive_owntask_test_res_write(struct kunit *test)
 	KUNIT_EXPECT_FALSE(test, sgx_own_res_write_ok(4, (size_t)-4));
 }
 
+
+/* ---- the one emitpds form (round 33, N3) ------------------------------------------------- */
+/* the emitpds word is recognised in a blob that has it, and only there */
+static void sgxfive_owntask_test_has_emit(struct kunit *test)
+{
+	struct sgx_own_blob b;
+	unsigned int i, n = 0;
+
+	KUNIT_ASSERT_EQ(test, sgx_own_parse(own_ok_emitsa, sizeof(own_ok_emitsa), &b), 0);
+	KUNIT_EXPECT_TRUE(test, sgx_own_has_emit(&b));
+	for (i = 0; i < b.n_insn; i++)
+		n += sgx_own_insn(&b, i) == 0xfb20b00000008184ULL;
+	KUNIT_EXPECT_EQ(test, n, 1u);
+	KUNIT_EXPECT_GE(test, b.n_entry, 2);
+	KUNIT_ASSERT_EQ(test, sgx_own_parse(own_ok_null, sizeof(own_ok_null), &b), 0);
+	KUNIT_EXPECT_FALSE(test, sgx_own_has_emit(&b));
+}
+
+/* a blob with the emitpds is not armed without the image it names: refused, nothing written */
+static void sgxfive_owntask_test_apply_emit_needs_image(struct kunit *test)
+{
+	struct own_fw *f = own_fw_new(test, 4);
+
+	KUNIT_EXPECT_EQ(test, own_apply(f, own_ok_emitsa, sizeof(own_ok_emitsa), "slots=0x1 entry=0"),
+			-ENOENT);
+	KUNIT_EXPECT_EQ(test, memcmp(f->pds, f->stock, PDS_SIZE), 0);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le64(f->code), 0ull);
+}
+
+/* one crafted blob per rule, with its reason (the full list is own_bad) */
+static void sgxfive_owntask_test_emit_refusals(struct kunit *test)
+{
+	static const struct { const u8 *data; size_t len; const char *why; } c[] = {
+		{ own_bad_emitpds_sideband, sizeof(own_bad_emitpds_sideband), SGX_OWN_WHY_UNKNOWN },
+		{ own_bad_emitpds_unpatched, sizeof(own_bad_emitpds_unpatched), SGX_OWN_WHY_EMIT_ARGS },
+		{ own_bad_emitpds_one_path, sizeof(own_bad_emitpds_one_path), SGX_OWN_WHY_EMIT_ARGS },
+		{ own_bad_emitpds_twice, sizeof(own_bad_emitpds_twice), SGX_OWN_WHY_EMIT_ONCE },
+		{ own_bad_emitpds_loop, sizeof(own_bad_emitpds_loop), SGX_OWN_WHY_EMIT_ONCE },
+		{ own_bad_emitpds_from_entry1, sizeof(own_bad_emitpds_from_entry1), SGX_OWN_WHY_EMIT_ONCE },
+		{ own_bad_emitpds_one_entry, sizeof(own_bad_emitpds_one_entry), SGX_OWN_WHY_EMIT_ENTRY },
+		{ own_bad_pds_slot3, sizeof(own_bad_pds_slot3), SGX_OWN_WHY_PATCH_SLOT },
+		{ own_bad_pds_addend, sizeof(own_bad_pds_addend), SGX_OWN_WHY_PATCH_ADD },
+		{ own_bad_pds_base, sizeof(own_bad_pds_base), SGX_OWN_WHY_BASE },
+	};
+	const char *why;
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(c); i++) {
+		why = "";
+		KUNIT_EXPECT_EQ_MSG(test, verify_data(c[i].data, c[i].len, &why), -EPERM, "case %u", i);
+		KUNIT_EXPECT_STREQ_MSG(test, why, c[i].why, "case %u", i);
+	}
+}
+
 static struct kunit_case sgxfive_owntask_test_cases[] = {
 	KUNIT_CASE(sgxfive_owntask_test_accepts_our_blobs),
 	KUNIT_CASE(sgxfive_owntask_test_refuses_crafted_blobs),
@@ -586,6 +640,9 @@ static struct kunit_case sgxfive_owntask_test_cases[] = {
 	KUNIT_CASE(sgxfive_owntask_test_apply_reverifies_and_wants_one_record),
 	KUNIT_CASE(sgxfive_owntask_test_arm_parse),
 	KUNIT_CASE(sgxfive_owntask_test_res_write),
+	KUNIT_CASE(sgxfive_owntask_test_has_emit),
+	KUNIT_CASE(sgxfive_owntask_test_apply_emit_needs_image),
+	KUNIT_CASE(sgxfive_owntask_test_emit_refusals),
 	{}
 };
 

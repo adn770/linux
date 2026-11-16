@@ -56,6 +56,11 @@ static unsigned int own_mov_pclink_src(u64 w)
 #define SGX_OWN_PA_LAST		4
 #define OWN_TRACKED	32		/* the registers a base may name: the stock 32 temporaries */
 #define OWN_TOP		0xffff		/* a register of the base analysis that holds no page offset */
+#define OWN_PDS_STATE	0xfff0		/* + slot: the register holds the overlay's pds<slot> value */
+#define OWN_EMIT_WORD	0xfb20b00000008184ULL	/* the emitpds-own row's one word */
+
+/* the registers the emitpds word reads, s0 to s2 */
+static const u8 own_emit_regs[SGX_OWN_PDS_SLOTS] = { 2, 3, 4 };
 
 bool sgx_own_clockgate(unsigned int index)
 {
@@ -109,6 +114,16 @@ u64 sgx_own_insn(const struct sgx_own_blob *b, unsigned int i)
 	return get_unaligned_le64(b->insn + 8 * i);
 }
 
+bool sgx_own_has_emit(const struct sgx_own_blob *b)
+{
+	unsigned int i;
+
+	for (i = 0; i < b->n_insn; i++)
+		if (sgx_own_insn(b, i) == OWN_EMIT_WORD)
+			return true;
+	return false;
+}
+
 u16 sgx_own_entry(const struct sgx_own_blob *b, unsigned int i)
 {
 	return get_unaligned_le16(b->entry + 2 * i);
@@ -148,11 +163,12 @@ static unsigned int own_pred(int kind, u64 w)
  */
 struct own_scan {
 	u8 kind[SGX_OWN_MAX_INSNS];
-	u8 patch[SGX_OWN_MAX_INSNS];			/* 0, SGX_OWN_PATCH_RES or _CONT */
-	u16 add[SGX_OWN_MAX_INSNS];
+	u8 patch[SGX_OWN_MAX_INSNS];			/* 0, SGX_OWN_PATCH_RES, _CONT or _PDS */
+	u16 add[SGX_OWN_MAX_INSNS];			/* a res addend, a pds slot */
 	u16 work[SGX_OWN_MAX_INSNS];
 	bool reached[SGX_OWN_MAX_INSNS];
 	bool queued[SGX_OWN_MAX_INSNS];
+	bool seen[SGX_OWN_MAX_INSNS];			/* the emitpds rule's reach */
 	u16 st[SGX_OWN_MAX_INSNS][OWN_TRACKED];
 };
 
@@ -167,7 +183,8 @@ static void own_effects(const struct own_scan *s, u64 w, unsigned int i, u16 *st
 	switch (s->kind[i]) {
 	case SGX_OWN_MOVLIMM:
 		if (d < OWN_TRACKED)
-			st[d] = s->patch[i] == SGX_OWN_PATCH_RES ? s->add[i] : OWN_TOP;
+			st[d] = s->patch[i] == SGX_OWN_PATCH_RES ? s->add[i] :
+				s->patch[i] == SGX_OWN_PATCH_PDS ? OWN_PDS_STATE + s->add[i] : OWN_TOP;
 		break;
 	case SGX_OWN_MOVREG:
 		if (!(w >> 51 & 1) && d < OWN_TRACKED)	/* bit 51: a bank that is not the temporaries */
@@ -244,6 +261,17 @@ static int own_check_bases(const struct sgx_own_blob *b, struct own_scan *s, con
 		}
 	}
 	for (i = 0; i < b->n_insn; i++) {
+		if (s->reached[i] && s->kind[i] == SGX_OWN_EMITPDS) {
+			unsigned int k;
+
+			for (k = 0; k < SGX_OWN_PDS_SLOTS; k++) {
+				if (s->st[i][own_emit_regs[k]] != OWN_PDS_STATE + k) {
+					*why = SGX_OWN_WHY_EMIT_ARGS;
+					return -EPERM;
+				}
+			}
+			continue;
+		}
 		if (!s->reached[i] || (s->kind[i] != SGX_OWN_LOAD_ABS && s->kind[i] != SGX_OWN_STORE_ABS))
 			continue;
 		w = sgx_own_insn(b, i);
@@ -257,16 +285,50 @@ static int own_check_bases(const struct sgx_own_blob *b, struct own_scan *s, con
 	return 0;
 }
 
+/* the words some path from `start` reaches (marked in s->seen); s->work is free again by now */
+static void own_reach(const struct sgx_own_blob *b, struct own_scan *s, unsigned int start)
+{
+	unsigned int nwork = 0, i, j, n;
+	unsigned int next[2];
+	u64 w;
+
+	if (start >= b->n_insn || s->seen[start])
+		return;
+	s->seen[start] = true;
+	s->work[nwork++] = start;
+	while (nwork) {
+		i = s->work[--nwork];
+		w = sgx_own_insn(b, i);
+		n = 0;
+		if (s->kind[i] == SGX_OWN_LAPC || (s->kind[i] == SGX_OWN_NOP && (w >> 50 & 1)))
+			continue;
+		if (s->kind[i] == SGX_OWN_BR) {
+			next[n++] = own_br_target(i, w);
+			if (own_pred(SGX_OWN_BR, w))
+				next[n++] = i + 1;
+		} else {
+			next[n++] = i + 1;
+		}
+		for (j = 0; j < n; j++) {
+			if (next[j] < b->n_insn && !s->seen[next[j]]) {
+				s->seen[next[j]] = true;
+				s->work[nwork++] = next[j];
+			}
+		}
+	}
+}
+
 /*
  * Default deny, in passes, the first that finds a reason ends the scan with it: every word a
  * canonical form (ldr and str also on the lists, a br inside the blob), the patches, the
- * continue triple, the last word, the entries, the bases. tools/fwtask's verify_why() has the same
- * passes in the same order and the same reasons.
+ * continue triple, the last word, the entries, the bases and the emitpds's sources, and the emitpds
+ * run once. tools/fwtask's verify_why() has the same passes in the same order and the same
+ * reasons.
  */
 int sgx_own_verify(const struct sgx_own_blob *b, const char **why)
 {
 	struct own_scan *s;
-	unsigned int i, t;
+	unsigned int i, t, emit = SGX_OWN_MAX_INSNS;
 	int kind, ret = -EPERM;
 	u64 w;
 
@@ -310,6 +372,13 @@ int sgx_own_verify(const struct sgx_own_blob *b, const char **why)
 				goto out;
 			}
 			break;
+		case SGX_OWN_EMITPDS:
+			if (emit < b->n_insn) {
+				*why = SGX_OWN_WHY_EMIT_ONCE;
+				goto out;
+			}
+			emit = i;
+			break;
 		}
 	}
 	for (i = 0; i < b->n_patch; i++) {
@@ -323,11 +392,12 @@ int sgx_own_verify(const struct sgx_own_blob *b, const char **why)
 			*why = SGX_OWN_WHY_PATCH_LIMM;
 			goto out;
 		}
-		if (pk == SGX_OWN_PATCH_CONT && slot > SGX_OWN_EXIT_SLOT) {
+		if ((pk == SGX_OWN_PATCH_CONT && slot > SGX_OWN_EXIT_SLOT) ||
+		    (pk == SGX_OWN_PATCH_PDS && slot >= SGX_OWN_PDS_SLOTS)) {
 			*why = SGX_OWN_WHY_PATCH_SLOT;
 			goto out;
 		}
-		if (pk != SGX_OWN_PATCH_CONT && pk != SGX_OWN_PATCH_RES) {
+		if (pk != SGX_OWN_PATCH_CONT && pk != SGX_OWN_PATCH_RES && pk != SGX_OWN_PATCH_PDS) {
 			*why = SGX_OWN_WHY_PATCH_KIND;
 			goto out;
 		}
@@ -335,13 +405,13 @@ int sgx_own_verify(const struct sgx_own_blob *b, const char **why)
 			*why = SGX_OWN_WHY_PATCH_TWICE;
 			goto out;
 		}
-		if ((pk == SGX_OWN_PATCH_CONT && addend) ||
+		if (((pk == SGX_OWN_PATCH_CONT || pk == SGX_OWN_PATCH_PDS) && addend) ||
 		    (pk == SGX_OWN_PATCH_RES && addend >= SGX_OWN_RES_SIZE)) {
 			*why = SGX_OWN_WHY_PATCH_ADD;
 			goto out;
 		}
 		s->patch[index] = pk;
-		s->add[index] = addend;
+		s->add[index] = pk == SGX_OWN_PATCH_PDS ? slot : addend;
 	}
 	/* the continue triple, and nothing else touches pclink or branches into it */
 	for (i = 0; i < b->n_insn; i++) {
@@ -388,7 +458,20 @@ int sgx_own_verify(const struct sgx_own_blob *b, const char **why)
 			goto out;
 		}
 	}
+	if (emit < b->n_insn && b->n_entry <= SGX_OWN_EMIT_ENTRY) {
+		*why = SGX_OWN_WHY_EMIT_ENTRY;
+		goto out;
+	}
 	ret = own_check_bases(b, s, why);
+	if (ret || emit >= b->n_insn)
+		goto out;
+	/* the emitpds once per task: nothing after it, nor the task its image starts, reaches it */
+	own_reach(b, s, emit + 1);
+	own_reach(b, s, sgx_own_entry(b, SGX_OWN_EMIT_ENTRY));
+	if (s->seen[emit]) {
+		*why = SGX_OWN_WHY_EMIT_ONCE;
+		ret = -EPERM;
+	}
 out:
 	kvfree(s);
 	return ret;
@@ -483,6 +566,9 @@ int sgx_own_apply(const struct sgx_own_blob *b, const struct sgx_own_arm *a,
 	ret = sgx_own_verify(b, &why);
 	if (ret)
 		return ret;
+	/* the emitpds names an image this overlay does not make */
+	if (sgx_own_has_emit(b))
+		return -ENOENT;
 	n = sgx_fw_code_targets(fw, pds_buf, tgt, ARRAY_SIZE(tgt));
 	if (n > ARRAY_SIZE(tgt))
 		return -ENOENT;

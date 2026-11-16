@@ -29,7 +29,17 @@
 #define SGX_OWN_RES_SIZE	0x1000
 #define SGX_OWN_MAGIC_DWORD	0x4e574f53		/* "SOWN", dword 0 of the results page */
 
-enum { SGX_OWN_PATCH_RES = 1, SGX_OWN_PATCH_CONT = 2 };
+enum { SGX_OWN_PATCH_RES = 1, SGX_OWN_PATCH_CONT = 2, SGX_OWN_PATCH_PDS = 3 };
+
+/*
+ * The one emitpds form a blob may hold (sgx_own_regs.h's emitpds-own row: exactly
+ * emitpds.tasks.taske #0, r2, r3, r4, #0x0): its sources r2, r3 and r4 hold, on every path, the
+ * values of the blob's pds0, pds1 and pds2 patches (kind SGX_OWN_PATCH_PDS, slot 0 to 2, no
+ * addend), which the overlay writes. It runs once per task: there is at most one, no path from
+ * it or from the blob's entry 1 reaches it again, and a blob that has it has an entry 1.
+ */
+#define SGX_OWN_PDS_SLOTS	3
+#define SGX_OWN_EMIT_ENTRY	1
 
 /*
  * A continue patch's slot 0 to 3 is the closed task a slot of PDS #13 started; slot 4 is the
@@ -52,6 +62,8 @@ int sgx_own_parse(const u8 *data, size_t len, struct sgx_own_blob *b);
 int sgx_own_verify(const struct sgx_own_blob *b, const char **why);
 
 u64 sgx_own_insn(const struct sgx_own_blob *b, unsigned int i);
+/* whether the blob holds the emitpds word (a verified blob: at most one) */
+bool sgx_own_has_emit(const struct sgx_own_blob *b);
 u16 sgx_own_entry(const struct sgx_own_blob *b, unsigned int i);
 void sgx_own_patch_get(const struct sgx_own_blob *b, unsigned int i, u16 *index, u8 *kind,
 		       u8 *slot, u32 *addend);
