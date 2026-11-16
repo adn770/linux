@@ -6,6 +6,7 @@
  * PD and TLB caches are invalidated through the next CCB command's cache
  * control (or the reset sequence at boot).
  */
+#include <linux/bitmap.h>
 #include <linux/gfp.h>
 #include <linux/mm.h>
 #include <linux/slab.h>
@@ -20,6 +21,7 @@ struct sgx_mmu_pd {
 	u32 *pde;			/* the directory, uncached */
 	gfp_t gfp;			/* for the directory and its tables */
 	struct page *table[SGX_MMU_ENTRIES];
+	DECLARE_BITMAP(over, SGX_MMU_ENTRIES);	/* slots pointed at a caller's table */
 };
 
 static struct page *sgx_mmu_alloc_uc(gfp_t gfp)
@@ -117,8 +119,8 @@ int sgx_mmu_map(struct sgx_mmu_pd *pd, u32 addr, struct page **pages,
 	if (addr % PAGE_SIZE || (u64)addr + (u64)n * PAGE_SIZE > 1ull << 32)
 		return -EINVAL;
 	for (i = 0, a = addr; i < n; i++, a += PAGE_SIZE)
-		if (sgx_mmu_lookup(pd, a))
-			return -EBUSY;
+		if (sgx_mmu_lookup(pd, a) || test_bit(sgx_mmu_pd_index(a), pd->over))
+			return -EBUSY;	/* live, or a slot a caller owns (sgx_mmu_pd_override) */
 	for (i = 0, a = addr; i < n; i++, a += PAGE_SIZE) {
 		unsigned int d = sgx_mmu_pd_index(a);
 		u32 *pte;
@@ -153,4 +155,37 @@ void sgx_mmu_unmap(struct sgx_mmu_pd *pd, u32 addr, unsigned int n)
 		if (pte)
 			WRITE_ONCE(pte[sgx_mmu_pt_index(a)], 0);
 	}
+}
+
+/*
+ * Point the directory slot at addr (4 MiB aligned) at a table the caller
+ * owns: pde is the whole entry (debugfs vm_pde_*). Refused while the slot's
+ * own table has a live PTE or the slot is already pointed elsewhere; maps
+ * into the slot are refused until pde 0 puts back the entry the slot had
+ * (its own table's, or none). The caller invalidates the BIF.
+ */
+int sgx_mmu_pd_override(struct sgx_mmu_pd *pd, u32 addr, u32 pde)
+{
+	unsigned int d = sgx_mmu_pd_index(addr), i;
+	u32 *pte;
+
+	if (addr & (SZ_4M - 1))
+		return -EINVAL;
+	if (!pde) {
+		if (!test_bit(d, pd->over))
+			return -EINVAL;
+		WRITE_ONCE(pd->pde[d], pd->table[d] ?
+			   sgx_mmu_pde(page_to_phys(pd->table[d])) : 0);
+		clear_bit(d, pd->over);
+		return 0;
+	}
+	if (test_bit(d, pd->over))
+		return -EBUSY;
+	pte = pd->table[d] ? page_address(pd->table[d]) : NULL;
+	for (i = 0; pte && i < SGX_MMU_ENTRIES; i++)
+		if (READ_ONCE(pte[i]))
+			return -EBUSY;
+	set_bit(d, pd->over);
+	WRITE_ONCE(pd->pde[d], pde);
+	return 0;
 }

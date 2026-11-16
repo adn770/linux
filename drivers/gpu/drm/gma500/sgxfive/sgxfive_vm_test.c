@@ -9,6 +9,7 @@
 #include <linux/list.h>
 #include <linux/module.h>
 
+#include "sgx_mmu.h"
 #include "sgx_render.h"
 #include "sgxfive_ctx.h"
 #include "sgxfive_priv.h"
@@ -163,10 +164,58 @@ static void sgxfive_vm_test_pte_flags(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, (u32)SGXFIVE_VM_PTE_KNOB, 0x1au);
 }
 
+/*
+ * debugfs vm_pde_*: a VM_MAP takes the large-page path only when it starts
+ * at vm_pde_addr (0: off), is exactly 4 MiB and the code and layout make a
+ * region; at the address any other size or a refused pair (misalign or the
+ * decoy for codes 0 and 5, any layout but dense for 6 and 7) is -EINVAL,
+ * whatever order the knobs were written in. With the address at 0 every map
+ * is as before.
+ */
+static void sgxfive_vm_test_large_wanted(struct kunit *test)
+{
+	const u32 a = 0x40000000;
+	unsigned int code, layout;
+
+	for (code = 0; code < 8; code++)
+		for (layout = 0; layout < 4; layout++) {
+			KUNIT_EXPECT_EQ(test, sgxfive_vm_large_wanted(a, SZ_4M, 0, code, layout), 0);
+			KUNIT_EXPECT_EQ(test, sgxfive_vm_large_wanted(a, SZ_4K, 0, code, layout), 0);
+			KUNIT_EXPECT_EQ(test, sgxfive_vm_large_wanted(0, SZ_4M, 0, code, layout), 0);
+		}
+	KUNIT_EXPECT_EQ(test, sgxfive_vm_large_wanted(a, SZ_4M, a, 0, 0), 1);
+	KUNIT_EXPECT_EQ(test, sgxfive_vm_large_wanted(a, SZ_4M, a, 0, 1), 1);
+	for (code = 1; code <= 4; code++)
+		for (layout = 0; layout < 4; layout++)
+			KUNIT_EXPECT_EQ(test, sgxfive_vm_large_wanted(a, SZ_4M, a, code, layout), 1);
+	KUNIT_EXPECT_EQ(test, sgxfive_vm_large_wanted(a, SZ_4M, a, 5, 0), 1);
+	KUNIT_EXPECT_EQ(test, sgxfive_vm_large_wanted(a, SZ_4M, a, 5, 1), 1);
+	KUNIT_EXPECT_EQ(test, sgxfive_vm_large_wanted(a, SZ_4M, a, 6, 0), 1);
+	KUNIT_EXPECT_EQ(test, sgxfive_vm_large_wanted(a, SZ_4M, a, 7, 0), 1);
+	/* refused pairs */
+	KUNIT_EXPECT_EQ(test, sgxfive_vm_large_wanted(a, SZ_4M, a, 5, 2), -EINVAL);
+	KUNIT_EXPECT_EQ(test, sgxfive_vm_large_wanted(a, SZ_4M, a, 5, 3), -EINVAL);
+	KUNIT_EXPECT_EQ(test, sgxfive_vm_large_wanted(a, SZ_4M, a, 0, 2), -EINVAL);
+	KUNIT_EXPECT_EQ(test, sgxfive_vm_large_wanted(a, SZ_4M, a, 0, 3), -EINVAL);
+	KUNIT_EXPECT_EQ(test, sgxfive_vm_large_wanted(a, SZ_4M, a, 6, 1), -EINVAL);
+	KUNIT_EXPECT_EQ(test, sgxfive_vm_large_wanted(a, SZ_4M, a, 7, 3), -EINVAL);
+	/* at the address, only 4 MiB */
+	KUNIT_EXPECT_EQ(test, sgxfive_vm_large_wanted(a, SZ_4K, a, 3, 0), -EINVAL);
+	KUNIT_EXPECT_EQ(test, sgxfive_vm_large_wanted(a, SZ_4M - SZ_4K, a, 3, 0), -EINVAL);
+	KUNIT_EXPECT_EQ(test, sgxfive_vm_large_wanted(a, SZ_8M, a, 3, 0), -EINVAL);
+	KUNIT_EXPECT_EQ(test, sgxfive_vm_large_wanted(a, SZ_4K, a, 0, 0), -EINVAL);
+	/* elsewhere, as before */
+	KUNIT_EXPECT_EQ(test, sgxfive_vm_large_wanted(a + SZ_4M, SZ_4M, a, 3, 0), 0);
+	KUNIT_EXPECT_EQ(test, sgxfive_vm_large_wanted(a + SZ_4K, SZ_4K, a, 3, 0), 0);
+	KUNIT_EXPECT_EQ(test, sgxfive_vm_large_wanted(a - SZ_4K, SZ_8K, a, 3, 0), 0);
+	KUNIT_EXPECT_EQ(test, sgxfive_vm_large_wanted(a + SZ_4M, SZ_4K, a, 5, 2), 0);
+}
+
 static struct kunit_case sgxfive_vm_test_cases[] = {
 	KUNIT_CASE(sgxfive_vm_test_range),
 	KUNIT_CASE(sgxfive_vm_test_render_heaps),
 	KUNIT_CASE(sgxfive_vm_test_pte_flags),
+	KUNIT_CASE(sgxfive_vm_test_large_wanted),
 	KUNIT_CASE(sgxfive_vm_test_ccb_done),
 	KUNIT_CASE(sgxfive_vm_test_reap),
 	{}

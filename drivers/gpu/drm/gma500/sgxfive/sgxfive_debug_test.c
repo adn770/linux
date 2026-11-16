@@ -1267,6 +1267,65 @@ static void sgxfive_debug_test_render_bg_knobs(struct kunit *test)
 }
 
 /*
+ * debugfs vm_pde_addr takes 0 (off) or a 4 MiB slot inside one user heap;
+ * vm_pde_size a code 0-7 and vm_pde_layout 0-3, in any order (the pair is
+ * checked at the map). A refused write leaves the knob as it was, and a
+ * recovery reset leaves all three.
+ */
+static void sgxfive_debug_test_vm_pde_knobs(struct kunit *test)
+{
+	struct sgxfive *sgx = kunit_kzalloc(test, sizeof(*sgx), GFP_KERNEL);
+	static const u64 good_addr[] = { 0x40000000, 0x3e000000, 0xebc00000, 0xf0000000, 0 };
+	static const u64 bad_addr[] = {
+		0x40001000, 0x40200000, 0x10000000, 0x20000000, 0x00400000, 0xefc00000,
+		0xffc00000, BIT_ULL(32), BIT_ULL(32) | 0x40000000, ~0ull,
+	};
+	unsigned int code, layout, i;
+
+	KUNIT_ASSERT_NOT_NULL(test, sgx);
+	spin_lock_init(&sgx->kpoke_lock);
+	sgxfive_hostirq_init(&sgx->hostirq);
+	for (i = 0; i < ARRAY_SIZE(good_addr); i++) {
+		KUNIT_EXPECT_EQ(test, sgxfive_vm_pde_addr_set(sgx, good_addr[i]), 0);
+		KUNIT_EXPECT_EQ(test, sgx->vm_pde_addr, (u32)good_addr[i]);
+	}
+	KUNIT_EXPECT_EQ(test, sgxfive_vm_pde_addr_set(sgx, 0x40000000), 0);
+	for (i = 0; i < ARRAY_SIZE(bad_addr); i++) {
+		KUNIT_EXPECT_EQ_MSG(test, sgxfive_vm_pde_addr_set(sgx, bad_addr[i]), -EINVAL,
+				    "0x%llx", bad_addr[i]);
+		KUNIT_EXPECT_EQ(test, sgx->vm_pde_addr, 0x40000000u);
+	}
+	for (code = 0; code < 8; code++) {
+		KUNIT_EXPECT_EQ(test, sgxfive_vm_pde_size_set(sgx, code), 0);
+		KUNIT_EXPECT_EQ(test, sgx->vm_pde_size, code);
+	}
+	KUNIT_EXPECT_EQ(test, sgxfive_vm_pde_size_set(sgx, 8), -EINVAL);
+	KUNIT_EXPECT_EQ(test, sgxfive_vm_pde_size_set(sgx, BIT_ULL(32) | 1), -EINVAL);
+	KUNIT_EXPECT_EQ(test, sgx->vm_pde_size, 7u);
+	for (layout = 0; layout < 4; layout++) {
+		KUNIT_EXPECT_EQ(test, sgxfive_vm_pde_layout_set(sgx, layout), 0);
+		KUNIT_EXPECT_EQ(test, sgx->vm_pde_layout, layout);
+	}
+	KUNIT_EXPECT_EQ(test, sgxfive_vm_pde_layout_set(sgx, 4), -EINVAL);
+	KUNIT_EXPECT_EQ(test, sgxfive_vm_pde_layout_set(sgx, ~0ull), -EINVAL);
+	KUNIT_EXPECT_EQ(test, sgx->vm_pde_layout, 3u);
+	/* code 5 with layout 2 is written (either order) and refused at the map */
+	KUNIT_EXPECT_EQ(test, sgxfive_vm_pde_size_set(sgx, 5), 0);
+	KUNIT_EXPECT_EQ(test, sgxfive_vm_pde_layout_set(sgx, 2), 0);
+	KUNIT_EXPECT_EQ(test, sgxfive_vm_pde_knob(sgx, &code, &layout), 0x40000000u);
+	KUNIT_EXPECT_EQ(test, code, 5u);
+	KUNIT_EXPECT_EQ(test, layout, 2u);
+	KUNIT_EXPECT_EQ(test, sgxfive_vm_large_wanted(0x40000000, SZ_4M, 0x40000000, code,
+						      layout), -EINVAL);
+	KUNIT_EXPECT_FALSE(test, sgxfive_debug_reset(sgx));
+	KUNIT_EXPECT_EQ(test, sgx->vm_pde_addr, 0x40000000u);
+	KUNIT_EXPECT_EQ(test, sgx->vm_pde_size, 5u);
+	KUNIT_EXPECT_EQ(test, sgx->vm_pde_layout, 2u);
+	KUNIT_EXPECT_EQ(test, sgxfive_vm_pde_addr_set(sgx, 0), 0);
+	KUNIT_EXPECT_EQ(test, sgxfive_vm_pde_knob(sgx, &code, &layout), 0u);
+}
+
+/*
  * A recovery reset (and a boot) leave alias_skip and alias_ta3d_ro as they
  * were: they are modes that stay until written, not one-shot controls.
  */
@@ -1339,6 +1398,7 @@ static struct kunit_case sgxfive_debug_test_cases[] = {
 	KUNIT_CASE(sgxfive_debug_test_alias_skip),
 	KUNIT_CASE(sgxfive_debug_test_alias_skip_set),
 	KUNIT_CASE(sgxfive_debug_test_vm_pte_knobs),
+	KUNIT_CASE(sgxfive_debug_test_vm_pde_knobs),
 	KUNIT_CASE(sgxfive_debug_test_final_pb_knob),
 	KUNIT_CASE(sgxfive_debug_test_render_bg_knobs),
 	KUNIT_CASE(sgxfive_debug_test_alias_skip_reset),

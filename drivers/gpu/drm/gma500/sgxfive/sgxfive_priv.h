@@ -89,6 +89,20 @@ enum sgxfive_hang {
 	SGXFIVE_HANG_TIMEOUT,		/* the drm_sched job timeout */
 };
 
+struct sgxfive_large;
+
+/*
+ * debugfs vm_pde_*: the one live large mapping and the regions freed ones
+ * left, kept for reuse (a 4 MiB block may not be had again on a fragmented
+ * machine) until the device goes.
+ */
+struct sgxfive_large_pool {
+	struct mutex lock;
+	struct sgxfive_large *live;
+	struct list_head free;		/* head pages, page_private the order */
+	u32 free_bytes;
+};
+
 struct sgxfive {
 	struct drm_device *dev;		/* for messages and debugfs */
 	void __iomem *regs;		/* the SGX register block */
@@ -149,6 +163,10 @@ struct sgxfive {
 	bool vm_low;			/* VM_MAP also takes the first MiB */
 	u32 vm_pte_flags;		/* VM_MAP: PTE flags of the mapping at vm_pte_addr */
 	u32 vm_pte_addr;		/* ... 0: off */
+	u32 vm_pde_addr;		/* VM_MAP: the 4 MiB slot mapped large, 0: off */
+	u32 vm_pde_size;		/* ... its PDE's size code */
+	u32 vm_pde_layout;		/* ... and its table's layout */
+	struct sgxfive_large_pool large;
 	u32 render_ctx_flags;		/* new render contexts' extra flags */
 	struct sgxfive_cleanup_trace cleanup;	/* the last one's, under lock */
 	u32 timer_clock;		/* HostCtl's timer clock at boot, 0: default */
@@ -386,6 +404,8 @@ int sgxfive_vm_check_low(u64 addr, u64 size);
 /* The PTE flags debugfs vm_pte_flags may add: WRITEONLY, CACHECONSISTENT, EDMPROTECT. */
 #define SGXFIVE_VM_PTE_KNOB	(SGX_MMU_WO | SGX_MMU_CACHED | SGX_MMU_EDMPROT)
 u32 sgxfive_vm_pte_flags(bool ro, u32 addr, u32 knob_addr, u32 knob_flags);
+int sgxfive_vm_large_wanted(u64 addr, u64 size, u32 knob_addr, unsigned int code,
+			    unsigned int layout);
 int sgxfive_vm_render_attach(struct sgxfive_vm *vm, unsigned int *slot);
 void sgxfive_vm_render_detach(struct sgxfive_vm *vm, unsigned int slot);
 int sgxfive_vm_map_pages(struct sgxfive_vm *vm, u32 addr, struct page **pages,
@@ -411,6 +431,13 @@ void sgxfive_debug_irq(struct sgxfive *sgx, u32 stat_1, u32 stat_2);
 int sgxfive_alias_skip_set(void *data, u64 val);
 int sgxfive_vm_pte_flags_set(void *data, u64 val);
 int sgxfive_vm_pte_addr_set(void *data, u64 val);
+int sgxfive_vm_pde_addr_set(void *data, u64 val);
+int sgxfive_vm_pde_size_set(void *data, u64 val);
+int sgxfive_vm_pde_layout_set(void *data, u64 val);
+void sgxfive_vm_large_init(struct sgxfive *sgx);
+void sgxfive_vm_large_fini(struct sgxfive *sgx);
+struct seq_file;
+int sgxfive_vm_large_show(struct seq_file *m, struct sgxfive *sgx);
 int sgxfive_final_pb_set(void *data, u64 val);
 
 static inline bool sgxfive_alias_ta3d_ro(struct sgxfive *sgx)
@@ -523,6 +550,15 @@ static inline u32 sgxfive_vm_pte_knob(struct sgxfive *sgx, u32 *addr)
 {
 	*addr = READ_ONCE(sgx->vm_pte_addr);
 	return READ_ONCE(sgx->vm_pte_flags);
+}
+
+/* debugfs vm_pde_addr (0: off), and its size code and layout. */
+static inline u32 sgxfive_vm_pde_knob(struct sgxfive *sgx, unsigned int *code,
+				      unsigned int *layout)
+{
+	*code = READ_ONCE(sgx->vm_pde_size);
+	*layout = READ_ONCE(sgx->vm_pde_layout);
+	return READ_ONCE(sgx->vm_pde_addr);
 }
 
 static inline u32 sgxfive_render_ctx_flags(struct sgxfive *sgx)
@@ -691,6 +727,22 @@ static inline u32 sgxfive_vm_pte_knob(struct sgxfive *sgx, u32 *addr)
 {
 	*addr = 0;
 	return 0;
+}
+
+static inline u32 sgxfive_vm_pde_knob(struct sgxfive *sgx, unsigned int *code,
+				      unsigned int *layout)
+{
+	*code = 0;
+	*layout = 0;
+	return 0;
+}
+
+static inline void sgxfive_vm_large_init(struct sgxfive *sgx)
+{
+}
+
+static inline void sgxfive_vm_large_fini(struct sgxfive *sgx)
+{
 }
 
 static inline u32 sgxfive_render_ctx_flags(struct sgxfive *sgx)

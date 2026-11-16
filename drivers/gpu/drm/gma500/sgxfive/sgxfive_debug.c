@@ -1905,6 +1905,85 @@ DEFINE_DEBUGFS_ATTRIBUTE(sgxfive_vm_pte_addr_fops, sgxfive_vm_pte_addr_get,
 			 sgxfive_vm_pte_addr_set, "0x%08llx\n");
 
 /*
+ * debugfs vm_pde_addr, vm_pde_size and vm_pde_layout (sgxfive_vm_large_wanted):
+ * a VM_MAP of exactly 4 MiB at vm_pde_addr is mapped through a PDE of size
+ * code vm_pde_size over a region the driver owns, its table laid out as
+ * vm_pde_layout says (0 dense, 1 pt4k, 2 misalign, 3 ptoff), instead of the
+ * buffer's pages. The address is 0 (off) or a 4 MiB slot inside one user
+ * heap; the code 0-7, the layout 0-3. Pairs no region is made for are refused
+ * at the map, so the three may be written in any order. All stay until
+ * written again; a reset leaves them, and a live large mapping.
+ */
+static int sgxfive_vm_pde_addr_get(void *data, u64 *val)
+{
+	struct sgxfive *sgx = data;
+
+	*val = READ_ONCE(sgx->vm_pde_addr);
+	return 0;
+}
+
+int sgxfive_vm_pde_addr_set(void *data, u64 val)
+{
+	struct sgxfive *sgx = data;
+
+	if (val && (val > U32_MAX || val & (SZ_4M - 1) ||
+		    sgxfive_vm_check_range(sgxfive_rev1_heaps, DRM_SGXFIVE_HEAP_COUNT,
+					   val, SZ_4M)))
+		return -EINVAL;
+	WRITE_ONCE(sgx->vm_pde_addr, val);
+	return 0;
+}
+DEFINE_DEBUGFS_ATTRIBUTE(sgxfive_vm_pde_addr_fops, sgxfive_vm_pde_addr_get,
+			 sgxfive_vm_pde_addr_set, "0x%08llx\n");
+
+static int sgxfive_vm_pde_size_get(void *data, u64 *val)
+{
+	struct sgxfive *sgx = data;
+
+	*val = READ_ONCE(sgx->vm_pde_size);
+	return 0;
+}
+
+int sgxfive_vm_pde_size_set(void *data, u64 val)
+{
+	struct sgxfive *sgx = data;
+
+	if (val >= SGX_MMU_PDE_CODES)
+		return -EINVAL;
+	WRITE_ONCE(sgx->vm_pde_size, val);
+	return 0;
+}
+DEFINE_DEBUGFS_ATTRIBUTE(sgxfive_vm_pde_size_fops, sgxfive_vm_pde_size_get,
+			 sgxfive_vm_pde_size_set, "%llu\n");
+
+static int sgxfive_vm_pde_layout_get(void *data, u64 *val)
+{
+	struct sgxfive *sgx = data;
+
+	*val = READ_ONCE(sgx->vm_pde_layout);
+	return 0;
+}
+
+int sgxfive_vm_pde_layout_set(void *data, u64 val)
+{
+	struct sgxfive *sgx = data;
+
+	if (val >= SGX_LARGE_LAYOUTS)
+		return -EINVAL;
+	WRITE_ONCE(sgx->vm_pde_layout, val);
+	return 0;
+}
+DEFINE_DEBUGFS_ATTRIBUTE(sgxfive_vm_pde_layout_fops, sgxfive_vm_pde_layout_get,
+			 sgxfive_vm_pde_layout_set, "%llu\n");
+
+/* debugfs vm_large: the live large mapping and its region (sgxfive_vm_large_show). */
+static int sgxfive_vm_large_file_show(struct seq_file *m, void *unused)
+{
+	return sgxfive_vm_large_show(m, m->private);
+}
+DEFINE_SHOW_ATTRIBUTE(sgxfive_vm_large_file);
+
+/*
  * debugfs own_code, own_res and own_arm: a firmware task of our own (sgxfive_owntask.h).
  *
  * own_code takes a blob of tools/fwtask, once per write, and keeps it only if the verifier
@@ -2202,6 +2281,15 @@ void sgxfive_debug_init(struct sgxfive *sgx, struct dentry *dir)
 	 */
 	debugfs_create_file_unsafe("vm_pte_flags", 0600, dir, sgx, &sgxfive_vm_pte_flags_fops);
 	debugfs_create_file_unsafe("vm_pte_addr", 0600, dir, sgx, &sgxfive_vm_pte_addr_fops);
+	/*
+	 * The VM_MAP of 4 MiB at vm_pde_addr (0: off) through a PDE of size code
+	 * vm_pde_size over an owned region laid out as vm_pde_layout; vm_large
+	 * reads it. Until written again; a reset leaves them.
+	 */
+	debugfs_create_file_unsafe("vm_pde_addr", 0600, dir, sgx, &sgxfive_vm_pde_addr_fops);
+	debugfs_create_file_unsafe("vm_pde_size", 0600, dir, sgx, &sgxfive_vm_pde_size_fops);
+	debugfs_create_file_unsafe("vm_pde_layout", 0600, dir, sgx, &sgxfive_vm_pde_layout_fops);
+	debugfs_create_file("vm_large", 0400, dir, sgx, &sgxfive_vm_large_file_fops);
 	debugfs_create_file("hwperf", 0600, dir, sgx, &sgxfive_hwperf_fops);
 	/* Flags besides NEW of render contexts created from now on. */
 	debugfs_create_x32("render_ctx_flags", 0600, dir, &sgx->render_ctx_flags);

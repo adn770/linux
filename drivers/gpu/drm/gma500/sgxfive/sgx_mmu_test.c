@@ -70,9 +70,65 @@ static void sgx_mmu_test_map_unmap(struct kunit *test)
 		__free_page(pages[i]);
 }
 
+/*
+ * A directory slot pointed at a table the caller owns (debugfs vm_pde_*):
+ * refused over live PTEs and when already pointed, a map into the slot
+ * refused while it is, and put back it is the entry the old builder wrote
+ * (sgx_mmu_pde(), size code 0), or none.
+ */
+static void sgx_mmu_test_override(struct kunit *test)
+{
+	struct sgx_mmu_pd *pd = sgx_mmu_pd_create();
+	struct page *pg = alloc_page(GFP_KERNEL);
+	unsigned int d = sgx_mmu_pd_index(0x40000000);
+	u32 pde;
+
+	KUNIT_ASSERT_NOT_NULL(test, pd);
+	KUNIT_ASSERT_NOT_NULL(test, pg);
+	/* an empty slot: pointed elsewhere and put back to none */
+	KUNIT_EXPECT_EQ(test, sgx_mmu_pd_entry(pd, d), 0u);
+	KUNIT_EXPECT_EQ(test, sgx_mmu_pd_override(pd, 0x40000000, 0), -EINVAL);
+	KUNIT_EXPECT_EQ(test, sgx_mmu_pd_override(pd, 0x40000000, 0x01234009), 0);
+	KUNIT_EXPECT_EQ(test, sgx_mmu_pd_entry(pd, d), 0x01234009u);
+	KUNIT_EXPECT_EQ(test, sgx_mmu_map(pd, 0x40001000, &pg, 1, 0), -EBUSY);
+	KUNIT_EXPECT_EQ(test, sgx_mmu_map(pd, 0x403ff000, &pg, 1, 0), -EBUSY);
+	KUNIT_EXPECT_EQ(test, sgx_mmu_lookup(pd, 0x40001000), 0u);
+	KUNIT_EXPECT_EQ(test, sgx_mmu_pd_override(pd, 0x40000000, 0x01238009), -EBUSY);
+	KUNIT_EXPECT_EQ(test, sgx_mmu_pd_entry(pd, d), 0x01234009u);
+	KUNIT_EXPECT_EQ(test, sgx_mmu_pd_override(pd, 0x40000000, 0), 0);
+	KUNIT_EXPECT_EQ(test, sgx_mmu_pd_entry(pd, d), 0u);
+	/* the neighbouring slots are untouched */
+	KUNIT_EXPECT_EQ(test, sgx_mmu_pd_entry(pd, d - 1), 0u);
+	KUNIT_EXPECT_EQ(test, sgx_mmu_pd_entry(pd, d + 1), 0u);
+
+	/* a slot with a table: its entry is the old builder's, code 0 */
+	KUNIT_ASSERT_EQ(test, sgx_mmu_map(pd, 0x40001000, &pg, 1, 0), 0);
+	pde = sgx_mmu_pd_entry(pd, d);
+	KUNIT_EXPECT_EQ(test, pde, sgx_mmu_pde(pde & ~0xfffu));
+	KUNIT_EXPECT_EQ(test, pde, sgx_mmu_pde_sized(pde & ~0xfffu, 0));
+	/* live PTEs: refused, nothing changed */
+	KUNIT_EXPECT_EQ(test, sgx_mmu_pd_override(pd, 0x40000000, 0x01234009), -EBUSY);
+	KUNIT_EXPECT_EQ(test, sgx_mmu_pd_entry(pd, d), pde);
+	/* emptied, the table kept: taken, and put back to the same entry */
+	sgx_mmu_unmap(pd, 0x40001000, 1);
+	KUNIT_EXPECT_EQ(test, sgx_mmu_pd_override(pd, 0x40000000, 0x01234009), 0);
+	KUNIT_EXPECT_EQ(test, sgx_mmu_pd_entry(pd, d), 0x01234009u);
+	KUNIT_EXPECT_EQ(test, sgx_mmu_pd_override(pd, 0x40000000, 0), 0);
+	KUNIT_EXPECT_EQ(test, sgx_mmu_pd_entry(pd, d), pde);
+	KUNIT_EXPECT_EQ(test, sgx_mmu_map(pd, 0x40001000, &pg, 1, 0), 0);
+	sgx_mmu_unmap(pd, 0x40001000, 1);
+	/* only a slot's own address */
+	KUNIT_EXPECT_EQ(test, sgx_mmu_pd_override(pd, 0x40001000, 0x01234009), -EINVAL);
+	KUNIT_EXPECT_EQ(test, sgx_mmu_pd_override(pd, 0x40200000, 0x01234009), -EINVAL);
+
+	sgx_mmu_pd_destroy(pd);
+	__free_page(pg);
+}
+
 static struct kunit_case sgx_mmu_test_cases[] = {
 	KUNIT_CASE(sgx_mmu_test_encoding),
 	KUNIT_CASE(sgx_mmu_test_map_unmap),
+	KUNIT_CASE(sgx_mmu_test_override),
 	{}
 };
 

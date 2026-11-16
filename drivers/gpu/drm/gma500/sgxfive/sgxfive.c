@@ -1408,6 +1408,7 @@ struct sgxfive *sgxfive_create(const struct sgxfive_host *host)
 #if IS_ENABLED(CONFIG_DRM_GMA500_SGXFIVE_DEBUG)
 	sgxfive_keep_init(&sgx->kept);
 #endif
+	sgxfive_vm_large_init(sgx);
 	INIT_DELAYED_WORK(&sgx->watchdog, sgxfive_watchdog);
 	sgx->fault_suspect = U64_MAX;
 	sgx->hang_oldest = U64_MAX;
@@ -1453,6 +1454,7 @@ void sgxfive_destroy(struct sgxfive *sgx)
 	/* Halted now: whatever is still deferred goes. */
 	cancel_delayed_work_sync(&sgx->reaper);
 	sgxfive_reaper(&sgx->reaper.work);
+	sgxfive_vm_large_fini(sgx);	/* the regions freed mappings left */
 	sgxfive_sched_fini(sgx);
 	mutex_destroy(&sgx->lock);
 	drm_mm_takedown(&sgx->kmem);

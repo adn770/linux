@@ -135,5 +135,6 @@ int sgx_mmu_map(struct sgx_mmu_pd *pd, u32 addr, struct page **pages,
 void sgx_mmu_unmap(struct sgx_mmu_pd *pd, u32 addr, unsigned int n);
 u32 sgx_mmu_lookup(const struct sgx_mmu_pd *pd, u32 addr);
 u32 sgx_mmu_pd_entry(const struct sgx_mmu_pd *pd, unsigned int i);
+int sgx_mmu_pd_override(struct sgx_mmu_pd *pd, u32 addr, u32 pde);
 
 #endif
