@@ -23,6 +23,7 @@
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/uaccess.h>
+#include <linux/unaligned.h>
 #include <linux/wait.h>
 
 #include <drm/drm_print.h>
@@ -48,7 +49,7 @@
 enum { SCR_U = 0, SCR_F = 1, SCR_SYNC_READ = 8, SCR_SYNC_WRITE = 9 };
 enum {
 	XB_CCB, XB_CCB_CTL, XB_CTX, XB_SCRATCH, XB_PDS, XB_USE, XB_BG, XB_DST,
-	XB_SRC, XB_OWNCODE, XB_OWNRES, XB_COUNT
+	XB_SRC, XB_OWNCODE, XB_OWNRES, XB_OWNPDS, XB_COUNT
 };
 
 /* By heap and offset, so the area follows the layout. */
@@ -75,6 +76,11 @@ static const struct {
 	 */
 	[XB_OWNCODE] = { HEAP_KERNEL_CODE, SGX_OWN_CODE_OFF, SGX_OWN_CODE_SIZE, SGX_MMU_RO },
 	[XB_OWNRES] = { HEAP_KERNEL_DATA, SGX_OWN_RES_OFF, SGX_OWN_RES_SIZE, 0 },
+	/*
+	 * The one PDS program a task of ours may emit (sgxfive_owntask.h), read-only for the EDM:
+	 * the overlay writes it at the arm from the kernel's constant, and nothing else does.
+	 */
+	[XB_OWNPDS] = { HEAP_KERNEL_CODE, SGX_OWN_PDS_OFF, SGX_OWN_PDS_SIZE, SGX_MMU_RO },
 };
 
 static_assert(XB_COUNT <= SGXFIVE_XBUFS);
@@ -2161,6 +2167,9 @@ int sgxfive_debug_own_apply(struct sgxfive *sgx, u8 *const bufs[])
 {
 	struct sgxfive_own *own = &sgx->own;
 	u8 digest[SHA256_DIGEST_SIZE];
+	struct sgx_own_pds pds = {
+		.image = sgx->xt.buf[XB_OWNPDS].va, .addr = sgx->xt.buf[XB_OWNPDS].addr,
+	};
 	struct sgx_own_arm arm;
 	struct sgx_own_blob b;
 	int ret;
@@ -2180,16 +2189,24 @@ int sgxfive_debug_own_apply(struct sgxfive *sgx, u8 *const bufs[])
 	ret = sgx_own_parse(own->blob, own->len, &b);
 	if (!ret && !sgx_fw_buffer(&sgx->fw, SGXFIVE_OWN_PDS_BUF))
 		ret = -ENOENT;
+	/* the values sa0 and sa2 hold: TA3DCtl dwords 0 and 2, as the loader built them */
+	if (!ret && bufs[BUF_TA3D_CTL]) {
+		pds.v0 = get_unaligned_le32(bufs[BUF_TA3D_CTL]);
+		pds.v2 = get_unaligned_le32(bufs[BUF_TA3D_CTL] + 8);
+	} else if (!ret && sgx_own_has_emit(&b)) {
+		ret = -ENOENT;
+	}
 	if (!ret)
 		ret = sgx_own_apply(&b, &arm, &sgx->fw, &sgx->layout, SGXFIVE_OWN_PDS_BUF,
 				    bufs[SGXFIVE_OWN_PDS_BUF],
 				    sgx_fw_buffer(&sgx->fw, SGXFIVE_OWN_PDS_BUF)->size,
-				    sgx->xt.buf[XB_OWNCODE].va, sgx->xt.buf[XB_OWNRES].addr);
+				    sgx->xt.buf[XB_OWNCODE].va, sgx->xt.buf[XB_OWNRES].addr, &pds);
 	if (ret)
 		drm_err(sgx->dev, "sgxfive: own task not armed: %d\n", ret);
 	else
-		drm_info(sgx->dev, "sgxfive: own task armed: slots %#x, trc %u (0: stock), exit %#x (0: unknown) (debugfs own_arm)\n",
-			 own->arm.slots, own->arm.trc, arm.exit_index);
+		drm_info(sgx->dev, "sgxfive: own task armed: slots %#x, trc %u (0: stock), exit %#x (0: unknown), emit image %#x (0: none) (debugfs own_arm)\n",
+			 own->arm.slots, own->arm.trc, arm.exit_index,
+			 sgx_own_has_emit(&b) ? pds.addr : 0);
 	return ret;
 }
 

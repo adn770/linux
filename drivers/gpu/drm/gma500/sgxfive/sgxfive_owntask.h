@@ -42,6 +42,32 @@ enum { SGX_OWN_PATCH_RES = 1, SGX_OWN_PATCH_CONT = 2, SGX_OWN_PATCH_PDS = 3 };
 #define SGX_OWN_EMIT_ENTRY	1
 
 /*
+ * The program the emitpds names is the kernel's (sgx_own_pds.h, from resgx545's
+ * asm/fwtask/pds/emit.s): pds0 is its control word (2 data rows, addend 0x100), pds1 its address
+ * shifted right by four, pds2 0. It sits in a page of its own beside the code page, read-only for
+ * the EDM and written by the overlay only. Its two douta write the values sa0 and sa2 hold
+ * (TA3DCtl dwords 0 and 2, which PDS #11 loads into the secondary attributes) to attributes 0
+ * and 2, so wherever they land no value the firmware reads changes; its doutu starts the blob's
+ * entry 1 on the code page with no flag.
+ */
+#define SGX_OWN_PDS_OFF		0x22000		/* KERNEL_CODE */
+#define SGX_OWN_PDS_SIZE	0x1000
+#define SGX_OWN_PDS_TRC		8		/* the started task's temporaries, in fours */
+
+struct sgx_own_blob;
+
+struct sgx_own_pds {
+	u8 *image;			/* the CPU view of the image's page (SGX_OWN_PDS_SIZE) */
+	u32 addr;			/* its device address, 16-byte aligned */
+	u32 v0, v2;			/* TA3DCtl dwords 0 and 2: the values sa0 and sa2 hold */
+};
+
+/* the doutu word of the task at the blob's instruction `entry` */
+u32 sgx_own_pds_u0(unsigned int entry);
+/* the image's page: the generated words with U0 for `entry`, V0 and V2; zeros after them */
+void sgx_own_pds_build(u8 *page, unsigned int entry, u32 v0, u32 v2);
+
+/*
  * A continue patch's slot 0 to 3 is the closed task a slot of PDS #13 started; slot 4 is the
  * closed tasks' shared exit, at a ukernel index read from one firmware file only (E154): it is
  * resolved for that file alone (sgx_own_exit_index()), and an arm that needs it on any other file
@@ -109,9 +135,15 @@ u32 sgx_own_exit_index(const u8 *digest);
 
 /* "slots=<mask> entry=<n>,<n>.. [trc=<t>] [trc_hazard=1]" */
 int sgx_own_arm_parse(const char *line, struct sgx_own_arm *a);
+/*
+ * pds: the image's page, needed by a blob with the emitpds (-ENOENT without it, -EINVAL for an
+ * address that is 0 or not 16-byte aligned, nothing written either way); the page is built for
+ * such a blob and cleared for any other. NULL for a blob without the emitpds.
+ */
 int sgx_own_apply(const struct sgx_own_blob *b, const struct sgx_own_arm *a,
 		  const struct sgx_fw *fw, const struct sgx_fw_layout *l, unsigned int pds_buf,
-		  u8 *pds_image, u32 pds_size, u8 *code, u32 res_addr);
+		  u8 *pds_image, u32 pds_size, u8 *code, u32 res_addr,
+		  const struct sgx_own_pds *pds);
 /* own_res: a write must be dword aligned and leave dword 0 (the header) alone */
 bool sgx_own_res_write_ok(loff_t pos, size_t len);
 

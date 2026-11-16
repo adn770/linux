@@ -14,6 +14,7 @@
 #include <linux/unaligned.h>
 
 #include "sgx_fw.h"
+#include "sgx_own_pds.h"
 #include "sgx_own_regs.h"
 #include "sgxfive_owntask.h"
 
@@ -551,10 +552,36 @@ bool sgx_own_res_write_ok(loff_t pos, size_t len)
 	       len <= (size_t)(SGX_OWN_RES_SIZE - pos);
 }
 
+/* as an armed slot's word: TRC, the code page's index plus the entry, CBASE 15 (KERNEL_CODE) */
+u32 sgx_own_pds_u0(unsigned int entry)
+{
+	return (u32)SGX_OWN_PDS_TRC << 24 | (SGX_OWN_INDEX + entry) << 4 | 0xf;
+}
+
+void sgx_own_pds_build(u8 *page, unsigned int entry, u32 v0, u32 v2)
+{
+	unsigned int i;
+	u32 w;
+
+	memset(page, 0, SGX_OWN_PDS_SIZE);
+	for (i = 0; i < SGX_OWN_PDS_WORDS; i++) {
+		w = sgx_own_pds_image[i];
+		if (i == SGX_OWN_PDS_U0)
+			w = sgx_own_pds_u0(entry);
+		else if (i == SGX_OWN_PDS_V0)
+			w = v0;
+		else if (i == SGX_OWN_PDS_V2)
+			w = v2;
+		put_unaligned_le32(w, page + 4 * i);
+	}
+}
+
 int sgx_own_apply(const struct sgx_own_blob *b, const struct sgx_own_arm *a,
 		  const struct sgx_fw *fw, const struct sgx_fw_layout *l, unsigned int pds_buf,
-		  u8 *pds_image, u32 pds_size, u8 *code, u32 res_addr)
+		  u8 *pds_image, u32 pds_size, u8 *code, u32 res_addr,
+		  const struct sgx_own_pds *pds)
 {
+	bool emit;
 	struct sgx_fw_patched p;
 	u32 tgt[SGX_OWN_SLOTS];
 	u32 index, addend, i, k;
@@ -566,9 +593,12 @@ int sgx_own_apply(const struct sgx_own_blob *b, const struct sgx_own_arm *a,
 	ret = sgx_own_verify(b, &why);
 	if (ret)
 		return ret;
-	/* the emitpds names an image this overlay does not make */
-	if (sgx_own_has_emit(b))
+	/* the emitpds names the kernel's image: its page and an address the emit can name */
+	emit = sgx_own_has_emit(b);
+	if (emit && (!pds || !pds->image))
 		return -ENOENT;
+	if (emit && (!pds->addr || (pds->addr & 15)))
+		return -EINVAL;
 	n = sgx_fw_code_targets(fw, pds_buf, tgt, ARRAY_SIZE(tgt));
 	if (n > ARRAY_SIZE(tgt))
 		return -ENOENT;
@@ -618,6 +648,9 @@ int sgx_own_apply(const struct sgx_own_blob *b, const struct sgx_own_arm *a,
 			if (ret)
 				return ret;
 			val = a->exit_index + p.old_index - tgt[0];
+		} else if (pk == SGX_OWN_PATCH_PDS) {
+			/* verified: slot 0 to 2, no addend; pds is set (a blob with the emitpds) */
+			val = slot == 0 ? SGX_OWN_PDS_CTL : slot == 1 ? (pds ? pds->addr >> 4 : 0) : 0;
 		} else if (pk == SGX_OWN_PATCH_CONT) {
 			if (slot >= n)
 				return -ENOENT;
@@ -646,6 +679,14 @@ int sgx_own_apply(const struct sgx_own_blob *b, const struct sgx_own_arm *a,
 		if (ret)
 			return ret;
 		put_unaligned_le32(p.new_val, pds_image + p.offset);
+	}
+	/* the image for the blob's entry 1, or a page with no program */
+	if (pds && pds->image) {
+		if (emit)
+			sgx_own_pds_build(pds->image, sgx_own_entry(b, SGX_OWN_EMIT_ENTRY), pds->v0,
+					  pds->v2);
+		else
+			memset(pds->image, 0, SGX_OWN_PDS_SIZE);
 	}
 	return 0;
 }

@@ -14,6 +14,7 @@
 #include <linux/unaligned.h>
 
 #include "sgx_fw.h"
+#include "sgx_own_pds.h"
 #include "sgx_own_regs.h"
 #include "sgxfive_owntask.h"
 #include "sgxfive_owntask_blobs.h"
@@ -334,7 +335,8 @@ static int own_apply(struct own_fw *f, const u8 *blob, size_t len, const char *a
 	ret = sgx_own_parse(blob, len, &b);
 	if (ret)
 		return ret;
-	return sgx_own_apply(&b, &a, &f->fw, &f->l, PDS_BUF, f->pds, PDS_SIZE, f->code, 0x32140000);
+	return sgx_own_apply(&b, &a, &f->fw, &f->l, PDS_BUF, f->pds, PDS_SIZE, f->code, 0x32140000,
+			     NULL);
 }
 
 /* exactly the armed start dwords differ, each ((entry << 4) | the addend) with the TRC */
@@ -483,14 +485,14 @@ static void sgxfive_owntask_test_apply_cont4(struct kunit *test)
 
 	/* not known: refused, nothing written */
 	KUNIT_EXPECT_EQ(test, sgx_own_apply(&b, &a, &f->fw, &f->l, PDS_BUF, f->pds, PDS_SIZE,
-					    f->code, 0x32140000), -ENOENT);
+					    f->code, 0x32140000, NULL), -ENOENT);
 	KUNIT_EXPECT_EQ(test, memcmp(f->pds, f->stock, PDS_SIZE), 0);
 	KUNIT_EXPECT_EQ(test, get_unaligned_le64(f->code), 0ull);
 
 	/* known: the limm holds it (the ukernel at the code base here), the rest as cont0 does */
 	a.exit_index = SGX_OWN_EXIT_UK_INDEX;
 	KUNIT_ASSERT_EQ(test, sgx_own_apply(&b, &a, &f->fw, &f->l, PDS_BUF, f->pds, PDS_SIZE,
-					    f->code, 0x32140000), 0);
+					    f->code, 0x32140000, NULL), 0);
 	KUNIT_EXPECT_EQ(test, sgx_fw_limm_get(get_unaligned_le64(f->code)), 0x1974u);
 	KUNIT_EXPECT_EQ(test, get_unaligned_le64(f->code + 8), sgx_own_insn(&b, 1));
 	KUNIT_EXPECT_EQ(test, dw(f->pds, 4), 0x0804000fu);
@@ -499,7 +501,7 @@ static void sgxfive_owntask_test_apply_cont4(struct kunit *test)
 	f = own_fw_new(test, 4);
 	f->l.addr[0] = 0xe8000000 + 8 * 0x10;
 	KUNIT_ASSERT_EQ(test, sgx_own_apply(&b, &a, &f->fw, &f->l, PDS_BUF, f->pds, PDS_SIZE,
-					    f->code, 0x32140000), 0);
+					    f->code, 0x32140000, NULL), 0);
 	KUNIT_EXPECT_EQ(test, sgx_fw_limm_get(get_unaligned_le64(f->code)), 0x1984u);
 }
 
@@ -569,6 +571,10 @@ static void sgxfive_owntask_test_res_write(struct kunit *test)
 
 
 /* ---- the one emitpds form (round 33, N3) ------------------------------------------------- */
+#define OWN_PDS_ADDR	0x30022000u
+#define OWN_V0		0x32000000u	/* stand-ins for TA3DCtl dwords 0 and 2 */
+#define OWN_V2		0x32000400u
+
 /* the emitpds word is recognised in a blob that has it, and only there */
 static void sgxfive_owntask_test_has_emit(struct kunit *test)
 {
@@ -583,6 +589,127 @@ static void sgxfive_owntask_test_has_emit(struct kunit *test)
 	KUNIT_EXPECT_GE(test, b.n_entry, 2);
 	KUNIT_ASSERT_EQ(test, sgx_own_parse(own_ok_null, sizeof(own_ok_null), &b), 0);
 	KUNIT_EXPECT_FALSE(test, sgx_own_has_emit(&b));
+}
+
+/*
+ * The image is the generated program with exactly U0, V0 and V2 filled in, the rest of its page
+ * zero. U0 starts the blob's instruction on the code page (CBASE 15, the KERNEL_CODE heap; index
+ * SGX_OWN_INDEX + entry, inside the page; TRC 8); U1 and U2 are 0; the douta controls name
+ * attributes 0 and 2; the instructions are the generated douta, douta, doutu, halt.
+ */
+static void sgxfive_owntask_test_pds_build(struct kunit *test)
+{
+	u8 *page = kunit_kzalloc(test, SGX_OWN_PDS_SIZE, GFP_KERNEL);
+	unsigned int i;
+	u32 u0;
+
+	KUNIT_ASSERT_NOT_NULL(test, page);
+	memset(page, 0xa5, SGX_OWN_PDS_SIZE);
+	sgx_own_pds_build(page, 33, OWN_V0, OWN_V2);
+	u0 = sgx_own_pds_u0(33);
+	KUNIT_EXPECT_EQ(test, u0, 0x0800000fu | (SGX_OWN_INDEX + 33u) << 4);
+	KUNIT_EXPECT_EQ(test, u0 & 0xf, 0xfu);
+	KUNIT_EXPECT_EQ(test, u0 >> 24, (u32)SGX_OWN_PDS_TRC);
+	KUNIT_EXPECT_GE(test, (u0 >> 4) & 0x7ffff, (u32)SGX_OWN_INDEX);
+	KUNIT_EXPECT_LT(test, (u0 >> 4) & 0x7ffff, (u32)SGX_OWN_INDEX + SGX_OWN_MAX_INSNS);
+	for (i = 0; i < SGX_OWN_PDS_WORDS; i++) {
+		u32 want = sgx_own_pds_image[i];
+
+		if (i == SGX_OWN_PDS_U0)
+			want = u0;
+		else if (i == SGX_OWN_PDS_V0)
+			want = OWN_V0;
+		else if (i == SGX_OWN_PDS_V2)
+			want = OWN_V2;
+		KUNIT_EXPECT_EQ_MSG(test, dw(page, 4 * i), want, "dword %u", i);
+	}
+	KUNIT_EXPECT_EQ(test, dw(page, 4 * SGX_OWN_PDS_U1), 0u);
+	KUNIT_EXPECT_EQ(test, dw(page, 4 * SGX_OWN_PDS_U2), 0u);
+	KUNIT_EXPECT_EQ(test, dw(page, 4 * 3), 0x000u);			/* douta: attribute 0 */
+	KUNIT_EXPECT_EQ(test, dw(page, 4 * 6), 0x200u);			/* douta: attribute 2 */
+	KUNIT_EXPECT_EQ(test, 4 * SGX_OWN_PDS_ROWS, 8);
+	KUNIT_EXPECT_EQ(test, (u32)SGX_OWN_PDS_CTL, (u32)SGX_OWN_PDS_ROWS << 23 | 0x100);
+	for (i = 4 * SGX_OWN_PDS_WORDS; i < SGX_OWN_PDS_SIZE; i++)
+		if (page[i]) {
+			KUNIT_FAIL(test, "byte %u of the page is not zero", i);
+			break;
+		}
+	/* the words that are not filled are the generated program's: movs ... halt */
+	KUNIT_EXPECT_EQ(test, sgx_own_pds_image[8] >> 24, 0x07u);
+	KUNIT_EXPECT_EQ(test, sgx_own_pds_image[SGX_OWN_PDS_WORDS - 1], 0xaf000000u);
+}
+
+static int own_apply_pds(struct own_fw *f, const u8 *blob, size_t len, const char *arm,
+			 const struct sgx_own_pds *pds)
+{
+	struct sgx_own_arm a;
+	struct sgx_own_blob b;
+	int ret;
+
+	ret = sgx_own_arm_parse(arm, &a);
+	if (ret)
+		return ret;
+	ret = sgx_own_parse(blob, len, &b);
+	if (ret)
+		return ret;
+	return sgx_own_apply(&b, &a, &f->fw, &f->l, PDS_BUF, f->pds, PDS_SIZE, f->code, 0x32140000,
+			     pds);
+}
+
+/*
+ * The arm of a blob with the emitpds: its pds0 to pds2 limms hold the control word, the image's
+ * address >> 4 and 0, the image is built for the blob's entry 1, the slot is armed as any. Without
+ * the image, or with an address the emit cannot name, it is refused and nothing is written.
+ */
+static void sgxfive_owntask_test_apply_emit(struct kunit *test)
+{
+	struct own_fw *f = own_fw_new(test, 4);
+	u8 *page = kunit_kzalloc(test, SGX_OWN_PDS_SIZE, GFP_KERNEL);
+	struct sgx_own_pds pds = { .image = page, .addr = OWN_PDS_ADDR, .v0 = OWN_V0, .v2 = OWN_V2 };
+	struct sgx_own_blob b;
+	unsigned int i, seen = 0;
+
+	KUNIT_ASSERT_NOT_NULL(test, page);
+	KUNIT_ASSERT_EQ(test, sgx_own_parse(own_ok_emitsa, sizeof(own_ok_emitsa), &b), 0);
+	/* refused, nothing written */
+	KUNIT_EXPECT_EQ(test, own_apply_pds(f, own_ok_emitsa, sizeof(own_ok_emitsa),
+					    "slots=0x1 entry=0", NULL), -ENOENT);
+	pds.addr = OWN_PDS_ADDR + 8;
+	KUNIT_EXPECT_EQ(test, own_apply_pds(f, own_ok_emitsa, sizeof(own_ok_emitsa),
+					    "slots=0x1 entry=0", &pds), -EINVAL);
+	pds.addr = 0;
+	KUNIT_EXPECT_EQ(test, own_apply_pds(f, own_ok_emitsa, sizeof(own_ok_emitsa),
+					    "slots=0x1 entry=0", &pds), -EINVAL);
+	KUNIT_EXPECT_EQ(test, memcmp(f->pds, f->stock, PDS_SIZE), 0);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le64(f->code), 0ull);
+	KUNIT_EXPECT_EQ(test, dw(page, 0), 0u);
+	/* armed */
+	pds.addr = OWN_PDS_ADDR;
+	KUNIT_ASSERT_EQ(test, own_apply_pds(f, own_ok_emitsa, sizeof(own_ok_emitsa),
+					    "slots=0x1 entry=0", &pds), 0);
+	for (i = 0; i < b.n_patch; i++) {
+		u16 index;
+		u8 kind, slot;
+		u32 addend, v;
+
+		sgx_own_patch_get(&b, i, &index, &kind, &slot, &addend);
+		if (kind != SGX_OWN_PATCH_PDS)
+			continue;
+		v = sgx_fw_limm_get(get_unaligned_le64(f->code + 8 * index));
+		KUNIT_EXPECT_EQ_MSG(test, v, slot == 0 ? (u32)SGX_OWN_PDS_CTL :
+				    slot == 1 ? OWN_PDS_ADDR >> 4 : 0u, "pds%u", slot);
+		seen |= 1u << slot;
+	}
+	KUNIT_EXPECT_EQ(test, seen, 0x7u);
+	KUNIT_EXPECT_EQ(test, dw(page, 4 * SGX_OWN_PDS_U0), sgx_own_pds_u0(sgx_own_entry(&b, 1)));
+	KUNIT_EXPECT_EQ(test, dw(page, 4 * SGX_OWN_PDS_V0), OWN_V0);
+	KUNIT_EXPECT_EQ(test, dw(page, 4 * SGX_OWN_PDS_V2), OWN_V2);
+	KUNIT_EXPECT_EQ(test, dw(f->pds, 4), 0x0804000fu);		/* slot 0, entry 0 */
+	/* a blob without the emitpds clears the page, and needs no image */
+	KUNIT_ASSERT_EQ(test, own_apply_pds(f, own_ok_mem, sizeof(own_ok_mem), "slots=0x1 entry=0",
+					    &pds), 0);
+	KUNIT_EXPECT_EQ(test, dw(page, 4 * SGX_OWN_PDS_U0), 0u);
+	KUNIT_EXPECT_EQ(test, dw(page, 4 * 8), 0u);
 }
 
 /* a blob with the emitpds is not armed without the image it names: refused, nothing written */
@@ -642,6 +769,8 @@ static struct kunit_case sgxfive_owntask_test_cases[] = {
 	KUNIT_CASE(sgxfive_owntask_test_res_write),
 	KUNIT_CASE(sgxfive_owntask_test_has_emit),
 	KUNIT_CASE(sgxfive_owntask_test_apply_emit_needs_image),
+	KUNIT_CASE(sgxfive_owntask_test_pds_build),
+	KUNIT_CASE(sgxfive_owntask_test_apply_emit),
 	KUNIT_CASE(sgxfive_owntask_test_emit_refusals),
 	{}
 };
