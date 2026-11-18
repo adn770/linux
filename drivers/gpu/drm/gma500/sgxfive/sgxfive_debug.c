@@ -2145,7 +2145,8 @@ static int sgxfive_own_arm_show(struct seq_file *m, void *unused)
 		seq_printf(m, " trc=%u", a.trc);
 	else
 		seq_puts(m, " trc=stock");
-	seq_printf(m, " trc_hazard=%d blob=%zu\n", a.trc_hazard, len);
+	seq_printf(m, " trc_hazard=%d pds=%s blob=%zu\n", a.trc_hazard, sgx_own_img_name(a.img),
+		   len);
 	return 0;
 }
 
@@ -2204,9 +2205,9 @@ int sgxfive_debug_own_apply(struct sgxfive *sgx, u8 *const bufs[])
 	if (ret)
 		drm_err(sgx->dev, "sgxfive: own task not armed: %d\n", ret);
 	else
-		drm_info(sgx->dev, "sgxfive: own task armed: slots %#x, trc %u (0: stock), exit %#x (0: unknown), emit image %#x (0: none) (debugfs own_arm)\n",
+		drm_info(sgx->dev, "sgxfive: own task armed: slots %#x, trc %u (0: stock), exit %#x (0: unknown), emit image %#x (0: none) pds=%s (debugfs own_arm)\n",
 			 own->arm.slots, own->arm.trc, arm.exit_index,
-			 sgx_own_has_emit(&b) ? pds.addr : 0);
+			 sgx_own_has_emit(&b) ? pds.addr : 0, sgx_own_img_name(own->arm.img));
 	return ret;
 }
 

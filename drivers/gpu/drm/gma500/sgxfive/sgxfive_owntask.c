@@ -534,6 +534,13 @@ int sgx_own_arm_parse(const char *line, struct sgx_own_arm *a)
 			if (ret || v > 1)
 				return -EINVAL;
 			a->trc_hazard = v;
+		} else if (!strncmp(tok, "pds=", 4)) {
+			for (v = 0; v < SGX_OWN_IMG_COUNT; v++)
+				if (!strcmp(tok + 4, sgx_own_img_name(v)))
+					break;
+			if (v == SGX_OWN_IMG_COUNT)
+				return -EINVAL;
+			a->img = v;
 		} else {
 			return -EINVAL;
 		}
@@ -558,14 +565,30 @@ u32 sgx_own_pds_u0(unsigned int entry)
 	return (u32)SGX_OWN_PDS_TRC << 24 | (SGX_OWN_INDEX + entry) << 4 | 0xf;
 }
 
-void sgx_own_pds_build(u8 *page, unsigned int entry, u32 v0, u32 v2)
+static const struct {
+	const char *name;
+	const u32 *words;
+	unsigned int n;
+} sgx_own_imgs[SGX_OWN_IMG_COUNT] = {
+	[SGX_OWN_IMG_V1] = { "v1", sgx_own_pds_image, SGX_OWN_PDS_WORDS },
+	[SGX_OWN_IMG_CRUMB] = { "crumb", sgx_own_pds_crumb, SGX_OWN_PDS_CRUMB_WORDS },
+};
+
+const char *sgx_own_img_name(unsigned int img)
+{
+	return img < SGX_OWN_IMG_COUNT ? sgx_own_imgs[img].name : "?";
+}
+
+void sgx_own_pds_build(u8 *page, unsigned int img, unsigned int entry, u32 v0, u32 v2)
 {
 	unsigned int i;
 	u32 w;
 
 	memset(page, 0, SGX_OWN_PDS_SIZE);
-	for (i = 0; i < SGX_OWN_PDS_WORDS; i++) {
-		w = sgx_own_pds_image[i];
+	if (img >= SGX_OWN_IMG_COUNT)
+		return;
+	for (i = 0; i < sgx_own_imgs[img].n; i++) {
+		w = sgx_own_imgs[img].words[i];
 		if (i == SGX_OWN_PDS_U0)
 			w = sgx_own_pds_u0(entry);
 		else if (i == SGX_OWN_PDS_V0)
@@ -598,6 +621,8 @@ int sgx_own_apply(const struct sgx_own_blob *b, const struct sgx_own_arm *a,
 	if (emit && (!pds || !pds->image))
 		return -ENOENT;
 	if (emit && (!pds->addr || (pds->addr & 15)))
+		return -EINVAL;
+	if (a->img >= SGX_OWN_IMG_COUNT)
 		return -EINVAL;
 	n = sgx_fw_code_targets(fw, pds_buf, tgt, ARRAY_SIZE(tgt));
 	if (n > ARRAY_SIZE(tgt))
@@ -683,8 +708,8 @@ int sgx_own_apply(const struct sgx_own_blob *b, const struct sgx_own_arm *a,
 	/* the image for the blob's entry 1, or a page with no program */
 	if (pds && pds->image) {
 		if (emit)
-			sgx_own_pds_build(pds->image, sgx_own_entry(b, SGX_OWN_EMIT_ENTRY), pds->v0,
-					  pds->v2);
+			sgx_own_pds_build(pds->image, a->img, sgx_own_entry(b, SGX_OWN_EMIT_ENTRY),
+					  pds->v0, pds->v2);
 		else
 			memset(pds->image, 0, SGX_OWN_PDS_SIZE);
 	}

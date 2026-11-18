@@ -531,6 +531,7 @@ static void sgxfive_owntask_test_arm_parse(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, a.slots, 1u);
 	KUNIT_EXPECT_EQ(test, a.nentry, 1u);
 	KUNIT_EXPECT_EQ(test, (int)a.trc, SGX_OWN_TRC_STOCK);	/* not given: the stock word's */
+	KUNIT_EXPECT_EQ(test, (int)a.img, SGX_OWN_IMG_V1);	/* not given: the v1 image */
 	KUNIT_ASSERT_EQ(test, sgx_own_arm_parse("slots=0xf entry=0,1,2,3 trc=31", &a), 0);
 	KUNIT_EXPECT_EQ(test, a.nentry, 4u);
 	KUNIT_EXPECT_EQ(test, (int)a.entry[3], 3);
@@ -550,6 +551,21 @@ static void sgxfive_owntask_test_arm_parse(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, sgx_own_arm_parse("slots=1", &a), -EINVAL);
 	KUNIT_EXPECT_EQ(test, sgx_own_arm_parse("entry=0", &a), -EINVAL);
 	KUNIT_EXPECT_EQ(test, sgx_own_arm_parse("slots=1 entry=0 bogus=1", &a), -EINVAL);
+	/* the emitpds image: v1 (the default) or crumb, nothing else */
+	KUNIT_ASSERT_EQ(test, sgx_own_arm_parse("slots=1 entry=0 pds=crumb", &a), 0);
+	KUNIT_EXPECT_EQ(test, (int)a.img, SGX_OWN_IMG_CRUMB);
+	KUNIT_EXPECT_EQ(test, a.slots, 1u);
+	KUNIT_ASSERT_EQ(test, sgx_own_arm_parse("slots=1 entry=0 trc=8 pds=v1", &a), 0);
+	KUNIT_EXPECT_EQ(test, (int)a.img, SGX_OWN_IMG_V1);
+	KUNIT_EXPECT_EQ(test, (int)a.trc, 8);
+	KUNIT_EXPECT_EQ(test, sgx_own_arm_parse("slots=1 entry=0 pds=2", &a), -EINVAL);
+	KUNIT_EXPECT_EQ(test, sgx_own_arm_parse("slots=1 entry=0 pds=", &a), -EINVAL);
+	KUNIT_EXPECT_EQ(test, sgx_own_arm_parse("slots=1 entry=0 pds=CRUMB", &a), -EINVAL);
+	KUNIT_EXPECT_EQ(test, sgx_own_arm_parse("slots=1 entry=0 pds=crumbs", &a), -EINVAL);
+	/* own_arm shows the image by these names */
+	KUNIT_EXPECT_STREQ(test, sgx_own_img_name(SGX_OWN_IMG_V1), "v1");
+	KUNIT_EXPECT_STREQ(test, sgx_own_img_name(SGX_OWN_IMG_CRUMB), "crumb");
+	KUNIT_EXPECT_STREQ(test, sgx_own_img_name(SGX_OWN_IMG_COUNT), "?");
 }
 
 /* own_res: dword aligned writes that leave dword 0, the kernel's header, alone */
@@ -605,7 +621,7 @@ static void sgxfive_owntask_test_pds_build(struct kunit *test)
 
 	KUNIT_ASSERT_NOT_NULL(test, page);
 	memset(page, 0xa5, SGX_OWN_PDS_SIZE);
-	sgx_own_pds_build(page, 33, OWN_V0, OWN_V2);
+	sgx_own_pds_build(page, SGX_OWN_IMG_V1, 33, OWN_V0, OWN_V2);
 	u0 = sgx_own_pds_u0(33);
 	KUNIT_EXPECT_EQ(test, u0, 0x0800000fu | (SGX_OWN_INDEX + 33u) << 4);
 	KUNIT_EXPECT_EQ(test, u0 & 0xf, 0xfu);
@@ -637,6 +653,56 @@ static void sgxfive_owntask_test_pds_build(struct kunit *test)
 	/* the words that are not filled are the generated program's: movs ... halt */
 	KUNIT_EXPECT_EQ(test, sgx_own_pds_image[8] >> 24, 0x07u);
 	KUNIT_EXPECT_EQ(test, sgx_own_pds_image[SGX_OWN_PDS_WORDS - 1], 0xaf000000u);
+}
+
+/*
+ * The crumb image (round 37, N3b): v1's data rows and fills, dword 7 = 0x005a3305, and the
+ * instruction words the header's: tim, douta, douta, tim, doutu, tim, halt; the three tim words
+ * read dwords 3, 6 and 7, whose values have bit 24 clear (tim holds them: no count). Zeros after.
+ */
+static void sgxfive_owntask_test_pds_build_crumb(struct kunit *test)
+{
+	static const u32 op[] = { 0x07001fe7, 0x07040606, 0x07042ca6, 0x07003547, 0x07000305,
+				  0x07003fe7, 0xaf000000 };
+	static const unsigned int tim[] = { 3, 6, 7 };		/* ds1[1], ds1[2], ds1[3] */
+	u8 *page = kunit_kzalloc(test, SGX_OWN_PDS_SIZE, GFP_KERNEL);
+	unsigned int i;
+
+	KUNIT_ASSERT_NOT_NULL(test, page);
+	KUNIT_ASSERT_EQ(test, SGX_OWN_PDS_CRUMB_WORDS, 15);
+	memset(page, 0xa5, SGX_OWN_PDS_SIZE);
+	sgx_own_pds_build(page, SGX_OWN_IMG_CRUMB, 33, OWN_V0, OWN_V2);
+	for (i = 0; i < SGX_OWN_PDS_CRUMB_WORDS; i++) {
+		u32 want = sgx_own_pds_crumb[i];
+
+		if (i == SGX_OWN_PDS_U0)
+			want = sgx_own_pds_u0(33);
+		else if (i == SGX_OWN_PDS_V0)
+			want = OWN_V0;
+		else if (i == SGX_OWN_PDS_V2)
+			want = OWN_V2;
+		KUNIT_EXPECT_EQ_MSG(test, dw(page, 4 * i), want, "dword %u", i);
+	}
+	/* the data rows are v1's but dword 7 */
+	for (i = 0; i < 4 * SGX_OWN_PDS_ROWS - 1; i++)
+		KUNIT_EXPECT_EQ_MSG(test, sgx_own_pds_crumb[i], sgx_own_pds_image[i], "dword %u", i);
+	KUNIT_EXPECT_EQ(test, dw(page, 4 * 3), 0x000u);
+	KUNIT_EXPECT_EQ(test, dw(page, 4 * 6), 0x200u);
+	KUNIT_EXPECT_EQ(test, dw(page, 4 * 7), 0x005a3305u);
+	for (i = 0; i < ARRAY_SIZE(tim); i++)
+		KUNIT_EXPECT_EQ_MSG(test, dw(page, 4 * tim[i]) & (1u << 24), 0u, "dword %u", tim[i]);
+	for (i = 0; i < ARRAY_SIZE(op); i++)
+		KUNIT_EXPECT_EQ_MSG(test, sgx_own_pds_crumb[8 + i], op[i], "insn %u", i);
+	for (i = 4 * SGX_OWN_PDS_CRUMB_WORDS; i < SGX_OWN_PDS_SIZE; i++)
+		if (page[i]) {
+			KUNIT_FAIL(test, "byte %u of the page is not zero", i);
+			break;
+		}
+	/* an image the arm cannot name builds an empty page */
+	memset(page, 0xa5, SGX_OWN_PDS_SIZE);
+	sgx_own_pds_build(page, SGX_OWN_IMG_COUNT, 33, OWN_V0, OWN_V2);
+	KUNIT_EXPECT_EQ(test, dw(page, 0), 0u);
+	KUNIT_EXPECT_EQ(test, dw(page, 4 * 8), 0u);
 }
 
 static int own_apply_pds(struct own_fw *f, const u8 *blob, size_t len, const char *arm,
@@ -712,6 +778,57 @@ static void sgxfive_owntask_test_apply_emit(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, dw(page, 4 * 8), 0u);
 }
 
+/*
+ * The arm builds the image own_arm names for emitsb (round 37): pds=crumb the crumb image,
+ * no pds= or pds=v1 the v1 image; an image it cannot name is refused, nothing written.
+ */
+static void sgxfive_owntask_test_apply_emit_image(struct kunit *test)
+{
+	struct own_fw *f = own_fw_new(test, 4);
+	u8 *page = kunit_kzalloc(test, SGX_OWN_PDS_SIZE, GFP_KERNEL);
+	struct sgx_own_pds pds = { .image = page, .addr = OWN_PDS_ADDR, .v0 = OWN_V0, .v2 = OWN_V2 };
+	struct sgx_own_arm a;
+	struct sgx_own_blob b;
+	u32 u0;
+
+	KUNIT_ASSERT_NOT_NULL(test, page);
+	KUNIT_ASSERT_EQ(test, sgx_own_parse(own_ok_emitsb, sizeof(own_ok_emitsb), &b), 0);
+	KUNIT_EXPECT_TRUE(test, sgx_own_has_emit(&b));
+	u0 = sgx_own_pds_u0(sgx_own_entry(&b, 1));
+	/* an image index no arm line gives: refused before anything is written */
+	KUNIT_ASSERT_EQ(test, sgx_own_arm_parse("slots=0x1 entry=0", &a), 0);
+	a.img = SGX_OWN_IMG_COUNT;
+	KUNIT_EXPECT_EQ(test, sgx_own_apply(&b, &a, &f->fw, &f->l, PDS_BUF, f->pds, PDS_SIZE,
+					    f->code, 0x32140000, &pds), -EINVAL);
+	KUNIT_EXPECT_EQ(test, memcmp(f->pds, f->stock, PDS_SIZE), 0);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le64(f->code), 0ull);
+	KUNIT_EXPECT_EQ(test, dw(page, 0), 0u);
+	/* crumb */
+	KUNIT_ASSERT_EQ(test, own_apply_pds(f, own_ok_emitsb, sizeof(own_ok_emitsb),
+					    "slots=0x1 entry=0 pds=crumb", &pds), 0);
+	KUNIT_EXPECT_EQ(test, dw(page, 4 * SGX_OWN_PDS_U0), u0);
+	KUNIT_EXPECT_EQ(test, dw(page, 4 * SGX_OWN_PDS_V0), OWN_V0);
+	KUNIT_EXPECT_EQ(test, dw(page, 4 * SGX_OWN_PDS_V2), OWN_V2);
+	KUNIT_EXPECT_EQ(test, dw(page, 4 * 7), 0x005a3305u);
+	KUNIT_EXPECT_EQ(test, dw(page, 4 * 8), sgx_own_pds_crumb[8]);
+	KUNIT_EXPECT_EQ(test, dw(page, 4 * (SGX_OWN_PDS_CRUMB_WORDS - 1)), 0xaf000000u);
+	KUNIT_EXPECT_EQ(test, dw(f->pds, 4), 0x0804000fu);		/* slot 0, entry 0 */
+	/* v1, by default and by name: the crumb words are gone */
+	KUNIT_ASSERT_EQ(test, own_apply_pds(f, own_ok_emitsb, sizeof(own_ok_emitsb),
+					    "slots=0x1 entry=0", &pds), 0);
+	KUNIT_EXPECT_EQ(test, dw(page, 4 * SGX_OWN_PDS_U0), u0);
+	KUNIT_EXPECT_EQ(test, dw(page, 4 * 7), 0u);
+	KUNIT_EXPECT_EQ(test, dw(page, 4 * 8), sgx_own_pds_image[8]);
+	KUNIT_EXPECT_EQ(test, dw(page, 4 * (SGX_OWN_PDS_WORDS - 1)), 0xaf000000u);
+	KUNIT_EXPECT_EQ(test, dw(page, 4 * SGX_OWN_PDS_WORDS), 0u);
+	KUNIT_ASSERT_EQ(test, own_apply_pds(f, own_ok_emitsb, sizeof(own_ok_emitsb),
+					    "slots=0x1 entry=0 pds=crumb", &pds), 0);
+	KUNIT_ASSERT_EQ(test, own_apply_pds(f, own_ok_emitsb, sizeof(own_ok_emitsb),
+					    "slots=0x1 entry=0 pds=v1", &pds), 0);
+	KUNIT_EXPECT_EQ(test, dw(page, 4 * 7), 0u);
+	KUNIT_EXPECT_EQ(test, dw(page, 4 * SGX_OWN_PDS_WORDS), 0u);
+}
+
 /* a blob with the emitpds is not armed without the image it names: refused, nothing written */
 static void sgxfive_owntask_test_apply_emit_needs_image(struct kunit *test)
 {
@@ -770,6 +887,8 @@ static struct kunit_case sgxfive_owntask_test_cases[] = {
 	KUNIT_CASE(sgxfive_owntask_test_has_emit),
 	KUNIT_CASE(sgxfive_owntask_test_apply_emit_needs_image),
 	KUNIT_CASE(sgxfive_owntask_test_pds_build),
+	KUNIT_CASE(sgxfive_owntask_test_pds_build_crumb),
+	KUNIT_CASE(sgxfive_owntask_test_apply_emit_image),
 	KUNIT_CASE(sgxfive_owntask_test_apply_emit),
 	KUNIT_CASE(sgxfive_owntask_test_emit_refusals),
 	{}

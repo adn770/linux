@@ -62,10 +62,27 @@ struct sgx_own_pds {
 	u32 v0, v2;			/* TA3DCtl dwords 0 and 2: the values sa0 and sa2 hold */
 };
 
+/*
+ * The images own_arm may name (pds=, sgx_own_pds.h): v1, the default, the program above; crumb
+ * (round 37) the same with three movs tim breadcrumbs, T1 = 0 first, T2 = 0x200 after both douta,
+ * T3 = 0x005a3305 after the doutu. Each has bit 24 clear: tim (EVENT_TIMER) holds it and counts
+ * nothing, so the EDM tick stops at T1 until the next reset, and the host reads how far it ran.
+ */
+enum sgx_own_img {
+	SGX_OWN_IMG_V1,
+	SGX_OWN_IMG_CRUMB,
+	SGX_OWN_IMG_COUNT,
+};
+
+/* own_arm's name of an image ("v1", "crumb"; "?" for none) */
+const char *sgx_own_img_name(unsigned int img);
 /* the doutu word of the task at the blob's instruction `entry` */
 u32 sgx_own_pds_u0(unsigned int entry);
-/* the image's page: the generated words with U0 for `entry`, V0 and V2; zeros after them */
-void sgx_own_pds_build(u8 *page, unsigned int entry, u32 v0, u32 v2);
+/*
+ * the image's page: the generated words of image `img` with U0 for `entry`, V0 and V2; zeros
+ * after them (all zeros for an image that is not one of enum sgx_own_img)
+ */
+void sgx_own_pds_build(u8 *page, unsigned int img, unsigned int entry, u32 v0, u32 v2);
 
 /*
  * A continue patch's slot 0 to 3 is the closed task a slot of PDS #13 started; slot 4 is the
@@ -115,6 +132,7 @@ struct sgx_own_arm {
 	unsigned int nentry;
 	u8 trc;				/* TRC field: units of 4 temporaries; 0: the stock word's */
 	bool trc_hazard;
+	u8 img;				/* the emitpds image (enum sgx_own_img): pds=, v1 if not given */
 	u32 exit_index;			/* the shared exit's ukernel index, set by the load (not by
 					 * own_arm): 0, unknown, refuses a cont4 patch */
 };
@@ -133,12 +151,13 @@ struct sgx_fw_layout;
 /* SGX_OWN_EXIT_UK_INDEX for the firmware file of that sha256 digest, else 0 */
 u32 sgx_own_exit_index(const u8 *digest);
 
-/* "slots=<mask> entry=<n>,<n>.. [trc=<t>] [trc_hazard=1]" */
+/* "slots=<mask> entry=<n>,<n>.. [trc=<t>] [trc_hazard=1] [pds=v1|crumb]" */
 int sgx_own_arm_parse(const char *line, struct sgx_own_arm *a);
 /*
  * pds: the image's page, needed by a blob with the emitpds (-ENOENT without it, -EINVAL for an
  * address that is 0 or not 16-byte aligned, nothing written either way); the page is built for
- * such a blob and cleared for any other. NULL for a blob without the emitpds.
+ * such a blob, with the image the arm names (-EINVAL for one that is not an enum sgx_own_img,
+ * nothing written), and cleared for any other. NULL for a blob without the emitpds.
  */
 int sgx_own_apply(const struct sgx_own_blob *b, const struct sgx_own_arm *a,
 		  const struct sgx_fw *fw, const struct sgx_fw_layout *l, unsigned int pds_buf,
