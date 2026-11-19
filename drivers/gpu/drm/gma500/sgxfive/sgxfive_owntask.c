@@ -58,8 +58,6 @@ static unsigned int own_mov_pclink_src(u64 w)
 #define OWN_TRACKED	32		/* the registers a base may name: the stock 32 temporaries */
 #define OWN_TOP		0xffff		/* a register of the base analysis that holds no page offset */
 #define OWN_PDS_STATE	0xfff0		/* + slot: the register holds the overlay's pds<slot> value */
-#define OWN_EMIT_WORD	0xfb20b00000008184ULL	/* the emitpds-own row's one word */
-#define OWN_EMIT_FW14	0xfb20b10800c08184ULL	/* the emitpds-fw14 row's: sideband 0x0843 */
 
 /* the registers the emitpds word reads, s0 to s2 */
 static const u8 own_emit_regs[SGX_OWN_PDS_SLOTS] = { 2, 3, 4 };
@@ -123,15 +121,15 @@ bool sgx_own_has_emit(const struct sgx_own_blob *b)
 
 unsigned int sgx_own_emit_form(const struct sgx_own_blob *b)
 {
-	unsigned int i;
+	unsigned int i, f;
 	u64 w;
 
+	/* the listed words (sgx_own_regs.h), each one exact emitpds-<name> form row of the verifier */
 	for (i = 0; i < b->n_insn; i++) {
 		w = sgx_own_insn(b, i);
-		if (w == OWN_EMIT_WORD)
-			return SGX_OWN_FORM_OWN;
-		if (w == OWN_EMIT_FW14)
-			return SGX_OWN_FORM_FW14;
+		for (f = 0; f < SGX_OWN_FORM_COUNT; f++)
+			if (w == sgx_own_emit_forms[f].word)
+				return f;
 	}
 	return SGX_OWN_FORM_COUNT;
 }
@@ -602,14 +600,17 @@ static const struct {
 	const u32 *words;
 	unsigned int n;
 	u32 ctl;
+	bool fillv;			/* the arm fills V0 and V2 besides U0 (sgx_own_pds.h _FILLV) */
 } sgx_own_imgs[SGX_OWN_IMG_COUNT] = {
-	[SGX_OWN_IMG_V1] = { "v1", sgx_own_pds_image, SGX_OWN_PDS_WORDS, SGX_OWN_PDS_CTL },
+	[SGX_OWN_IMG_V1] = { "v1", sgx_own_pds_image, SGX_OWN_PDS_WORDS, SGX_OWN_PDS_CTL, true },
 	[SGX_OWN_IMG_CRUMB] = { "crumb", sgx_own_pds_crumb, SGX_OWN_PDS_CRUMB_WORDS,
-				SGX_OWN_PDS_CRUMB_CTL },
+				SGX_OWN_PDS_CRUMB_CTL, SGX_OWN_PDS_CRUMB_FILLV },
 	[SGX_OWN_IMG_HALT] = { "halt", sgx_own_pds_halt, SGX_OWN_PDS_HALT_WORDS,
-			       SGX_OWN_PDS_HALT_CTL },
+			       SGX_OWN_PDS_HALT_CTL, SGX_OWN_PDS_HALT_FILLV },
 	[SGX_OWN_IMG_CRUMB3] = { "crumb3", sgx_own_pds_crumb3, SGX_OWN_PDS_CRUMB3_WORDS,
-				 SGX_OWN_PDS_CRUMB3_CTL },
+				 SGX_OWN_PDS_CRUMB3_CTL, SGX_OWN_PDS_CRUMB3_FILLV },
+	[SGX_OWN_IMG_LAND] = { "land", sgx_own_pds_land, SGX_OWN_PDS_LAND_WORDS,
+			       SGX_OWN_PDS_LAND_CTL, SGX_OWN_PDS_LAND_FILLV },
 };
 
 static const char *const sgx_own_ats[SGX_OWN_AT_COUNT] = {
@@ -622,11 +623,6 @@ const char *sgx_own_img_name(unsigned int img)
 	return img < SGX_OWN_IMG_COUNT ? sgx_own_imgs[img].name : "?";
 }
 
-static const char *const sgx_own_forms_names[SGX_OWN_FORM_COUNT] = {
-	[SGX_OWN_FORM_OWN] = "own",
-	[SGX_OWN_FORM_FW14] = "fw14",
-};
-
 static const struct {
 	const char *name;
 	u32 value;
@@ -637,7 +633,7 @@ static const struct {
 
 const char *sgx_own_form_name(unsigned int form)
 {
-	return form < SGX_OWN_FORM_COUNT ? sgx_own_forms_names[form] : "?";
+	return form < SGX_OWN_FORM_COUNT ? sgx_own_emit_forms[form].name : "?";
 }
 
 const char *sgx_own_pds2_name(unsigned int v)
@@ -665,7 +661,8 @@ unsigned int sgx_own_pds_words(unsigned int img)
 	return img < SGX_OWN_IMG_COUNT ? sgx_own_imgs[img].n : 0;
 }
 
-/* the image's words, U0, V0 and V2 filled in, at dst; nothing else is touched */
+/* the image's words, U0 (and V0 and V2 where the image takes them) filled in, at dst; nothing
+ * else is touched */
 static void sgx_own_pds_put(u8 *dst, unsigned int img, unsigned int entry, u32 v0, u32 v2)
 {
 	unsigned int i;
@@ -677,9 +674,9 @@ static void sgx_own_pds_put(u8 *dst, unsigned int img, unsigned int entry, u32 v
 		w = sgx_own_imgs[img].words[i];
 		if (i == SGX_OWN_PDS_U0)
 			w = sgx_own_pds_u0(entry);
-		else if (i == SGX_OWN_PDS_V0)
+		else if (i == SGX_OWN_PDS_V0 && sgx_own_imgs[img].fillv)
 			w = v0;
-		else if (i == SGX_OWN_PDS_V2)
+		else if (i == SGX_OWN_PDS_V2 && sgx_own_imgs[img].fillv)
 			w = v2;
 		put_unaligned_le32(w, dst + 4 * i);
 	}

@@ -89,7 +89,23 @@ static const struct { u64 mask, value; u8 kind; } sgx_own_forms[] __maybe_unused
 	{ 0xfffefcf3cfff4000ULL, 0x48081081000c0000ULL, SGX_OWN_PLAIN },	/* alu-test */
 	{ 0xffffffffffffffffULL, 0xd002008081020089ULL, SGX_OWN_IMA32 },	/* ima32 */
 	{ 0xffffffffffffffffULL, 0xfb20b00000008184ULL, SGX_OWN_EMITPDS },	/* emitpds-own */
+	{ 0xffffffffffffffffULL, 0xfb20b00000408184ULL, SGX_OWN_EMITPDS },	/* emitpds-sb001 */
+	{ 0xffffffffffffffffULL, 0xfb20b00000808184ULL, SGX_OWN_EMITPDS },	/* emitpds-sb002 */
+	{ 0xffffffffffffffffULL, 0xfb20b00000c08184ULL, SGX_OWN_EMITPDS },	/* emitpds-sb003 */
+	{ 0xffffffffffffffffULL, 0xfb20b00800008184ULL, SGX_OWN_EMITPDS },	/* emitpds-sb040 */
+	{ 0xffffffffffffffffULL, 0xfb20b00800408184ULL, SGX_OWN_EMITPDS },	/* emitpds-sb041 */
+	{ 0xffffffffffffffffULL, 0xfb20b00800808184ULL, SGX_OWN_EMITPDS },	/* emitpds-sb042 */
+	{ 0xffffffffffffffffULL, 0xfb20b00800c08184ULL, SGX_OWN_EMITPDS },	/* emitpds-sb043 */
+	{ 0xffffffffffffffffULL, 0xfb20b10000008184ULL, SGX_OWN_EMITPDS },	/* emitpds-sb800 */
+	{ 0xffffffffffffffffULL, 0xfb20b10000408184ULL, SGX_OWN_EMITPDS },	/* emitpds-sb801 */
+	{ 0xffffffffffffffffULL, 0xfb20b10000808184ULL, SGX_OWN_EMITPDS },	/* emitpds-sb802 */
+	{ 0xffffffffffffffffULL, 0xfb20b10000c08184ULL, SGX_OWN_EMITPDS },	/* emitpds-sb803 */
+	{ 0xffffffffffffffffULL, 0xfb20b10800008184ULL, SGX_OWN_EMITPDS },	/* emitpds-sb840 */
+	{ 0xffffffffffffffffULL, 0xfb20b10800408184ULL, SGX_OWN_EMITPDS },	/* emitpds-sb841 */
+	{ 0xffffffffffffffffULL, 0xfb20b10800808184ULL, SGX_OWN_EMITPDS },	/* emitpds-sb842 */
 	{ 0xffffffffffffffffULL, 0xfb20b10800c08184ULL, SGX_OWN_EMITPDS },	/* emitpds-fw14 */
+	{ 0xffffffffffffffffULL, 0xfb20b18800c08184ULL, SGX_OWN_EMITPDS },	/* emitpds-sbc43 */
+	{ 0xffffffffffffffffULL, 0xfb20b08000c08184ULL, SGX_OWN_EMITPDS },	/* emitpds-sb403 */
 	{ 0xfffffffff000007fULL, 0xe82b0002a0000000ULL, SGX_OWN_LOAD_ABS },	/* ldad */
 	{ 0xffffffffffe00000ULL, 0xf022000080000000ULL, SGX_OWN_STORE_ABS },	/* stad */
 	{ 0xfffffffff0003f80ULL, 0xfe21000020000000ULL, SGX_OWN_LDR },	/* ldr-imm */
@@ -102,6 +118,54 @@ static const struct { u64 mask, value; u8 kind; } sgx_own_forms[] __maybe_unused
 	{ 0xf87001c000000000ULL, 0xf80000c000000000ULL, SGX_OWN_DENY },	/* mov-pclink-any */
 	{ 0xf87001c000000000ULL, 0xf800014000000000ULL, SGX_OWN_DENY },	/* nop-any */
 	{ 0xff30000000000000ULL, 0xfc20000000000000ULL, SGX_OWN_DENY },	/* mov-limm-any */
+};
+
+/*
+ * the emitpds words own_arm's form= names (fwtask.EMIT_SIDEBANDS): our word with each
+ * sideband, every other field ours; own (round 33) the default, fw14 #14's (round 39), the
+ * rest N3e's list (round 40). The kernel arms a blob only at the form= naming its word.
+ */
+enum sgx_own_form {
+	SGX_OWN_FORM_OWN,
+	SGX_OWN_FORM_SB001,
+	SGX_OWN_FORM_SB002,
+	SGX_OWN_FORM_SB003,
+	SGX_OWN_FORM_SB040,
+	SGX_OWN_FORM_SB041,
+	SGX_OWN_FORM_SB042,
+	SGX_OWN_FORM_SB043,
+	SGX_OWN_FORM_SB800,
+	SGX_OWN_FORM_SB801,
+	SGX_OWN_FORM_SB802,
+	SGX_OWN_FORM_SB803,
+	SGX_OWN_FORM_SB840,
+	SGX_OWN_FORM_SB841,
+	SGX_OWN_FORM_SB842,
+	SGX_OWN_FORM_FW14,
+	SGX_OWN_FORM_SBC43,
+	SGX_OWN_FORM_SB403,
+	SGX_OWN_FORM_COUNT,
+};
+
+static const struct { const char *name; u64 word; } sgx_own_emit_forms[SGX_OWN_FORM_COUNT] __maybe_unused = {
+	{ "own", 0xfb20b00000008184ULL },	/* sideband 0x000 */
+	{ "sb001", 0xfb20b00000408184ULL },	/* sideband 0x001 */
+	{ "sb002", 0xfb20b00000808184ULL },	/* sideband 0x002 */
+	{ "sb003", 0xfb20b00000c08184ULL },	/* sideband 0x003 */
+	{ "sb040", 0xfb20b00800008184ULL },	/* sideband 0x040 */
+	{ "sb041", 0xfb20b00800408184ULL },	/* sideband 0x041 */
+	{ "sb042", 0xfb20b00800808184ULL },	/* sideband 0x042 */
+	{ "sb043", 0xfb20b00800c08184ULL },	/* sideband 0x043 */
+	{ "sb800", 0xfb20b10000008184ULL },	/* sideband 0x800 */
+	{ "sb801", 0xfb20b10000408184ULL },	/* sideband 0x801 */
+	{ "sb802", 0xfb20b10000808184ULL },	/* sideband 0x802 */
+	{ "sb803", 0xfb20b10000c08184ULL },	/* sideband 0x803 */
+	{ "sb840", 0xfb20b10800008184ULL },	/* sideband 0x840 */
+	{ "sb841", 0xfb20b10800408184ULL },	/* sideband 0x841 */
+	{ "sb842", 0xfb20b10800808184ULL },	/* sideband 0x842 */
+	{ "fw14", 0xfb20b10800c08184ULL },	/* sideband 0x843 */
+	{ "sbc43", 0xfb20b18800c08184ULL },	/* sideband 0xc43 */
+	{ "sb403", 0xfb20b08000c08184ULL },	/* sideband 0x403 */
 };
 
 #endif
