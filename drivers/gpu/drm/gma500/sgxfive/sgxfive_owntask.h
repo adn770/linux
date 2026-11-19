@@ -55,11 +55,33 @@ enum { SGX_OWN_PATCH_RES = 1, SGX_OWN_PATCH_CONT = 2, SGX_OWN_PATCH_PDS = 3 };
 #define SGX_OWN_PDS_TRC		8		/* the started task's temporaries, in fours */
 
 struct sgx_own_blob;
+struct sgx_fw;
+
+/*
+ * Where the image sits, own_arm's pdsat= (round 38, N3c): own, the default, the page above; fw14,
+ * the slack of the firmware's PDS #14 page, past #14's buffer and every PATCHES word in it at the
+ * next SGX_OWN_FW14_ALIGN (sgx_own_fw14_off()). That page is #14's own: the same PTE and flags
+ * (read-write, 0) as a program the firmware emits on every kick. The slack is zeroed at every arm
+ * that gives the page and by the recovery reset (sgx_own_fw14_clear()), since the firmware's
+ * build rewrites #14's buffer only, so no word of ours outlives the run.
+ */
+#define SGXFIVE_OWN_FW14_BUF	5		/* PDS #14's buffer id (fw_format section 3) */
+#define SGX_OWN_FW14_ALIGN	0x100
+
+enum sgx_own_at {
+	SGX_OWN_AT_OWN,
+	SGX_OWN_AT_FW14,
+	SGX_OWN_AT_COUNT,
+};
 
 struct sgx_own_pds {
 	u8 *image;			/* the CPU view of the image's page (SGX_OWN_PDS_SIZE) */
 	u32 addr;			/* its device address, 16-byte aligned */
 	u32 v0, v2;			/* TA3DCtl dwords 0 and 2: the values sa0 and sa2 hold */
+	u8 *fw14;			/* the CPU view of PDS #14's buffer (NULL: none) */
+	u32 fw14_addr;			/* its device address */
+	u32 fw14_room;			/* its mapped bytes, whole pages */
+	u32 at;				/* set by sgx_own_apply(): the emit's address, or 0 */
 };
 
 /*
@@ -67,15 +89,25 @@ struct sgx_own_pds {
  * (round 37) the same with three movs tim breadcrumbs, T1 = 0 first, T2 = 0x200 after both douta,
  * T3 = 0x005a3305 after the doutu. Each has bit 24 clear: tim (EVENT_TIMER) holds it and counts
  * nothing, so the EDM tick stops at T1 until the next reset, and the host reads how far it ran.
+ * halt (round 38) is v1's data rows and a lone halt; crumb3 is crumb with a third data row of
+ * zeros, 3 rows as PDS #14 has, so its control word is (3 << 23) | 0x100.
  */
 enum sgx_own_img {
 	SGX_OWN_IMG_V1,
 	SGX_OWN_IMG_CRUMB,
+	SGX_OWN_IMG_HALT,
+	SGX_OWN_IMG_CRUMB3,
 	SGX_OWN_IMG_COUNT,
 };
 
-/* own_arm's name of an image ("v1", "crumb"; "?" for none) */
+/* own_arm's name of an image ("v1", "crumb", "halt", "crumb3"; "?" for none) */
 const char *sgx_own_img_name(unsigned int img);
+/* own_arm's name of a place ("own", "fw14"; "?" for none) */
+const char *sgx_own_at_name(unsigned int at);
+/* the image's emitpds control word, (rows << 23) | 0x100 (0 for none) */
+u32 sgx_own_pds_ctl(unsigned int img);
+/* the image's size in dwords (0 for none) */
+unsigned int sgx_own_pds_words(unsigned int img);
 /* the doutu word of the task at the blob's instruction `entry` */
 u32 sgx_own_pds_u0(unsigned int entry);
 /*
@@ -83,6 +115,15 @@ u32 sgx_own_pds_u0(unsigned int entry);
  * after them (all zeros for an image that is not one of enum sgx_own_img)
  */
 void sgx_own_pds_build(u8 *page, unsigned int img, unsigned int entry, u32 v0, u32 v2);
+/*
+ * pdsat=fw14: the byte offset in buffer `buf` (PDS #14's) where image `img` goes, past the
+ * buffer's size and every PATCHES record's word in it, rounded up to SGX_OWN_FW14_ALIGN. -ENOENT
+ * without the buffer, -EINVAL for an image that is none, -ERANGE when it does not fit in `room`.
+ */
+int sgx_own_fw14_off(const struct sgx_fw *fw, unsigned int buf, unsigned int img, u32 room,
+		     u32 *off);
+/* zero bytes [size, room) of PDS #14's page: whatever the slack holds, #14's own bytes kept */
+void sgx_own_fw14_clear(u8 *page, u32 size, u32 room);
 
 /*
  * A continue patch's slot 0 to 3 is the closed task a slot of PDS #13 started; slot 4 is the
@@ -133,6 +174,7 @@ struct sgx_own_arm {
 	u8 trc;				/* TRC field: units of 4 temporaries; 0: the stock word's */
 	bool trc_hazard;
 	u8 img;				/* the emitpds image (enum sgx_own_img): pds=, v1 if not given */
+	u8 at;				/* where it sits (enum sgx_own_at): pdsat=, own if none */
 	u32 exit_index;			/* the shared exit's ukernel index, set by the load (not by
 					 * own_arm): 0, unknown, refuses a cont4 patch */
 };
@@ -151,18 +193,25 @@ struct sgx_fw_layout;
 /* SGX_OWN_EXIT_UK_INDEX for the firmware file of that sha256 digest, else 0 */
 u32 sgx_own_exit_index(const u8 *digest);
 
-/* "slots=<mask> entry=<n>,<n>.. [trc=<t>] [trc_hazard=1] [pds=v1|crumb]" */
+/*
+ * "slots=<mask> entry=<n>,<n>.. [trc=<t>] [trc_hazard=1] [pds=v1|crumb|halt|crumb3]
+ * [pdsat=own|fw14]"
+ */
 int sgx_own_arm_parse(const char *line, struct sgx_own_arm *a);
 /*
  * pds: the image's page, needed by a blob with the emitpds (-ENOENT without it, -EINVAL for an
  * address that is 0 or not 16-byte aligned, nothing written either way); the page is built for
  * such a blob, with the image the arm names (-EINVAL for one that is not an enum sgx_own_img,
  * nothing written), and cleared for any other. NULL for a blob without the emitpds.
+ * pdsat=fw14 needs a blob with the emitpds (-EINVAL), PDS #14's buffer in pds->fw14 (-ENOENT) and
+ * room for the image past it (-ERANGE), nothing written otherwise; the image is then written
+ * there and the own page cleared. #14's slack is cleared whenever pds->fw14 is given. pds->at is
+ * the address the emit names (0: none).
  */
 int sgx_own_apply(const struct sgx_own_blob *b, const struct sgx_own_arm *a,
 		  const struct sgx_fw *fw, const struct sgx_fw_layout *l, unsigned int pds_buf,
 		  u8 *pds_image, u32 pds_size, u8 *code, u32 res_addr,
-		  const struct sgx_own_pds *pds);
+		  struct sgx_own_pds *pds);
 /* own_res: a write must be dword aligned and leave dword 0 (the header) alone */
 bool sgx_own_res_write_ok(loff_t pos, size_t len);
 

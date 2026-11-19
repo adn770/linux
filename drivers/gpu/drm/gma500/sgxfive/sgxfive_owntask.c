@@ -541,6 +541,13 @@ int sgx_own_arm_parse(const char *line, struct sgx_own_arm *a)
 			if (v == SGX_OWN_IMG_COUNT)
 				return -EINVAL;
 			a->img = v;
+		} else if (!strncmp(tok, "pdsat=", 6)) {
+			for (v = 0; v < SGX_OWN_AT_COUNT; v++)
+				if (!strcmp(tok + 6, sgx_own_at_name(v)))
+					break;
+			if (v == SGX_OWN_AT_COUNT)
+				return -EINVAL;
+			a->at = v;
 		} else {
 			return -EINVAL;
 		}
@@ -569,9 +576,20 @@ static const struct {
 	const char *name;
 	const u32 *words;
 	unsigned int n;
+	u32 ctl;
 } sgx_own_imgs[SGX_OWN_IMG_COUNT] = {
-	[SGX_OWN_IMG_V1] = { "v1", sgx_own_pds_image, SGX_OWN_PDS_WORDS },
-	[SGX_OWN_IMG_CRUMB] = { "crumb", sgx_own_pds_crumb, SGX_OWN_PDS_CRUMB_WORDS },
+	[SGX_OWN_IMG_V1] = { "v1", sgx_own_pds_image, SGX_OWN_PDS_WORDS, SGX_OWN_PDS_CTL },
+	[SGX_OWN_IMG_CRUMB] = { "crumb", sgx_own_pds_crumb, SGX_OWN_PDS_CRUMB_WORDS,
+				SGX_OWN_PDS_CRUMB_CTL },
+	[SGX_OWN_IMG_HALT] = { "halt", sgx_own_pds_halt, SGX_OWN_PDS_HALT_WORDS,
+			       SGX_OWN_PDS_HALT_CTL },
+	[SGX_OWN_IMG_CRUMB3] = { "crumb3", sgx_own_pds_crumb3, SGX_OWN_PDS_CRUMB3_WORDS,
+				 SGX_OWN_PDS_CRUMB3_CTL },
+};
+
+static const char *const sgx_own_ats[SGX_OWN_AT_COUNT] = {
+	[SGX_OWN_AT_OWN] = "own",
+	[SGX_OWN_AT_FW14] = "fw14",
 };
 
 const char *sgx_own_img_name(unsigned int img)
@@ -579,12 +597,27 @@ const char *sgx_own_img_name(unsigned int img)
 	return img < SGX_OWN_IMG_COUNT ? sgx_own_imgs[img].name : "?";
 }
 
-void sgx_own_pds_build(u8 *page, unsigned int img, unsigned int entry, u32 v0, u32 v2)
+const char *sgx_own_at_name(unsigned int at)
+{
+	return at < SGX_OWN_AT_COUNT ? sgx_own_ats[at] : "?";
+}
+
+u32 sgx_own_pds_ctl(unsigned int img)
+{
+	return img < SGX_OWN_IMG_COUNT ? sgx_own_imgs[img].ctl : 0;
+}
+
+unsigned int sgx_own_pds_words(unsigned int img)
+{
+	return img < SGX_OWN_IMG_COUNT ? sgx_own_imgs[img].n : 0;
+}
+
+/* the image's words, U0, V0 and V2 filled in, at dst; nothing else is touched */
+static void sgx_own_pds_put(u8 *dst, unsigned int img, unsigned int entry, u32 v0, u32 v2)
 {
 	unsigned int i;
 	u32 w;
 
-	memset(page, 0, SGX_OWN_PDS_SIZE);
 	if (img >= SGX_OWN_IMG_COUNT)
 		return;
 	for (i = 0; i < sgx_own_imgs[img].n; i++) {
@@ -595,15 +628,56 @@ void sgx_own_pds_build(u8 *page, unsigned int img, unsigned int entry, u32 v0, u
 			w = v0;
 		else if (i == SGX_OWN_PDS_V2)
 			w = v2;
-		put_unaligned_le32(w, page + 4 * i);
+		put_unaligned_le32(w, dst + 4 * i);
 	}
+}
+
+void sgx_own_pds_build(u8 *page, unsigned int img, unsigned int entry, u32 v0, u32 v2)
+{
+	memset(page, 0, SGX_OWN_PDS_SIZE);
+	sgx_own_pds_put(page, img, entry, v0, v2);
+}
+
+int sgx_own_fw14_off(const struct sgx_fw *fw, unsigned int buf, unsigned int img, u32 room,
+		     u32 *off)
+{
+	const struct sgx_fw_buffer *fb = sgx_fw_buffer(fw, buf);
+	u64 end, o;
+	u32 i;
+
+	if (!fb)
+		return -ENOENT;
+	if (img >= SGX_OWN_IMG_COUNT)
+		return -EINVAL;
+	end = fb->size;
+	/* a PATCHES word: 8 bytes for a USSE limm (encoding 1), else 4 (format section 4) */
+	for (i = 0; i < fw->patches.count; i++) {
+		const u8 *r = fw->patches.rec + 16 * i;
+		u64 e = (u64)get_unaligned_le32(r + 4) + (r[1] == 1 ? 8 : 4);
+
+		if (r[0] == buf && e > end)
+			end = e;
+	}
+	o = (end + SGX_OWN_FW14_ALIGN - 1) & ~(u64)(SGX_OWN_FW14_ALIGN - 1);
+	if (o + 4ull * sgx_own_imgs[img].n > room)
+		return -ERANGE;
+	*off = (u32)o;
+	return 0;
+}
+
+void sgx_own_fw14_clear(u8 *page, u32 size, u32 room)
+{
+	if (page && size < room)
+		memset(page + size, 0, room - size);
 }
 
 int sgx_own_apply(const struct sgx_own_blob *b, const struct sgx_own_arm *a,
 		  const struct sgx_fw *fw, const struct sgx_fw_layout *l, unsigned int pds_buf,
 		  u8 *pds_image, u32 pds_size, u8 *code, u32 res_addr,
-		  const struct sgx_own_pds *pds)
+		  struct sgx_own_pds *pds)
 {
+	const struct sgx_fw_buffer *fb14;
+	u32 emit_addr = 0, off14 = 0;
 	bool emit;
 	struct sgx_fw_patched p;
 	u32 tgt[SGX_OWN_SLOTS];
@@ -622,8 +696,23 @@ int sgx_own_apply(const struct sgx_own_blob *b, const struct sgx_own_arm *a,
 		return -ENOENT;
 	if (emit && (!pds->addr || (pds->addr & 15)))
 		return -EINVAL;
-	if (a->img >= SGX_OWN_IMG_COUNT)
+	if (a->img >= SGX_OWN_IMG_COUNT || a->at >= SGX_OWN_AT_COUNT)
 		return -EINVAL;
+	/* pdsat=fw14: a blob that emits, #14's page, and room for the image in its slack */
+	if (a->at == SGX_OWN_AT_FW14) {
+		if (!emit)
+			return -EINVAL;
+		if (!pds->fw14 || !pds->fw14_addr)
+			return -ENOENT;
+		ret = sgx_own_fw14_off(fw, SGXFIVE_OWN_FW14_BUF, a->img, pds->fw14_room, &off14);
+		if (ret)
+			return ret;
+		emit_addr = pds->fw14_addr + off14;
+		if (emit_addr & 15)
+			return -EINVAL;
+	} else if (emit) {
+		emit_addr = pds->addr;
+	}
 	n = sgx_fw_code_targets(fw, pds_buf, tgt, ARRAY_SIZE(tgt));
 	if (n > ARRAY_SIZE(tgt))
 		return -ENOENT;
@@ -675,7 +764,7 @@ int sgx_own_apply(const struct sgx_own_blob *b, const struct sgx_own_arm *a,
 			val = a->exit_index + p.old_index - tgt[0];
 		} else if (pk == SGX_OWN_PATCH_PDS) {
 			/* verified: slot 0 to 2, no addend; pds is set (a blob with the emitpds) */
-			val = slot == 0 ? SGX_OWN_PDS_CTL : slot == 1 ? (pds ? pds->addr >> 4 : 0) : 0;
+			val = slot == 0 ? sgx_own_pds_ctl(a->img) : slot == 1 ? emit_addr >> 4 : 0;
 		} else if (pk == SGX_OWN_PATCH_CONT) {
 			if (slot >= n)
 				return -ENOENT;
@@ -705,13 +794,23 @@ int sgx_own_apply(const struct sgx_own_blob *b, const struct sgx_own_arm *a,
 			return ret;
 		put_unaligned_le32(p.new_val, pds_image + p.offset);
 	}
-	/* the image for the blob's entry 1, or a page with no program */
+	/* the image for the blob's entry 1 where the arm puts it; no program anywhere else */
 	if (pds && pds->image) {
-		if (emit)
+		if (emit && a->at == SGX_OWN_AT_OWN)
 			sgx_own_pds_build(pds->image, a->img, sgx_own_entry(b, SGX_OWN_EMIT_ENTRY),
 					  pds->v0, pds->v2);
 		else
 			memset(pds->image, 0, SGX_OWN_PDS_SIZE);
 	}
+	if (pds && pds->fw14) {
+		fb14 = sgx_fw_buffer(fw, SGXFIVE_OWN_FW14_BUF);
+		if (fb14)
+			sgx_own_fw14_clear(pds->fw14, fb14->size, pds->fw14_room);
+		if (emit && a->at == SGX_OWN_AT_FW14)
+			sgx_own_pds_put(pds->fw14 + off14, a->img,
+					sgx_own_entry(b, SGX_OWN_EMIT_ENTRY), pds->v0, pds->v2);
+	}
+	if (pds)
+		pds->at = emit_addr;
 	return 0;
 }

@@ -272,6 +272,11 @@ static void sgxfive_owntask_test_parse(struct kunit *test)
 #define PDS_BUF		SGXFIVE_OWN_PDS_BUF
 #define PDS_SIZE	0x100
 #define PDS_ADDEND	0x0800000f
+#define F14_BUF		SGXFIVE_OWN_FW14_BUF
+#define F14_SIZE	0x68		/* PDS #14's buffer size (fw_format section 3) */
+#define F14_ROOM	0x1000		/* its page */
+#define F14_ADDR	0xe8011000
+#define ARM14		"slots=0x1 entry=0 pds=crumb3 pdsat=fw14"
 
 static void rec(u8 *p, u8 buffer, u32 offset, u32 target, u32 addend)
 {
@@ -286,8 +291,9 @@ static void rec(u8 *p, u8 buffer, u32 offset, u32 target, u32 addend)
 struct own_fw {
 	struct sgx_fw fw;
 	struct sgx_fw_layout l;
-	u8 recs[4 * 16];
+	u8 recs[6 * 16];
 	u8 uk[0x20], pds[PDS_SIZE], stock[PDS_SIZE];
+	u8 f14[F14_ROOM], stock14[F14_ROOM], f14img[F14_SIZE];	/* own_fw14_new() */
 	u8 *bufs[SGX_FW_MAX_BUFFERS];
 	u8 code[SGX_OWN_CODE_SIZE];
 };
@@ -566,6 +572,31 @@ static void sgxfive_owntask_test_arm_parse(struct kunit *test)
 	KUNIT_EXPECT_STREQ(test, sgx_own_img_name(SGX_OWN_IMG_V1), "v1");
 	KUNIT_EXPECT_STREQ(test, sgx_own_img_name(SGX_OWN_IMG_CRUMB), "crumb");
 	KUNIT_EXPECT_STREQ(test, sgx_own_img_name(SGX_OWN_IMG_COUNT), "?");
+	/* round 38: pds=halt|crumb3, and where the image sits, pdsat=own (the default) or fw14 */
+	KUNIT_ASSERT_EQ(test, sgx_own_arm_parse("slots=1 entry=0", &a), 0);
+	KUNIT_EXPECT_EQ(test, (int)a.at, SGX_OWN_AT_OWN);
+	KUNIT_ASSERT_EQ(test, sgx_own_arm_parse("slots=1 entry=0 pds=halt", &a), 0);
+	KUNIT_EXPECT_EQ(test, (int)a.img, SGX_OWN_IMG_HALT);
+	KUNIT_EXPECT_EQ(test, (int)a.at, SGX_OWN_AT_OWN);
+	KUNIT_ASSERT_EQ(test, sgx_own_arm_parse("slots=1 entry=0 pds=crumb3 pdsat=fw14", &a), 0);
+	KUNIT_EXPECT_EQ(test, (int)a.img, SGX_OWN_IMG_CRUMB3);
+	KUNIT_EXPECT_EQ(test, (int)a.at, SGX_OWN_AT_FW14);
+	KUNIT_ASSERT_EQ(test, sgx_own_arm_parse("slots=1 entry=0 pdsat=fw14", &a), 0);
+	KUNIT_EXPECT_EQ(test, (int)a.img, SGX_OWN_IMG_V1);
+	KUNIT_EXPECT_EQ(test, (int)a.at, SGX_OWN_AT_FW14);
+	KUNIT_ASSERT_EQ(test, sgx_own_arm_parse("slots=1 entry=0 pds=crumb pdsat=own", &a), 0);
+	KUNIT_EXPECT_EQ(test, (int)a.at, SGX_OWN_AT_OWN);
+	KUNIT_EXPECT_EQ(test, sgx_own_arm_parse("slots=1 entry=0 pds=crumb4", &a), -EINVAL);
+	KUNIT_EXPECT_EQ(test, sgx_own_arm_parse("slots=1 entry=0 pds=halt3", &a), -EINVAL);
+	KUNIT_EXPECT_EQ(test, sgx_own_arm_parse("slots=1 entry=0 pdsat=", &a), -EINVAL);
+	KUNIT_EXPECT_EQ(test, sgx_own_arm_parse("slots=1 entry=0 pdsat=fw13", &a), -EINVAL);
+	KUNIT_EXPECT_EQ(test, sgx_own_arm_parse("slots=1 entry=0 pdsat=FW14", &a), -EINVAL);
+	KUNIT_EXPECT_EQ(test, sgx_own_arm_parse("slots=1 entry=0 pdsat=1", &a), -EINVAL);
+	KUNIT_EXPECT_STREQ(test, sgx_own_img_name(SGX_OWN_IMG_HALT), "halt");
+	KUNIT_EXPECT_STREQ(test, sgx_own_img_name(SGX_OWN_IMG_CRUMB3), "crumb3");
+	KUNIT_EXPECT_STREQ(test, sgx_own_at_name(SGX_OWN_AT_OWN), "own");
+	KUNIT_EXPECT_STREQ(test, sgx_own_at_name(SGX_OWN_AT_FW14), "fw14");
+	KUNIT_EXPECT_STREQ(test, sgx_own_at_name(SGX_OWN_AT_COUNT), "?");
 }
 
 /* own_res: dword aligned writes that leave dword 0, the kernel's header, alone */
@@ -706,7 +737,7 @@ static void sgxfive_owntask_test_pds_build_crumb(struct kunit *test)
 }
 
 static int own_apply_pds(struct own_fw *f, const u8 *blob, size_t len, const char *arm,
-			 const struct sgx_own_pds *pds)
+			 struct sgx_own_pds *pds)
 {
 	struct sgx_own_arm a;
 	struct sgx_own_blob b;
@@ -865,6 +896,334 @@ static void sgxfive_owntask_test_emit_refusals(struct kunit *test)
 	}
 }
 
+/*
+ * Round 38 (N3c): halt is v1's data rows and fills, then halt alone; crumb3 is crumb's data rows,
+ * a third row of zeros, then crumb's instructions. Each image has its own control word: 2 rows for
+ * v1, crumb and halt, 3 (PDS #14's) for crumb3. Zeros after each.
+ */
+static void sgxfive_owntask_test_pds_build_halt_crumb3(struct kunit *test)
+{
+	u8 *page = kunit_kzalloc(test, SGX_OWN_PDS_SIZE, GFP_KERNEL);
+	unsigned int i;
+
+	KUNIT_ASSERT_NOT_NULL(test, page);
+	KUNIT_EXPECT_EQ(test, sgx_own_pds_ctl(SGX_OWN_IMG_V1), 0x01000100u);
+	KUNIT_EXPECT_EQ(test, sgx_own_pds_ctl(SGX_OWN_IMG_CRUMB), 0x01000100u);
+	KUNIT_EXPECT_EQ(test, sgx_own_pds_ctl(SGX_OWN_IMG_HALT), 0x01000100u);
+	KUNIT_EXPECT_EQ(test, sgx_own_pds_ctl(SGX_OWN_IMG_CRUMB3), (3u << 23) | 0x100);
+	KUNIT_EXPECT_EQ(test, sgx_own_pds_ctl(SGX_OWN_IMG_COUNT), 0u);
+	KUNIT_EXPECT_EQ(test, sgx_own_pds_words(SGX_OWN_IMG_V1), 12u);
+	KUNIT_EXPECT_EQ(test, sgx_own_pds_words(SGX_OWN_IMG_CRUMB), 15u);
+	KUNIT_EXPECT_EQ(test, sgx_own_pds_words(SGX_OWN_IMG_HALT), 9u);
+	KUNIT_EXPECT_EQ(test, sgx_own_pds_words(SGX_OWN_IMG_CRUMB3), 19u);
+	KUNIT_EXPECT_EQ(test, sgx_own_pds_words(SGX_OWN_IMG_COUNT), 0u);
+	/* halt */
+	memset(page, 0xa5, SGX_OWN_PDS_SIZE);
+	sgx_own_pds_build(page, SGX_OWN_IMG_HALT, 33, OWN_V0, OWN_V2);
+	for (i = 0; i < 8; i++) {
+		u32 want = sgx_own_pds_image[i];
+
+		if (i == SGX_OWN_PDS_U0)
+			want = sgx_own_pds_u0(33);
+		else if (i == SGX_OWN_PDS_V0)
+			want = OWN_V0;
+		else if (i == SGX_OWN_PDS_V2)
+			want = OWN_V2;
+		KUNIT_EXPECT_EQ_MSG(test, dw(page, 4 * i), want, "dword %u", i);
+	}
+	KUNIT_EXPECT_EQ(test, dw(page, 4 * 8), 0xaf000000u);
+	for (i = 4 * 9; i < SGX_OWN_PDS_SIZE; i++)
+		if (page[i]) {
+			KUNIT_FAIL(test, "halt: byte %u of the page is not zero", i);
+			break;
+		}
+	/* crumb3 */
+	memset(page, 0xa5, SGX_OWN_PDS_SIZE);
+	sgx_own_pds_build(page, SGX_OWN_IMG_CRUMB3, 33, OWN_V0, OWN_V2);
+	KUNIT_EXPECT_EQ(test, dw(page, 4 * SGX_OWN_PDS_U0), sgx_own_pds_u0(33));
+	KUNIT_EXPECT_EQ(test, dw(page, 4 * SGX_OWN_PDS_V0), OWN_V0);
+	KUNIT_EXPECT_EQ(test, dw(page, 4 * SGX_OWN_PDS_V2), OWN_V2);
+	for (i = 0; i < 8; i++)
+		if (i != SGX_OWN_PDS_U0 && i != SGX_OWN_PDS_V0 && i != SGX_OWN_PDS_V2)
+			KUNIT_EXPECT_EQ_MSG(test, dw(page, 4 * i), sgx_own_pds_crumb[i],
+					    "dword %u", i);
+	for (i = 8; i < 12; i++)
+		KUNIT_EXPECT_EQ_MSG(test, dw(page, 4 * i), 0u, "dword %u", i);
+	for (i = 0; i < 7; i++)
+		KUNIT_EXPECT_EQ_MSG(test, dw(page, 4 * (12 + i)), sgx_own_pds_crumb[8 + i],
+				    "insn %u", i);
+	for (i = 4 * 19; i < SGX_OWN_PDS_SIZE; i++)
+		if (page[i]) {
+			KUNIT_FAIL(test, "crumb3: byte %u of the page is not zero", i);
+			break;
+		}
+}
+
+/*
+ * pdsat=fw14's place: past PDS #14's buffer and every PATCHES word into it, at the next 0x100,
+ * the whole image inside the page; patches into other buffers do not move it.
+ */
+static void sgxfive_owntask_test_fw14_off(struct kunit *test)
+{
+	struct sgx_fw *fw = kunit_kzalloc(test, sizeof(*fw), GFP_KERNEL);
+	u8 *recs = kunit_kzalloc(test, 3 * 16, GFP_KERNEL);
+	u32 off = 0;
+
+	KUNIT_ASSERT_NOT_NULL(test, fw);
+	KUNIT_ASSERT_NOT_NULL(test, recs);
+	fw->nbuffers = 2;
+	fw->buffers[0] = (struct sgx_fw_buffer){ .id = PDS_BUF, .heap = 2, .size = 0x400,
+						 .align = 16 };
+	fw->buffers[1] = (struct sgx_fw_buffer){ .id = F14_BUF, .heap = 2, .size = F14_SIZE,
+						 .align = 16 };
+	rec(recs, F14_BUF, 0, 100, PDS_ADDEND);
+	rec(recs + 16, F14_BUF, 0x14, 101, PDS_ADDEND);
+	rec(recs + 32, PDS_BUF, 0x3fc, 102, PDS_ADDEND);	/* another buffer's */
+	fw->patches.rec = recs;
+	fw->patches.count = 3;
+	KUNIT_EXPECT_EQ(test, sgx_own_fw14_off(fw, F14_BUF, SGX_OWN_IMG_CRUMB3, F14_ROOM, &off), 0);
+	KUNIT_EXPECT_EQ(test, off, 0x100u);
+	KUNIT_EXPECT_EQ(test, off % 16, 0u);
+	KUNIT_EXPECT_GE(test, off, (u32)F14_SIZE);
+	/* exactly 0x100 stays; one byte more moves to 0x200 */
+	fw->buffers[1].size = 0x100;
+	KUNIT_EXPECT_EQ(test, sgx_own_fw14_off(fw, F14_BUF, SGX_OWN_IMG_V1, F14_ROOM, &off), 0);
+	KUNIT_EXPECT_EQ(test, off, 0x100u);
+	fw->buffers[1].size = 0x101;
+	KUNIT_EXPECT_EQ(test, sgx_own_fw14_off(fw, F14_BUF, SGX_OWN_IMG_V1, F14_ROOM, &off), 0);
+	KUNIT_EXPECT_EQ(test, off, 0x200u);
+	/* a patch word past the size moves it too (a USSE limm is 8 bytes) */
+	fw->buffers[1].size = F14_SIZE;
+	rec(recs + 16, F14_BUF, 0x1f8, 101, PDS_ADDEND);
+	recs[16 + 1] = 1;
+	KUNIT_EXPECT_EQ(test, sgx_own_fw14_off(fw, F14_BUF, SGX_OWN_IMG_V1, F14_ROOM, &off), 0);
+	KUNIT_EXPECT_EQ(test, off, 0x200u);
+	recs[16 + 1] = 0;
+	rec(recs + 16, F14_BUF, 0x1fc, 101, PDS_ADDEND);
+	KUNIT_EXPECT_EQ(test, sgx_own_fw14_off(fw, F14_BUF, SGX_OWN_IMG_V1, F14_ROOM, &off), 0);
+	KUNIT_EXPECT_EQ(test, off, 0x200u);
+	rec(recs + 16, F14_BUF, 0x14, 101, PDS_ADDEND);
+	/* the whole image inside the room: crumb3 is 0x4c bytes */
+	off = 0xdead;
+	KUNIT_EXPECT_EQ(test, sgx_own_fw14_off(fw, F14_BUF, SGX_OWN_IMG_CRUMB3, 0x14c, &off), 0);
+	KUNIT_EXPECT_EQ(test, off, 0x100u);
+	off = 0xdead;
+	KUNIT_EXPECT_EQ(test, sgx_own_fw14_off(fw, F14_BUF, SGX_OWN_IMG_CRUMB3, 0x14b, &off),
+			-ERANGE);
+	KUNIT_EXPECT_EQ(test, off, 0xdeadu);
+	KUNIT_EXPECT_EQ(test, sgx_own_fw14_off(fw, F14_BUF, SGX_OWN_IMG_COUNT, F14_ROOM, &off),
+			-EINVAL);
+	KUNIT_EXPECT_EQ(test, sgx_own_fw14_off(fw, 6, SGX_OWN_IMG_V1, F14_ROOM, &off), -ENOENT);
+}
+
+/* the value the arm wrote in the blob's pds0 limm (the emitpds control word) */
+static u32 own_pds0(const struct own_fw *f, const struct sgx_own_blob *b)
+{
+	unsigned int i;
+
+	for (i = 0; i < b->n_patch; i++) {
+		u16 index;
+		u8 kind, slot;
+		u32 addend;
+
+		sgx_own_patch_get(b, i, &index, &kind, &slot, &addend);
+		if (kind == SGX_OWN_PATCH_PDS && slot == 0)
+			return sgx_fw_limm_get(get_unaligned_le64(f->code + 8 * index));
+	}
+	return 0;
+}
+
+/* own_fw_new() with PDS #14's buffer (a 0x68-byte template and two code words) in its page */
+static struct own_fw *own_fw14_new(struct kunit *test)
+{
+	struct own_fw *f = own_fw_new(test, 4);
+	unsigned int i;
+
+	for (i = 0; i < F14_SIZE; i++)
+		f->f14img[i] = 0x11 + 3 * i;
+	f->fw.buffers[2] = (struct sgx_fw_buffer){ .id = F14_BUF, .heap = 2, .size = F14_SIZE,
+						   .align = 16, .image = f->f14img,
+						   .image_size = F14_SIZE };
+	f->fw.nbuffers = 3;
+	rec(f->recs + 4 * 16, F14_BUF, 0x00, 100, PDS_ADDEND);
+	rec(f->recs + 5 * 16, F14_BUF, 0x14, 101, PDS_ADDEND);
+	f->fw.patches.count = 6;
+	f->l.addr[F14_BUF] = F14_ADDR;
+	f->l.addr_set |= 1u << F14_BUF;
+	f->bufs[F14_BUF] = f->f14;
+	KUNIT_ASSERT_EQ(test, sgx_fw_build(&f->fw, &f->l, f->bufs), 0);
+	KUNIT_ASSERT_EQ(test, memcmp(f->pds, f->stock, PDS_SIZE), 0);
+	memcpy(f->stock14, f->f14, F14_ROOM);
+	return f;
+}
+
+static bool zero(const u8 *p, unsigned int from, unsigned int to)
+{
+	for (; from < to; from++)
+		if (p[from])
+			return false;
+	return true;
+}
+
+/*
+ * pdsat=fw14: the image the arm names at #14's base + 0x100, its words with U0, V0, V2; #14's
+ * own bytes unchanged; the rest of the slack zero (a stale word of ours too); the own page zero;
+ * pds0 the image's control word and pds1 the new address >> 4, 16-aligned. An arm back in the
+ * own page leaves the slack zero.
+ */
+static void sgxfive_owntask_test_apply_fw14(struct kunit *test)
+{
+	struct own_fw *f = own_fw14_new(test);
+	u8 *page = kunit_kzalloc(test, SGX_OWN_PDS_SIZE, GFP_KERNEL);
+	struct sgx_own_pds pds = { .image = page, .addr = OWN_PDS_ADDR, .v0 = OWN_V0, .v2 = OWN_V2,
+				   .fw14 = f->f14, .fw14_addr = F14_ADDR, .fw14_room = F14_ROOM };
+	struct sgx_own_blob b;
+	unsigned int i, seen;
+	u32 u0, at = F14_ADDR + 0x100;
+
+	KUNIT_ASSERT_NOT_NULL(test, page);
+	KUNIT_ASSERT_EQ(test, sgx_own_parse(own_ok_emitsb, sizeof(own_ok_emitsb), &b), 0);
+	u0 = sgx_own_pds_u0(sgx_own_entry(&b, 1));
+	memset(f->f14 + 0x400, 0xa5, 0x40);		/* a stale word in the slack */
+	memset(page, 0xa5, SGX_OWN_PDS_SIZE);
+	KUNIT_ASSERT_EQ(test, own_apply_pds(f, own_ok_emitsb, sizeof(own_ok_emitsb),
+					    "slots=0x1 entry=0 pds=crumb3 pdsat=fw14", &pds), 0);
+	KUNIT_EXPECT_EQ(test, pds.at, at);
+	KUNIT_EXPECT_EQ(test, pds.at & 15, 0u);
+	seen = 0;
+	for (i = 0; i < b.n_patch; i++) {
+		u16 index;
+		u8 kind, slot;
+		u32 addend, v;
+
+		sgx_own_patch_get(&b, i, &index, &kind, &slot, &addend);
+		if (kind != SGX_OWN_PATCH_PDS)
+			continue;
+		v = sgx_fw_limm_get(get_unaligned_le64(f->code + 8 * index));
+		KUNIT_EXPECT_EQ_MSG(test, v, slot == 0 ? 0x01800100u : slot == 1 ? at >> 4 : 0u,
+				    "pds%u", slot);
+		seen |= 1u << slot;
+	}
+	KUNIT_EXPECT_EQ(test, seen, 0x7u);
+	KUNIT_EXPECT_EQ(test, memcmp(f->f14, f->stock14, F14_SIZE), 0);	/* #14's own bytes */
+	KUNIT_EXPECT_TRUE(test, zero(f->f14, F14_SIZE, 0x100));
+	KUNIT_EXPECT_EQ(test, dw(f->f14, 0x100 + 4 * SGX_OWN_PDS_U0), u0);
+	KUNIT_EXPECT_EQ(test, dw(f->f14, 0x100 + 4 * SGX_OWN_PDS_V0), OWN_V0);
+	KUNIT_EXPECT_EQ(test, dw(f->f14, 0x100 + 4 * SGX_OWN_PDS_V2), OWN_V2);
+	KUNIT_EXPECT_EQ(test, dw(f->f14, 0x100 + 4 * 7), 0x005a3305u);
+	for (i = 8; i < 12; i++)
+		KUNIT_EXPECT_EQ_MSG(test, dw(f->f14, 0x100 + 4 * i), 0u, "dword %u", i);
+	for (i = 12; i < 19; i++)
+		KUNIT_EXPECT_EQ_MSG(test, dw(f->f14, 0x100 + 4 * i), sgx_own_pds_crumb3[i],
+				    "dword %u", i);
+	KUNIT_EXPECT_TRUE(test, zero(f->f14, 0x100 + 4 * 19, F14_ROOM));
+	KUNIT_EXPECT_TRUE(test, zero(page, 0, SGX_OWN_PDS_SIZE));
+	KUNIT_EXPECT_EQ(test, memcmp(f->pds, f->stock, PDS_SIZE) != 0, true);	/* slot 0 armed */
+	KUNIT_EXPECT_EQ(test, dw(f->pds, 4), 0x0804000fu);
+	/* crumb (2 rows) in the same place: v1's control word */
+	KUNIT_ASSERT_EQ(test, own_apply_pds(f, own_ok_emitsb, sizeof(own_ok_emitsb),
+					    "slots=0x1 entry=0 pds=crumb pdsat=fw14", &pds), 0);
+	KUNIT_EXPECT_EQ(test, pds.at, at);
+	KUNIT_EXPECT_EQ(test, dw(f->f14, 0x100 + 4 * 8), sgx_own_pds_crumb[8]);
+	KUNIT_EXPECT_TRUE(test, zero(f->f14, 0x100 + 4 * 15, F14_ROOM));
+	KUNIT_EXPECT_EQ(test, own_pds0(f, &b), 0x01000100u);
+	/* back in the own page: #14's slack zero, #14's bytes as the build left them */
+	KUNIT_ASSERT_EQ(test, own_apply_pds(f, own_ok_emitsb, sizeof(own_ok_emitsb),
+					    "slots=0x1 entry=0 pds=crumb", &pds), 0);
+	KUNIT_EXPECT_EQ(test, pds.at, OWN_PDS_ADDR);
+	KUNIT_EXPECT_EQ(test, memcmp(f->f14, f->stock14, F14_ROOM), 0);
+	KUNIT_EXPECT_EQ(test, dw(page, 4 * 7), 0x005a3305u);
+	/* a blob without the emit names nothing */
+	KUNIT_ASSERT_EQ(test, own_apply_pds(f, own_ok_mem, sizeof(own_ok_mem), "slots=0x1 entry=0",
+					    &pds), 0);
+	KUNIT_EXPECT_EQ(test, pds.at, 0u);
+}
+
+/*
+ * pdsat=fw14 refused, nothing written: a blob without the emitpds, no #14 page, no room in it,
+ * #14's buffer not in the firmware.
+ */
+static void sgxfive_owntask_test_apply_fw14_refusals(struct kunit *test)
+{
+	struct own_fw *f = own_fw14_new(test);
+	u8 *page = kunit_kzalloc(test, SGX_OWN_PDS_SIZE, GFP_KERNEL);
+	struct sgx_own_pds pds = { .image = page, .addr = OWN_PDS_ADDR, .v0 = OWN_V0, .v2 = OWN_V2,
+				   .fw14 = f->f14, .fw14_addr = F14_ADDR, .fw14_room = F14_ROOM };
+
+	KUNIT_ASSERT_NOT_NULL(test, page);
+	memset(page, 0x5a, SGX_OWN_PDS_SIZE);
+	memset(f->f14 + 0x100, 0xa5, 4);
+	memcpy(f->stock14, f->f14, F14_ROOM);
+	KUNIT_EXPECT_EQ(test, own_apply_pds(f, own_ok_mem, sizeof(own_ok_mem),
+					    "slots=0x1 entry=0 pdsat=fw14", &pds), -EINVAL);
+	KUNIT_EXPECT_EQ(test, own_apply_pds(f, own_ok_emitsn, sizeof(own_ok_emitsn),
+					    "slots=0x1 entry=0 pdsat=fw14", &pds), -EINVAL);
+	pds.fw14 = NULL;
+	KUNIT_EXPECT_EQ(test, own_apply_pds(f, own_ok_emitsb, sizeof(own_ok_emitsb),
+					    ARM14, &pds), -ENOENT);
+	pds.fw14 = f->f14;
+	pds.fw14_addr = 0;
+	KUNIT_EXPECT_EQ(test, own_apply_pds(f, own_ok_emitsb, sizeof(own_ok_emitsb),
+					    ARM14, &pds), -ENOENT);
+	pds.fw14_addr = F14_ADDR;
+	pds.fw14_room = 0x140;
+	KUNIT_EXPECT_EQ(test, own_apply_pds(f, own_ok_emitsb, sizeof(own_ok_emitsb),
+					    ARM14, &pds), -ERANGE);
+	pds.fw14_room = F14_ROOM;
+	f->fw.nbuffers = 2;				/* no #14 in the firmware */
+	KUNIT_EXPECT_EQ(test, own_apply_pds(f, own_ok_emitsb, sizeof(own_ok_emitsb),
+					    ARM14, &pds), -ENOENT);
+	KUNIT_EXPECT_EQ(test, memcmp(f->pds, f->stock, PDS_SIZE), 0);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le64(f->code), 0ull);
+	KUNIT_EXPECT_EQ(test, memcmp(f->f14, f->stock14, F14_ROOM), 0);
+	KUNIT_EXPECT_EQ(test, dw(page, 0), 0x5a5a5a5au);
+}
+
+/*
+ * The disarm: a recovery reset rebuilds the firmware's buffers, which rewrites #14's 0x68 bytes
+ * only (an image past them stays), then clears the slack: no word of ours is left in the page.
+ */
+static void sgxfive_owntask_test_fw14_disarm(struct kunit *test)
+{
+	struct own_fw *f = own_fw14_new(test);
+	u8 *page = kunit_kzalloc(test, SGX_OWN_PDS_SIZE, GFP_KERNEL);
+	struct sgx_own_pds pds = { .image = page, .addr = OWN_PDS_ADDR, .v0 = OWN_V0, .v2 = OWN_V2,
+				   .fw14 = f->f14, .fw14_addr = F14_ADDR, .fw14_room = F14_ROOM };
+
+	KUNIT_ASSERT_NOT_NULL(test, page);
+	KUNIT_ASSERT_EQ(test, own_apply_pds(f, own_ok_emitsb, sizeof(own_ok_emitsb),
+					    "slots=0x1 entry=0 pds=crumb3 pdsat=fw14", &pds), 0);
+	KUNIT_ASSERT_EQ(test, sgx_fw_build(&f->fw, &f->l, f->bufs), 0);
+	KUNIT_EXPECT_EQ(test, memcmp(f->pds, f->stock, PDS_SIZE), 0);
+	KUNIT_EXPECT_NE(test, dw(f->f14, 0x100 + 4 * 12), 0u);	/* the build leaves it */
+	sgx_own_fw14_clear(f->f14, F14_SIZE, F14_ROOM);
+	KUNIT_EXPECT_EQ(test, memcmp(f->f14, f->stock14, F14_ROOM), 0);
+	KUNIT_EXPECT_TRUE(test, zero(f->f14, F14_SIZE, F14_ROOM));
+	/* no page, or no slack: nothing to do */
+	sgx_own_fw14_clear(NULL, F14_SIZE, F14_ROOM);
+	sgx_own_fw14_clear(f->f14, F14_ROOM, F14_ROOM);
+	KUNIT_EXPECT_EQ(test, memcmp(f->f14, f->stock14, F14_ROOM), 0);
+}
+
+/* pds=halt in the own page: v1's control word, the halt image */
+static void sgxfive_owntask_test_apply_halt(struct kunit *test)
+{
+	struct own_fw *f = own_fw_new(test, 4);
+	u8 *page = kunit_kzalloc(test, SGX_OWN_PDS_SIZE, GFP_KERNEL);
+	struct sgx_own_pds pds = { .image = page, .addr = OWN_PDS_ADDR, .v0 = OWN_V0,
+				   .v2 = OWN_V2 };
+	struct sgx_own_blob b;
+
+	KUNIT_ASSERT_NOT_NULL(test, page);
+	KUNIT_ASSERT_EQ(test, sgx_own_parse(own_ok_emitsb, sizeof(own_ok_emitsb), &b), 0);
+	KUNIT_ASSERT_EQ(test, own_apply_pds(f, own_ok_emitsb, sizeof(own_ok_emitsb),
+					    "slots=0x1 entry=0 pds=halt", &pds), 0);
+	KUNIT_EXPECT_EQ(test, pds.at, OWN_PDS_ADDR);
+	KUNIT_EXPECT_EQ(test, dw(page, 4 * 8), 0xaf000000u);
+	KUNIT_EXPECT_TRUE(test, zero(page, 4 * 9, SGX_OWN_PDS_SIZE));
+	KUNIT_EXPECT_EQ(test, own_pds0(f, &b), 0x01000100u);
+}
+
 static struct kunit_case sgxfive_owntask_test_cases[] = {
 	KUNIT_CASE(sgxfive_owntask_test_accepts_our_blobs),
 	KUNIT_CASE(sgxfive_owntask_test_refuses_crafted_blobs),
@@ -891,6 +1250,12 @@ static struct kunit_case sgxfive_owntask_test_cases[] = {
 	KUNIT_CASE(sgxfive_owntask_test_apply_emit_image),
 	KUNIT_CASE(sgxfive_owntask_test_apply_emit),
 	KUNIT_CASE(sgxfive_owntask_test_emit_refusals),
+	KUNIT_CASE(sgxfive_owntask_test_pds_build_halt_crumb3),
+	KUNIT_CASE(sgxfive_owntask_test_fw14_off),
+	KUNIT_CASE(sgxfive_owntask_test_apply_fw14),
+	KUNIT_CASE(sgxfive_owntask_test_apply_fw14_refusals),
+	KUNIT_CASE(sgxfive_owntask_test_fw14_disarm),
+	KUNIT_CASE(sgxfive_owntask_test_apply_halt),
 	{}
 };
 

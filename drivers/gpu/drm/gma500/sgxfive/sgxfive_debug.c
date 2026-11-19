@@ -1003,6 +1003,11 @@ bool sgxfive_debug_reset(struct sgxfive *sgx)
 	sgxfive_debug_disarm(sgx);
 	/* the stock firmware is back: nothing of ours is armed (the blob stays) */
 	WRITE_ONCE(sgx->own.armed, false);
+	/* the build rewrote PDS #14's buffer only: an image pdsat=fw14 put past it goes too */
+	if (sgx_fw_buffer(&sgx->fw, SGXFIVE_OWN_FW14_BUF))
+		sgx_own_fw14_clear(sgx->buf[SGXFIVE_OWN_FW14_BUF].va,
+				   sgx_fw_buffer(&sgx->fw, SGXFIVE_OWN_FW14_BUF)->size,
+				   sgx->buf[SGXFIVE_OWN_FW14_BUF].npages * PAGE_SIZE);
 	for (i = 0; i < XB_COUNT; i++)
 		if (sgx->xt.buf[i].va)
 			memset(sgx->xt.buf[i].va, 0, sgxfive_xbuf[i].size);
@@ -2145,8 +2150,8 @@ static int sgxfive_own_arm_show(struct seq_file *m, void *unused)
 		seq_printf(m, " trc=%u", a.trc);
 	else
 		seq_puts(m, " trc=stock");
-	seq_printf(m, " trc_hazard=%d pds=%s blob=%zu\n", a.trc_hazard, sgx_own_img_name(a.img),
-		   len);
+	seq_printf(m, " trc_hazard=%d pds=%s pdsat=%s blob=%zu\n", a.trc_hazard,
+		   sgx_own_img_name(a.img), sgx_own_at_name(a.at), len);
 	return 0;
 }
 
@@ -2168,8 +2173,14 @@ int sgxfive_debug_own_apply(struct sgxfive *sgx, u8 *const bufs[])
 {
 	struct sgxfive_own *own = &sgx->own;
 	u8 digest[SHA256_DIGEST_SIZE];
+	bool has14 = sgx_fw_buffer(&sgx->fw, SGXFIVE_OWN_FW14_BUF);
+	struct sgxfive_buf *b14 = &sgx->buf[SGXFIVE_OWN_FW14_BUF];
+	/* the own page, and PDS #14's page as the load mapped it (pdsat=fw14) */
 	struct sgx_own_pds pds = {
 		.image = sgx->xt.buf[XB_OWNPDS].va, .addr = sgx->xt.buf[XB_OWNPDS].addr,
+		.fw14 = has14 ? bufs[SGXFIVE_OWN_FW14_BUF] : NULL,
+		.fw14_addr = has14 ? b14->addr : 0,
+		.fw14_room = has14 ? b14->npages * PAGE_SIZE : 0,
 	};
 	struct sgx_own_arm arm;
 	struct sgx_own_blob b;
@@ -2205,9 +2216,9 @@ int sgxfive_debug_own_apply(struct sgxfive *sgx, u8 *const bufs[])
 	if (ret)
 		drm_err(sgx->dev, "sgxfive: own task not armed: %d\n", ret);
 	else
-		drm_info(sgx->dev, "sgxfive: own task armed: slots %#x, trc %u (0: stock), exit %#x (0: unknown), emit image %#x (0: none) pds=%s (debugfs own_arm)\n",
-			 own->arm.slots, own->arm.trc, arm.exit_index,
-			 sgx_own_has_emit(&b) ? pds.addr : 0, sgx_own_img_name(own->arm.img));
+		drm_info(sgx->dev, "sgxfive: own task armed: slots %#x, trc %u (0: stock), exit %#x (0: unknown), emit image %#x (0: none) pds=%s pdsat=%s (debugfs own_arm)\n",
+			 own->arm.slots, own->arm.trc, arm.exit_index, pds.at,
+			 sgx_own_img_name(own->arm.img), sgx_own_at_name(own->arm.at));
 	return ret;
 }
 
