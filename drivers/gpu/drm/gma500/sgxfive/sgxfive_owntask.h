@@ -100,6 +100,38 @@ enum sgx_own_img {
 	SGX_OWN_IMG_COUNT,
 };
 
+/*
+ * The emit's word (round 39, N3d row Z): own, the default, the one above; fw14, the same word with
+ * the 14-bit sideband of the firmware's own PDS #14 emit, 0x0843 (sgx_own_regs.h's emitpds-fw14
+ * row; resgx545's N3d O1: the only field of #14's emit that differs from ours). A blob holds at
+ * most one emitpds of either word (the verifier's one-emit rules hold across both); own_arm's
+ * form= must name the word the blob holds.
+ */
+enum sgx_own_form {
+	SGX_OWN_FORM_OWN,
+	SGX_OWN_FORM_FW14,
+	SGX_OWN_FORM_COUNT,
+};
+
+/*
+ * The emit's s2, the blob's pds2 limm (round 39): 0, the default, as before; req, the request
+ * #14's own emit carries in s2 on a render kick (0x00020000, resgx545's N3d O2a and E1130).
+ */
+enum sgx_own_pds2 {
+	SGX_OWN_PDS2_ZERO,
+	SGX_OWN_PDS2_REQ,
+	SGX_OWN_PDS2_COUNT,
+};
+
+#define SGX_OWN_PDS2_REQ_VALUE	0x00020000u
+
+/* own_arm's name of an emit word ("own", "fw14"; "?" for none) */
+const char *sgx_own_form_name(unsigned int form);
+/* own_arm's name of a pds2 value ("0", "req"; "?" for none) */
+const char *sgx_own_pds2_name(unsigned int v);
+/* the value the arm writes in the pds2 limm (0 for none) */
+u32 sgx_own_pds2_value(unsigned int v);
+
 /* own_arm's name of an image ("v1", "crumb", "halt", "crumb3"; "?" for none) */
 const char *sgx_own_img_name(unsigned int img);
 /* own_arm's name of a place ("own", "fw14"; "?" for none) */
@@ -146,8 +178,10 @@ int sgx_own_parse(const u8 *data, size_t len, struct sgx_own_blob *b);
 int sgx_own_verify(const struct sgx_own_blob *b, const char **why);
 
 u64 sgx_own_insn(const struct sgx_own_blob *b, unsigned int i);
-/* whether the blob holds the emitpds word (a verified blob: at most one) */
+/* whether the blob holds an emitpds word, of either form (a verified blob: at most one) */
 bool sgx_own_has_emit(const struct sgx_own_blob *b);
+/* the form of the blob's emitpds word, SGX_OWN_FORM_COUNT for none */
+unsigned int sgx_own_emit_form(const struct sgx_own_blob *b);
 u16 sgx_own_entry(const struct sgx_own_blob *b, unsigned int i);
 void sgx_own_patch_get(const struct sgx_own_blob *b, unsigned int i, u16 *index, u8 *kind,
 		       u8 *slot, u32 *addend);
@@ -175,6 +209,8 @@ struct sgx_own_arm {
 	bool trc_hazard;
 	u8 img;				/* the emitpds image (enum sgx_own_img): pds=, v1 if not given */
 	u8 at;				/* where it sits (enum sgx_own_at): pdsat=, own if none */
+	u8 pds2;			/* the emit's s2 (enum sgx_own_pds2): pds2=, 0 if none */
+	u8 form;			/* the emit's word (enum sgx_own_form): form=, own if none */
 	u32 exit_index;			/* the shared exit's ukernel index, set by the load (not by
 					 * own_arm): 0, unknown, refuses a cont4 patch */
 };
@@ -195,7 +231,7 @@ u32 sgx_own_exit_index(const u8 *digest);
 
 /*
  * "slots=<mask> entry=<n>,<n>.. [trc=<t>] [trc_hazard=1] [pds=v1|crumb|halt|crumb3]
- * [pdsat=own|fw14]"
+ * [pdsat=own|fw14] [pds2=0|req] [form=own|fw14]"
  */
 int sgx_own_arm_parse(const char *line, struct sgx_own_arm *a);
 /*
@@ -206,7 +242,8 @@ int sgx_own_arm_parse(const char *line, struct sgx_own_arm *a);
  * pdsat=fw14 needs a blob with the emitpds (-EINVAL), PDS #14's buffer in pds->fw14 (-ENOENT) and
  * room for the image past it (-ERANGE), nothing written otherwise; the image is then written
  * there and the own page cleared. #14's slack is cleared whenever pds->fw14 is given. pds->at is
- * the address the emit names (0: none).
+ * the address the emit names (0: none). pds2=req and form=fw14 need a blob with the emitpds, and
+ * form= the word the blob holds (-EINVAL, nothing written); the pds2 limm is pds2='s value.
  */
 int sgx_own_apply(const struct sgx_own_blob *b, const struct sgx_own_arm *a,
 		  const struct sgx_fw *fw, const struct sgx_fw_layout *l, unsigned int pds_buf,

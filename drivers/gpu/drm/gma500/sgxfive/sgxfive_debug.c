@@ -2150,8 +2150,9 @@ static int sgxfive_own_arm_show(struct seq_file *m, void *unused)
 		seq_printf(m, " trc=%u", a.trc);
 	else
 		seq_puts(m, " trc=stock");
-	seq_printf(m, " trc_hazard=%d pds=%s pdsat=%s blob=%zu\n", a.trc_hazard,
-		   sgx_own_img_name(a.img), sgx_own_at_name(a.at), len);
+	seq_printf(m, " trc_hazard=%d pds=%s pdsat=%s pds2=%s form=%s blob=%zu\n", a.trc_hazard,
+		   sgx_own_img_name(a.img), sgx_own_at_name(a.at), sgx_own_pds2_name(a.pds2),
+		   sgx_own_form_name(a.form), len);
 	return 0;
 }
 
@@ -2216,9 +2217,10 @@ int sgxfive_debug_own_apply(struct sgxfive *sgx, u8 *const bufs[])
 	if (ret)
 		drm_err(sgx->dev, "sgxfive: own task not armed: %d\n", ret);
 	else
-		drm_info(sgx->dev, "sgxfive: own task armed: slots %#x, trc %u (0: stock), exit %#x (0: unknown), emit image %#x (0: none) pds=%s pdsat=%s (debugfs own_arm)\n",
+		drm_info(sgx->dev, "sgxfive: own task armed: slots %#x, trc %u (0: stock), exit %#x (0: unknown), emit image %#x (0: none) pds=%s pdsat=%s pds2=%s form=%s (debugfs own_arm)\n",
 			 own->arm.slots, own->arm.trc, arm.exit_index, pds.at,
-			 sgx_own_img_name(own->arm.img), sgx_own_at_name(own->arm.at));
+			 sgx_own_img_name(own->arm.img), sgx_own_at_name(own->arm.at),
+			 sgx_own_pds2_name(own->arm.pds2), sgx_own_form_name(own->arm.form));
 	return ret;
 }
 

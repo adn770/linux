@@ -597,6 +597,39 @@ static void sgxfive_owntask_test_arm_parse(struct kunit *test)
 	KUNIT_EXPECT_STREQ(test, sgx_own_at_name(SGX_OWN_AT_OWN), "own");
 	KUNIT_EXPECT_STREQ(test, sgx_own_at_name(SGX_OWN_AT_FW14), "fw14");
 	KUNIT_EXPECT_STREQ(test, sgx_own_at_name(SGX_OWN_AT_COUNT), "?");
+	/* round 39: the emit's s2, pds2=0 (the default) or req, and its word, form=own or fw14 */
+	KUNIT_ASSERT_EQ(test, sgx_own_arm_parse("slots=1 entry=0", &a), 0);
+	KUNIT_EXPECT_EQ(test, (int)a.pds2, SGX_OWN_PDS2_ZERO);
+	KUNIT_EXPECT_EQ(test, (int)a.form, SGX_OWN_FORM_OWN);
+	KUNIT_ASSERT_EQ(test, sgx_own_arm_parse(ARM14 " pds2=req form=fw14", &a), 0);
+	KUNIT_EXPECT_EQ(test, (int)a.img, SGX_OWN_IMG_CRUMB3);
+	KUNIT_EXPECT_EQ(test, (int)a.at, SGX_OWN_AT_FW14);
+	KUNIT_EXPECT_EQ(test, (int)a.pds2, SGX_OWN_PDS2_REQ);
+	KUNIT_EXPECT_EQ(test, (int)a.form, SGX_OWN_FORM_FW14);
+	KUNIT_ASSERT_EQ(test, sgx_own_arm_parse("slots=1 entry=0 pds2=req", &a), 0);
+	KUNIT_EXPECT_EQ(test, (int)a.pds2, SGX_OWN_PDS2_REQ);
+	KUNIT_EXPECT_EQ(test, (int)a.form, SGX_OWN_FORM_OWN);
+	KUNIT_ASSERT_EQ(test, sgx_own_arm_parse("slots=1 entry=0 form=fw14 pds2=0", &a), 0);
+	KUNIT_EXPECT_EQ(test, (int)a.pds2, SGX_OWN_PDS2_ZERO);
+	KUNIT_EXPECT_EQ(test, (int)a.form, SGX_OWN_FORM_FW14);
+	KUNIT_ASSERT_EQ(test, sgx_own_arm_parse("slots=1 entry=0 form=own", &a), 0);
+	KUNIT_EXPECT_EQ(test, (int)a.form, SGX_OWN_FORM_OWN);
+	KUNIT_EXPECT_EQ(test, sgx_own_arm_parse("slots=1 entry=0 pds2=", &a), -EINVAL);
+	KUNIT_EXPECT_EQ(test, sgx_own_arm_parse("slots=1 entry=0 pds2=1", &a), -EINVAL);
+	KUNIT_EXPECT_EQ(test, sgx_own_arm_parse("slots=1 entry=0 pds2=0x20000", &a), -EINVAL);
+	KUNIT_EXPECT_EQ(test, sgx_own_arm_parse("slots=1 entry=0 pds2=REQ", &a), -EINVAL);
+	KUNIT_EXPECT_EQ(test, sgx_own_arm_parse("slots=1 entry=0 form=", &a), -EINVAL);
+	KUNIT_EXPECT_EQ(test, sgx_own_arm_parse("slots=1 entry=0 form=fw11", &a), -EINVAL);
+	KUNIT_EXPECT_EQ(test, sgx_own_arm_parse("slots=1 entry=0 form=0x843", &a), -EINVAL);
+	KUNIT_EXPECT_STREQ(test, sgx_own_pds2_name(SGX_OWN_PDS2_ZERO), "0");
+	KUNIT_EXPECT_STREQ(test, sgx_own_pds2_name(SGX_OWN_PDS2_REQ), "req");
+	KUNIT_EXPECT_STREQ(test, sgx_own_pds2_name(SGX_OWN_PDS2_COUNT), "?");
+	KUNIT_EXPECT_EQ(test, sgx_own_pds2_value(SGX_OWN_PDS2_ZERO), 0u);
+	KUNIT_EXPECT_EQ(test, sgx_own_pds2_value(SGX_OWN_PDS2_REQ), 0x00020000u);
+	KUNIT_EXPECT_EQ(test, sgx_own_pds2_value(SGX_OWN_PDS2_COUNT), 0u);
+	KUNIT_EXPECT_STREQ(test, sgx_own_form_name(SGX_OWN_FORM_OWN), "own");
+	KUNIT_EXPECT_STREQ(test, sgx_own_form_name(SGX_OWN_FORM_FW14), "fw14");
+	KUNIT_EXPECT_STREQ(test, sgx_own_form_name(SGX_OWN_FORM_COUNT), "?");
 }
 
 /* own_res: dword aligned writes that leave dword 0, the kernel's header, alone */
@@ -876,6 +909,8 @@ static void sgxfive_owntask_test_emit_refusals(struct kunit *test)
 {
 	static const struct { const u8 *data; size_t len; const char *why; } c[] = {
 		{ own_bad_emitpds_sideband, sizeof(own_bad_emitpds_sideband), SGX_OWN_WHY_UNKNOWN },
+		{ own_bad_emitpds_sideband_11, sizeof(own_bad_emitpds_sideband_11),
+		  SGX_OWN_WHY_UNKNOWN },
 		{ own_bad_emitpds_unpatched, sizeof(own_bad_emitpds_unpatched), SGX_OWN_WHY_EMIT_ARGS },
 		{ own_bad_emitpds_one_path, sizeof(own_bad_emitpds_one_path), SGX_OWN_WHY_EMIT_ARGS },
 		{ own_bad_emitpds_twice, sizeof(own_bad_emitpds_twice), SGX_OWN_WHY_EMIT_ONCE },
@@ -1224,6 +1259,145 @@ static void sgxfive_owntask_test_apply_halt(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, own_pds0(f, &b), 0x01000100u);
 }
 
+/* ---- round 39 (N3d row Z): the emit's s2 and its second word ---------------------------------- */
+#define OWN_FW14_WORD	0xfb20b10800c08184ULL	/* the emitpds-fw14 row: sideband 0x0843 */
+
+/* the value the arm wrote in the blob's pds<slot> limm */
+static u32 own_pdsn(const struct own_fw *f, const struct sgx_own_blob *b, u8 want)
+{
+	unsigned int i;
+
+	for (i = 0; i < b->n_patch; i++) {
+		u16 index;
+		u8 kind, slot;
+		u32 addend;
+
+		sgx_own_patch_get(b, i, &index, &kind, &slot, &addend);
+		if (kind == SGX_OWN_PATCH_PDS && slot == want)
+			return sgx_fw_limm_get(get_unaligned_le64(f->code + 8 * index));
+	}
+	return 0xdeadbeef;
+}
+
+/*
+ * The second word is an emitpds as the first (the verifier's one-emit rules hold across both): a
+ * blob with it has the emit, of form fw14; emitsk's word is the first, of form own; a blob
+ * without an emit has none. Two emits, one of each word, are two.
+ */
+static void sgxfive_owntask_test_emit_form(struct kunit *test)
+{
+	struct sgx_own_blob b;
+	unsigned int i, n = 0;
+	const char *why = "";
+
+	KUNIT_ASSERT_EQ(test, sgx_own_parse(own_ok_emitsk14, sizeof(own_ok_emitsk14), &b), 0);
+	KUNIT_EXPECT_EQ(test, sgx_own_verify(&b, &why), 0);
+	KUNIT_EXPECT_TRUE(test, sgx_own_has_emit(&b));
+	KUNIT_EXPECT_EQ(test, sgx_own_emit_form(&b), (unsigned int)SGX_OWN_FORM_FW14);
+	for (i = 0; i < b.n_insn; i++)
+		n += sgx_own_insn(&b, i) == OWN_FW14_WORD;
+	KUNIT_EXPECT_EQ(test, n, 1u);
+	KUNIT_ASSERT_EQ(test, sgx_own_parse(own_ok_emitsk, sizeof(own_ok_emitsk), &b), 0);
+	KUNIT_EXPECT_TRUE(test, sgx_own_has_emit(&b));
+	KUNIT_EXPECT_EQ(test, sgx_own_emit_form(&b), (unsigned int)SGX_OWN_FORM_OWN);
+	KUNIT_ASSERT_EQ(test, sgx_own_parse(own_ok_emitsn, sizeof(own_ok_emitsn), &b), 0);
+	KUNIT_EXPECT_FALSE(test, sgx_own_has_emit(&b));
+	KUNIT_EXPECT_EQ(test, sgx_own_emit_form(&b), (unsigned int)SGX_OWN_FORM_COUNT);
+}
+
+/*
+ * pds2=req: the arm writes 0x00020000 in the blob's pds2 limm (s2), pds0 and pds1 as before;
+ * form=fw14 arms a blob whose emit is the second word. Both with crumb3 in #14's page: row Z.
+ */
+static void sgxfive_owntask_test_apply_pds2_form(struct kunit *test)
+{
+	struct own_fw *f = own_fw14_new(test);
+	u8 *page = kunit_kzalloc(test, SGX_OWN_PDS_SIZE, GFP_KERNEL);
+	struct sgx_own_pds pds = { .image = page, .addr = OWN_PDS_ADDR, .v0 = OWN_V0, .v2 = OWN_V2,
+				   .fw14 = f->f14, .fw14_addr = F14_ADDR, .fw14_room = F14_ROOM };
+	struct sgx_own_blob b;
+	unsigned int i, n;
+	u32 at = F14_ADDR + 0x100;
+
+	KUNIT_ASSERT_NOT_NULL(test, page);
+	KUNIT_ASSERT_EQ(test, sgx_own_parse(own_ok_emitsk14, sizeof(own_ok_emitsk14), &b), 0);
+	KUNIT_ASSERT_EQ(test, own_apply_pds(f, own_ok_emitsk14, sizeof(own_ok_emitsk14),
+					    ARM14 " pds2=req form=fw14", &pds), 0);
+	KUNIT_EXPECT_EQ(test, own_pdsn(f, &b, 0), 0x01800100u);
+	KUNIT_EXPECT_EQ(test, own_pdsn(f, &b, 1), at >> 4);
+	KUNIT_EXPECT_EQ(test, own_pdsn(f, &b, 2), 0x00020000u);
+	KUNIT_EXPECT_EQ(test, pds.at, at);
+	KUNIT_EXPECT_EQ(test, dw(f->f14, 0x100 + 4 * SGX_OWN_PDS_U0),
+			sgx_own_pds_u0(sgx_own_entry(&b, 1)));
+	KUNIT_EXPECT_EQ(test, dw(f->pds, 4), 0x0804000fu);		/* slot 0, entry 0 */
+	/* the emit word itself is the blob's: the arm patches limms only */
+	for (i = 0, n = 0; i < b.n_insn; i++)
+		n += get_unaligned_le64(f->code + 8 * i) == OWN_FW14_WORD;
+	KUNIT_EXPECT_EQ(test, n, 1u);
+	/* the second word at pds2=0: s2 0 */
+	KUNIT_ASSERT_EQ(test, own_apply_pds(f, own_ok_emitsk14, sizeof(own_ok_emitsk14),
+					    ARM14 " form=fw14", &pds), 0);
+	KUNIT_EXPECT_EQ(test, own_pdsn(f, &b, 2), 0u);
+	/* the first word at pds2=req, its own place and image */
+	KUNIT_ASSERT_EQ(test, sgx_own_parse(own_ok_emitsk, sizeof(own_ok_emitsk), &b), 0);
+	KUNIT_ASSERT_EQ(test, own_apply_pds(f, own_ok_emitsk, sizeof(own_ok_emitsk),
+					    "slots=0x1 entry=0 pds2=req", &pds), 0);
+	KUNIT_EXPECT_EQ(test, own_pdsn(f, &b, 0), (u32)SGX_OWN_PDS_CTL);
+	KUNIT_EXPECT_EQ(test, own_pdsn(f, &b, 1), OWN_PDS_ADDR >> 4);
+	KUNIT_EXPECT_EQ(test, own_pdsn(f, &b, 2), 0x00020000u);
+	KUNIT_ASSERT_EQ(test, own_apply_pds(f, own_ok_emitsk, sizeof(own_ok_emitsk),
+					    "slots=0x1 entry=0", &pds), 0);
+	KUNIT_EXPECT_EQ(test, own_pdsn(f, &b, 2), 0u);
+}
+
+/*
+ * Refused, nothing written: the second word without form=fw14, form=fw14 for the first word,
+ * pds2=req or form=fw14 for a blob without the emit; an arm with indices no line gives.
+ */
+static void sgxfive_owntask_test_apply_pds2_form_refusals(struct kunit *test)
+{
+	struct own_fw *f = own_fw14_new(test);
+	u8 *page = kunit_kzalloc(test, SGX_OWN_PDS_SIZE, GFP_KERNEL);
+	struct sgx_own_pds pds = { .image = page, .addr = OWN_PDS_ADDR, .v0 = OWN_V0, .v2 = OWN_V2,
+				   .fw14 = f->f14, .fw14_addr = F14_ADDR, .fw14_room = F14_ROOM };
+	struct sgx_own_arm a;
+	struct sgx_own_blob b;
+
+	KUNIT_ASSERT_NOT_NULL(test, page);
+	memset(page, 0x5a, SGX_OWN_PDS_SIZE);
+	memset(f->f14 + 0x100, 0xa5, 4);
+	memcpy(f->stock14, f->f14, F14_ROOM);
+	KUNIT_EXPECT_EQ(test, own_apply_pds(f, own_ok_emitsk14, sizeof(own_ok_emitsk14),
+					    ARM14, &pds), -EINVAL);
+	KUNIT_EXPECT_EQ(test, own_apply_pds(f, own_ok_emitsk14, sizeof(own_ok_emitsk14),
+					    ARM14 " pds2=req", &pds), -EINVAL);
+	KUNIT_EXPECT_EQ(test, own_apply_pds(f, own_ok_emitsk14, sizeof(own_ok_emitsk14),
+					    ARM14 " form=own", &pds), -EINVAL);
+	KUNIT_EXPECT_EQ(test, own_apply_pds(f, own_ok_emitsk, sizeof(own_ok_emitsk),
+					    ARM14 " form=fw14", &pds), -EINVAL);
+	KUNIT_EXPECT_EQ(test, own_apply_pds(f, own_ok_emitsb, sizeof(own_ok_emitsb),
+					    "slots=0x1 entry=0 pds2=req form=fw14", &pds), -EINVAL);
+	KUNIT_EXPECT_EQ(test, own_apply_pds(f, own_ok_mem, sizeof(own_ok_mem),
+					    "slots=0x1 entry=0 pds2=req", &pds), -EINVAL);
+	KUNIT_EXPECT_EQ(test, own_apply_pds(f, own_ok_mem, sizeof(own_ok_mem),
+					    "slots=0x1 entry=0 form=fw14", &pds), -EINVAL);
+	KUNIT_EXPECT_EQ(test, own_apply_pds(f, own_ok_emitsn, sizeof(own_ok_emitsn),
+					    "slots=0x1 entry=0 pds2=req", &pds), -EINVAL);
+	KUNIT_ASSERT_EQ(test, sgx_own_parse(own_ok_emitsk14, sizeof(own_ok_emitsk14), &b), 0);
+	KUNIT_ASSERT_EQ(test, sgx_own_arm_parse(ARM14 " pds2=req form=fw14", &a), 0);
+	a.pds2 = SGX_OWN_PDS2_COUNT;
+	KUNIT_EXPECT_EQ(test, sgx_own_apply(&b, &a, &f->fw, &f->l, PDS_BUF, f->pds, PDS_SIZE,
+					    f->code, 0x32140000, &pds), -EINVAL);
+	a.pds2 = SGX_OWN_PDS2_REQ;
+	a.form = SGX_OWN_FORM_COUNT;
+	KUNIT_EXPECT_EQ(test, sgx_own_apply(&b, &a, &f->fw, &f->l, PDS_BUF, f->pds, PDS_SIZE,
+					    f->code, 0x32140000, &pds), -EINVAL);
+	KUNIT_EXPECT_EQ(test, memcmp(f->pds, f->stock, PDS_SIZE), 0);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le64(f->code), 0ull);
+	KUNIT_EXPECT_EQ(test, memcmp(f->f14, f->stock14, F14_ROOM), 0);
+	KUNIT_EXPECT_EQ(test, dw(page, 0), 0x5a5a5a5au);
+}
+
 static struct kunit_case sgxfive_owntask_test_cases[] = {
 	KUNIT_CASE(sgxfive_owntask_test_accepts_our_blobs),
 	KUNIT_CASE(sgxfive_owntask_test_refuses_crafted_blobs),
@@ -1256,6 +1430,9 @@ static struct kunit_case sgxfive_owntask_test_cases[] = {
 	KUNIT_CASE(sgxfive_owntask_test_apply_fw14_refusals),
 	KUNIT_CASE(sgxfive_owntask_test_fw14_disarm),
 	KUNIT_CASE(sgxfive_owntask_test_apply_halt),
+	KUNIT_CASE(sgxfive_owntask_test_emit_form),
+	KUNIT_CASE(sgxfive_owntask_test_apply_pds2_form),
+	KUNIT_CASE(sgxfive_owntask_test_apply_pds2_form_refusals),
 	{}
 };
 

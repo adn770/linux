@@ -89,6 +89,7 @@ static const struct { u64 mask, value; u8 kind; } sgx_own_forms[] __maybe_unused
 	{ 0xfffefcf3cfff4000ULL, 0x48081081000c0000ULL, SGX_OWN_PLAIN },	/* alu-test */
 	{ 0xffffffffffffffffULL, 0xd002008081020089ULL, SGX_OWN_IMA32 },	/* ima32 */
 	{ 0xffffffffffffffffULL, 0xfb20b00000008184ULL, SGX_OWN_EMITPDS },	/* emitpds-own */
+	{ 0xffffffffffffffffULL, 0xfb20b10800c08184ULL, SGX_OWN_EMITPDS },	/* emitpds-fw14 */
 	{ 0xfffffffff000007fULL, 0xe82b0002a0000000ULL, SGX_OWN_LOAD_ABS },	/* ldad */
 	{ 0xffffffffffe00000ULL, 0xf022000080000000ULL, SGX_OWN_STORE_ABS },	/* stad */
 	{ 0xfffffffff0003f80ULL, 0xfe21000020000000ULL, SGX_OWN_LDR },	/* ldr-imm */

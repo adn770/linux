@@ -59,6 +59,7 @@ static unsigned int own_mov_pclink_src(u64 w)
 #define OWN_TOP		0xffff		/* a register of the base analysis that holds no page offset */
 #define OWN_PDS_STATE	0xfff0		/* + slot: the register holds the overlay's pds<slot> value */
 #define OWN_EMIT_WORD	0xfb20b00000008184ULL	/* the emitpds-own row's one word */
+#define OWN_EMIT_FW14	0xfb20b10800c08184ULL	/* the emitpds-fw14 row's: sideband 0x0843 */
 
 /* the registers the emitpds word reads, s0 to s2 */
 static const u8 own_emit_regs[SGX_OWN_PDS_SLOTS] = { 2, 3, 4 };
@@ -117,12 +118,22 @@ u64 sgx_own_insn(const struct sgx_own_blob *b, unsigned int i)
 
 bool sgx_own_has_emit(const struct sgx_own_blob *b)
 {
-	unsigned int i;
+	return sgx_own_emit_form(b) != SGX_OWN_FORM_COUNT;
+}
 
-	for (i = 0; i < b->n_insn; i++)
-		if (sgx_own_insn(b, i) == OWN_EMIT_WORD)
-			return true;
-	return false;
+unsigned int sgx_own_emit_form(const struct sgx_own_blob *b)
+{
+	unsigned int i;
+	u64 w;
+
+	for (i = 0; i < b->n_insn; i++) {
+		w = sgx_own_insn(b, i);
+		if (w == OWN_EMIT_WORD)
+			return SGX_OWN_FORM_OWN;
+		if (w == OWN_EMIT_FW14)
+			return SGX_OWN_FORM_FW14;
+	}
+	return SGX_OWN_FORM_COUNT;
 }
 
 u16 sgx_own_entry(const struct sgx_own_blob *b, unsigned int i)
@@ -548,6 +559,20 @@ int sgx_own_arm_parse(const char *line, struct sgx_own_arm *a)
 			if (v == SGX_OWN_AT_COUNT)
 				return -EINVAL;
 			a->at = v;
+		} else if (!strncmp(tok, "pds2=", 5)) {
+			for (v = 0; v < SGX_OWN_PDS2_COUNT; v++)
+				if (!strcmp(tok + 5, sgx_own_pds2_name(v)))
+					break;
+			if (v == SGX_OWN_PDS2_COUNT)
+				return -EINVAL;
+			a->pds2 = v;
+		} else if (!strncmp(tok, "form=", 5)) {
+			for (v = 0; v < SGX_OWN_FORM_COUNT; v++)
+				if (!strcmp(tok + 5, sgx_own_form_name(v)))
+					break;
+			if (v == SGX_OWN_FORM_COUNT)
+				return -EINVAL;
+			a->form = v;
 		} else {
 			return -EINVAL;
 		}
@@ -595,6 +620,34 @@ static const char *const sgx_own_ats[SGX_OWN_AT_COUNT] = {
 const char *sgx_own_img_name(unsigned int img)
 {
 	return img < SGX_OWN_IMG_COUNT ? sgx_own_imgs[img].name : "?";
+}
+
+static const char *const sgx_own_forms_names[SGX_OWN_FORM_COUNT] = {
+	[SGX_OWN_FORM_OWN] = "own",
+	[SGX_OWN_FORM_FW14] = "fw14",
+};
+
+static const struct {
+	const char *name;
+	u32 value;
+} sgx_own_pds2s[SGX_OWN_PDS2_COUNT] = {
+	[SGX_OWN_PDS2_ZERO] = { "0", 0 },
+	[SGX_OWN_PDS2_REQ] = { "req", SGX_OWN_PDS2_REQ_VALUE },
+};
+
+const char *sgx_own_form_name(unsigned int form)
+{
+	return form < SGX_OWN_FORM_COUNT ? sgx_own_forms_names[form] : "?";
+}
+
+const char *sgx_own_pds2_name(unsigned int v)
+{
+	return v < SGX_OWN_PDS2_COUNT ? sgx_own_pds2s[v].name : "?";
+}
+
+u32 sgx_own_pds2_value(unsigned int v)
+{
+	return v < SGX_OWN_PDS2_COUNT ? sgx_own_pds2s[v].value : 0;
 }
 
 const char *sgx_own_at_name(unsigned int at)
@@ -696,7 +749,13 @@ int sgx_own_apply(const struct sgx_own_blob *b, const struct sgx_own_arm *a,
 		return -ENOENT;
 	if (emit && (!pds->addr || (pds->addr & 15)))
 		return -EINVAL;
-	if (a->img >= SGX_OWN_IMG_COUNT || a->at >= SGX_OWN_AT_COUNT)
+	if (a->img >= SGX_OWN_IMG_COUNT || a->at >= SGX_OWN_AT_COUNT ||
+	    a->pds2 >= SGX_OWN_PDS2_COUNT || a->form >= SGX_OWN_FORM_COUNT)
+		return -EINVAL;
+	/* pds2= and form= name the emit: none for a blob without it, form= the word it holds */
+	if (!emit && (a->pds2 != SGX_OWN_PDS2_ZERO || a->form != SGX_OWN_FORM_OWN))
+		return -EINVAL;
+	if (emit && sgx_own_emit_form(b) != a->form)
 		return -EINVAL;
 	/* pdsat=fw14: a blob that emits, #14's page, and room for the image in its slack */
 	if (a->at == SGX_OWN_AT_FW14) {
@@ -764,7 +823,8 @@ int sgx_own_apply(const struct sgx_own_blob *b, const struct sgx_own_arm *a,
 			val = a->exit_index + p.old_index - tgt[0];
 		} else if (pk == SGX_OWN_PATCH_PDS) {
 			/* verified: slot 0 to 2, no addend; pds is set (a blob with the emitpds) */
-			val = slot == 0 ? sgx_own_pds_ctl(a->img) : slot == 1 ? emit_addr >> 4 : 0;
+			val = slot == 0 ? sgx_own_pds_ctl(a->img) : slot == 1 ? emit_addr >> 4 :
+			      sgx_own_pds2_value(a->pds2);
 		} else if (pk == SGX_OWN_PATCH_CONT) {
 			if (slot >= n)
 				return -ENOENT;
