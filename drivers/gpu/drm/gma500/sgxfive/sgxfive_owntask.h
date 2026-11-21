@@ -93,7 +93,11 @@ struct sgx_own_pds {
  * zeros, 3 rows as PDS #14 has, so its control word is (3 << 23) | 0x100. land (round 40, N3e
  * row L) has crumb3's rows and control word, two douta of markers that are constants of the image
  * (0x5a5a3a18 to secondary attribute 24, 0x5a5a3a1a to 26), the doutu and halt, and no tim; the
- * arm fills its U0 only (its dwords 4 and 5 are the markers, not V0 and V2).
+ * arm fills its U0 only (its dwords 4 and 5 are the markers, not V0 and V2). mark (round 42,
+ * N3g row M) is crumb3 with a third data row of two markers (0x005d3000 to secondary attribute
+ * 13, 0x005d1000 to 1) and two douta of them after crumb3's two; landv (round 42, N3g row LV) is
+ * land with crumb3's two douta of V0 and V2 first and its markers in the third row. Both keep
+ * crumb3's rows and control word, and the arm fills their U0, V0 and V2.
  */
 enum sgx_own_img {
 	SGX_OWN_IMG_V1,
@@ -101,6 +105,8 @@ enum sgx_own_img {
 	SGX_OWN_IMG_HALT,
 	SGX_OWN_IMG_CRUMB3,
 	SGX_OWN_IMG_LAND,
+	SGX_OWN_IMG_MARK,
+	SGX_OWN_IMG_LANDV,
 	SGX_OWN_IMG_COUNT,
 };
 
@@ -132,7 +138,8 @@ const char *sgx_own_pds2_name(unsigned int v);
 /* the value the arm writes in the pds2 limm (0 for none) */
 u32 sgx_own_pds2_value(unsigned int v);
 
-/* own_arm's name of an image ("v1", "crumb", "halt", "crumb3", "land"; "?" for none) */
+/* own_arm's name of an image ("v1", "crumb", "halt", "crumb3", "land", "mark", "landv"; "?" for
+ * none) */
 const char *sgx_own_img_name(unsigned int img);
 /* own_arm's name of a place ("own", "fw14"; "?" for none) */
 const char *sgx_own_at_name(unsigned int at);
@@ -230,7 +237,7 @@ struct sgx_fw_layout;
 u32 sgx_own_exit_index(const u8 *digest);
 
 /*
- * "slots=<mask> entry=<n>,<n>.. [trc=<t>] [trc_hazard=1] [pds=v1|crumb|halt|crumb3|land]
+ * "slots=<mask> entry=<n>,<n>.. [trc=<t>] [trc_hazard=1] [pds=v1|crumb|halt|crumb3|land|mark|landv]
  * [pdsat=own|fw14] [pds2=0|req] [form=<a name of sgx_own_emit_forms[]>]"
  */
 int sgx_own_arm_parse(const char *line, struct sgx_own_arm *a);

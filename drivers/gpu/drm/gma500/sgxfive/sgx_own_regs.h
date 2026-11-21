@@ -106,6 +106,8 @@ static const struct { u64 mask, value; u8 kind; } sgx_own_forms[] __maybe_unused
 	{ 0xffffffffffffffffULL, 0xfb20b10800c08184ULL, SGX_OWN_EMITPDS },	/* emitpds-fw14 */
 	{ 0xffffffffffffffffULL, 0xfb20b18800c08184ULL, SGX_OWN_EMITPDS },	/* emitpds-sbc43 */
 	{ 0xffffffffffffffffULL, 0xfb20b08000c08184ULL, SGX_OWN_EMITPDS },	/* emitpds-sb403 */
+	{ 0xffffffffffffffffULL, 0xfb20b08000808184ULL, SGX_OWN_EMITPDS },	/* emitpds-sb402 */
+	{ 0xffffffffffffffffULL, 0xfb20b08000008184ULL, SGX_OWN_EMITPDS },	/* emitpds-sb400 */
 	{ 0xfffffffff000007fULL, 0xe82b0002a0000000ULL, SGX_OWN_LOAD_ABS },	/* ldad */
 	{ 0xffffffffffe00000ULL, 0xf022000080000000ULL, SGX_OWN_STORE_ABS },	/* stad */
 	{ 0xfffffffff0003f80ULL, 0xfe21000020000000ULL, SGX_OWN_LDR },	/* ldr-imm */
@@ -123,7 +125,8 @@ static const struct { u64 mask, value; u8 kind; } sgx_own_forms[] __maybe_unused
 /*
  * the emitpds words own_arm's form= names (fwtask.EMIT_SIDEBANDS): our word with each
  * sideband, every other field ours; own (round 33) the default, fw14 #14's (round 39), the
- * rest N3e's list (round 40). The kernel arms a blob only at the form= naming its word.
+ * rest N3e's list (round 40), then sb402 and sb400 (round 42, N3g). The kernel arms a
+ * blob only at the form= naming its word.
  */
 enum sgx_own_form {
 	SGX_OWN_FORM_OWN,
@@ -144,6 +147,8 @@ enum sgx_own_form {
 	SGX_OWN_FORM_FW14,
 	SGX_OWN_FORM_SBC43,
 	SGX_OWN_FORM_SB403,
+	SGX_OWN_FORM_SB402,
+	SGX_OWN_FORM_SB400,
 	SGX_OWN_FORM_COUNT,
 };
 
@@ -166,6 +171,8 @@ static const struct { const char *name; u64 word; } sgx_own_emit_forms[SGX_OWN_F
 	{ "fw14", 0xfb20b10800c08184ULL },	/* sideband 0x843 */
 	{ "sbc43", 0xfb20b18800c08184ULL },	/* sideband 0xc43 */
 	{ "sb403", 0xfb20b08000c08184ULL },	/* sideband 0x403 */
+	{ "sb402", 0xfb20b08000808184ULL },	/* sideband 0x402 */
+	{ "sb400", 0xfb20b08000008184ULL },	/* sideband 0x400 */
 };
 
 #endif
