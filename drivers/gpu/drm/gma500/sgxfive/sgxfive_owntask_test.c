@@ -1925,6 +1925,195 @@ static void sgxfive_owntask_test_apply_mark_landv(struct kunit *test)
 	}
 }
 
+/* ---- round 45 (N3j §9.0): the images crumbz and landq ---------------------------------------- */
+/*
+ * pds=crumbz and pds=landq: parsed, named (the arm log's pds= word), every other spelling refused;
+ * each fits #14's page only with room for its whole image (0x44 and 0x48 bytes).
+ */
+static void sgxfive_owntask_test_crumbz_landq_names_and_room(struct kunit *test)
+{
+	struct sgx_fw *fw = kunit_kzalloc(test, sizeof(*fw), GFP_KERNEL);
+	u8 *recs = kunit_kzalloc(test, 16, GFP_KERNEL);
+	struct sgx_own_arm a;
+	u32 off;
+
+	KUNIT_ASSERT_NOT_NULL(test, fw);
+	KUNIT_ASSERT_NOT_NULL(test, recs);
+	KUNIT_EXPECT_EQ(test, (int)SGX_OWN_IMG_CRUMBZ, 7);
+	KUNIT_EXPECT_EQ(test, (int)SGX_OWN_IMG_LANDQ, 8);
+	KUNIT_ASSERT_EQ(test, sgx_own_arm_parse("slots=1 entry=0 pds=crumbz pdsat=fw14 form=sbc43",
+						&a), 0);
+	KUNIT_EXPECT_EQ(test, (int)a.img, SGX_OWN_IMG_CRUMBZ);
+	KUNIT_EXPECT_EQ(test, (int)a.at, SGX_OWN_AT_FW14);
+	KUNIT_EXPECT_EQ(test, (int)a.form, SGX_OWN_FORM_SBC43);
+	KUNIT_ASSERT_EQ(test, sgx_own_arm_parse("slots=1 entry=0 pds=landq pdsat=fw14 form=sbc43",
+						&a), 0);
+	KUNIT_EXPECT_EQ(test, (int)a.img, SGX_OWN_IMG_LANDQ);
+	KUNIT_EXPECT_STREQ(test, sgx_own_img_name(SGX_OWN_IMG_CRUMBZ), "crumbz");
+	KUNIT_EXPECT_STREQ(test, sgx_own_img_name(SGX_OWN_IMG_LANDQ), "landq");
+	KUNIT_EXPECT_STREQ(test, sgx_own_img_name(SGX_OWN_IMG_LANDV), "landv");
+	KUNIT_EXPECT_STREQ(test, sgx_own_img_name(SGX_OWN_IMG_COUNT), "?");
+	KUNIT_EXPECT_EQ(test, sgx_own_arm_parse("slots=1 entry=0 pds=CRUMBZ", &a), -EINVAL);
+	KUNIT_EXPECT_EQ(test, sgx_own_arm_parse("slots=1 entry=0 pds=crumbz3", &a), -EINVAL);
+	KUNIT_EXPECT_EQ(test, sgx_own_arm_parse("slots=1 entry=0 pds=crumb_z", &a), -EINVAL);
+	KUNIT_EXPECT_EQ(test, sgx_own_arm_parse("slots=1 entry=0 pds=landq2", &a), -EINVAL);
+	KUNIT_EXPECT_EQ(test, sgx_own_arm_parse("slots=1 entry=0 pds=lan", &a), -EINVAL);
+	/* the room: crumbz is 0x44 bytes, landq 0x48, each at #14's base + 0x100 */
+	fw->nbuffers = 1;
+	fw->buffers[0] = (struct sgx_fw_buffer){ .id = F14_BUF, .heap = 2, .size = F14_SIZE,
+						 .align = 16 };
+	rec(recs, F14_BUF, 0, 100, PDS_ADDEND);
+	fw->patches.rec = recs;
+	fw->patches.count = 1;
+	KUNIT_EXPECT_EQ(test, sgx_own_fw14_off(fw, F14_BUF, SGX_OWN_IMG_CRUMBZ, 0x144, &off), 0);
+	KUNIT_EXPECT_EQ(test, off, 0x100u);
+	KUNIT_EXPECT_EQ(test, sgx_own_fw14_off(fw, F14_BUF, SGX_OWN_IMG_CRUMBZ, 0x143, &off),
+			-ERANGE);
+	KUNIT_EXPECT_EQ(test, sgx_own_fw14_off(fw, F14_BUF, SGX_OWN_IMG_LANDQ, 0x148, &off), 0);
+	KUNIT_EXPECT_EQ(test, off, 0x100u);
+	KUNIT_EXPECT_EQ(test, sgx_own_fw14_off(fw, F14_BUF, SGX_OWN_IMG_LANDQ, 0x147, &off),
+			-ERANGE);
+}
+
+/*
+ * crumbz: crumb3's 12 data dwords and its program without the two douta (T1, T2, the doutu, T3,
+ * halt); the build fills U0, V0 and V2 as for crumb3. landq: land's 12 data dwords with a third
+ * row of Q0 0x005d2000, M1 0x005d1000 and the douta controls of attributes 0 and 1; land's two
+ * douta, two douta of Q0 and M1 (mark's marker douta words), land's doutu and halt; the build
+ * fills U0 only (dwords 4 and 5 stay Ma and Mb whatever V0 and V2 are). Both 3 rows, control word
+ * 0x01800100; zeros after.
+ */
+static void sgxfive_owntask_test_pds_build_crumbz_landq(struct kunit *test)
+{
+	static const u32 crumbz[] = { 0, 0, 0, 0, 0, 0, 0x200, 0x005a3305, 0, 0, 0, 0,
+				      0x07001fe7, 0x07003547, 0x07000305, 0x07003fe7, 0xaf000000 };
+	static const u32 landq[] = { 0, 0, 0, 0x00001800, 0x5a5a3a18, 0x5a5a3a1a, 0x00001a00, 0,
+				     0x005d2000, 0x005d1000, 0, 0x00000100,
+				     0x07040606, 0x07042ca6, 0x07084406, 0x07084ea6, 0x07000305,
+				     0xaf000000 };
+	static const struct { unsigned int img; const u32 *want, *words; unsigned int n;
+			      bool fillv; } t[] = {
+		{ SGX_OWN_IMG_CRUMBZ, crumbz, sgx_own_pds_crumbz, ARRAY_SIZE(crumbz), true },
+		{ SGX_OWN_IMG_LANDQ, landq, sgx_own_pds_landq, ARRAY_SIZE(landq), false },
+	};
+	u8 *page = kunit_kzalloc(test, SGX_OWN_PDS_SIZE, GFP_KERNEL);
+	unsigned int k, i;
+
+	KUNIT_ASSERT_NOT_NULL(test, page);
+	KUNIT_EXPECT_EQ(test, (int)SGX_OWN_PDS_CRUMBZ_WORDS, 17);
+	KUNIT_EXPECT_EQ(test, (int)SGX_OWN_PDS_LANDQ_WORDS, 18);
+	KUNIT_EXPECT_EQ(test, (int)SGX_OWN_PDS_CRUMBZ_FILLV, 1);
+	KUNIT_EXPECT_EQ(test, (int)SGX_OWN_PDS_LANDQ_FILLV, 0);
+	for (k = 0; k < ARRAY_SIZE(t); k++) {
+		KUNIT_EXPECT_EQ(test, sgx_own_pds_ctl(t[k].img), 0x01800100u);
+		KUNIT_EXPECT_EQ(test, sgx_own_pds_words(t[k].img), t[k].n);
+		memset(page, 0xa5, SGX_OWN_PDS_SIZE);
+		sgx_own_pds_build(page, t[k].img, 33, OWN_V0, OWN_V2);
+		for (i = 0; i < t[k].n; i++) {
+			u32 want = i == SGX_OWN_PDS_U0 ? sgx_own_pds_u0(33) :
+				   t[k].fillv && i == SGX_OWN_PDS_V0 ? OWN_V0 :
+				   t[k].fillv && i == SGX_OWN_PDS_V2 ? OWN_V2 : t[k].want[i];
+
+			KUNIT_EXPECT_EQ_MSG(test, t[k].words[i], t[k].want[i], "%s word %u",
+					    sgx_own_img_name(t[k].img), i);
+			KUNIT_EXPECT_EQ_MSG(test, dw(page, 4 * i), want, "%s dword %u",
+					    sgx_own_img_name(t[k].img), i);
+		}
+		KUNIT_EXPECT_TRUE(test, zero(page, 4 * t[k].n, SGX_OWN_PDS_SIZE));
+	}
+	/* crumbz is crumb3 without its words 13 and 14 (the two douta), the rest in order */
+	for (i = 0; i < 17; i++)
+		KUNIT_EXPECT_EQ_MSG(test, sgx_own_pds_crumbz[i],
+				    sgx_own_pds_crumb3[i < 13 ? i : i + 2], "crumb3 word %u", i);
+	/* landq is land with mark's two marker douta before the doutu; no tim */
+	for (i = 0; i < 8; i++)
+		KUNIT_EXPECT_EQ(test, sgx_own_pds_landq[i], sgx_own_pds_land[i]);
+	KUNIT_EXPECT_EQ(test, sgx_own_pds_landq[12], sgx_own_pds_land[12]);
+	KUNIT_EXPECT_EQ(test, sgx_own_pds_landq[13], sgx_own_pds_land[13]);
+	KUNIT_EXPECT_EQ(test, sgx_own_pds_landq[14], sgx_own_pds_mark[15]);
+	KUNIT_EXPECT_EQ(test, sgx_own_pds_landq[15], sgx_own_pds_mark[16]);
+	KUNIT_EXPECT_EQ(test, sgx_own_pds_landq[16], sgx_own_pds_land[14]);
+	KUNIT_EXPECT_EQ(test, sgx_own_pds_landq[17], sgx_own_pds_land[15]);
+	KUNIT_EXPECT_EQ(test, sgx_own_pds_landq[9], sgx_own_pds_mark[9]);
+	for (i = 12; i < 18; i++) {
+		KUNIT_EXPECT_NE(test, sgx_own_pds_landq[i], sgx_own_pds_crumb3[12]);
+		KUNIT_EXPECT_NE(test, sgx_own_pds_landq[i], sgx_own_pds_crumb3[15]);
+		KUNIT_EXPECT_NE(test, sgx_own_pds_landq[i], sgx_own_pds_crumb3[17]);
+	}
+}
+
+/*
+ * Rows Z and Q: emitsb_sbc43 at pds=crumbz|landq pdsat=fw14 form=sbc43: the image at #14's base +
+ * 0x100 with U0 filled (and V0 and V2 for crumbz), nothing else; pds0 0x01800100, pds1 its address
+ * >> 4; #14's own bytes untouched and the rest of the slack zero (a stale word of ours too); the
+ * own page zero; the disarm clears it. In the own page the same words; with another form refused,
+ * nothing written.
+ */
+static void sgxfive_owntask_test_apply_crumbz_landq(struct kunit *test)
+{
+	static const struct { const char *img; const u32 *words; unsigned int n; bool fillv; } t[] = {
+		{ "crumbz", sgx_own_pds_crumbz, SGX_OWN_PDS_CRUMBZ_WORDS, true },
+		{ "landq", sgx_own_pds_landq, SGX_OWN_PDS_LANDQ_WORDS, false },
+	};
+	struct own_fw *f = own_fw14_new(test);
+	u8 *page = kunit_kzalloc(test, SGX_OWN_PDS_SIZE, GFP_KERNEL);
+	struct sgx_own_pds pds = { .image = page, .addr = OWN_PDS_ADDR, .v0 = OWN_V0, .v2 = OWN_V2,
+				   .fw14 = f->f14, .fw14_addr = F14_ADDR, .fw14_room = F14_ROOM };
+	struct sgx_own_blob b;
+	unsigned int k, i;
+	u32 at = F14_ADDR + 0x100;
+	char line[96];
+
+	KUNIT_ASSERT_NOT_NULL(test, page);
+	KUNIT_ASSERT_EQ(test, sgx_own_parse(own_ok_emitsb_sbc43, sizeof(own_ok_emitsb_sbc43), &b), 0);
+	for (k = 0; k < ARRAY_SIZE(t); k++) {
+		own_fw14_reset(f);
+		memset(page, 0, SGX_OWN_PDS_SIZE);
+		memset(f->f14 + 0x400, 0xa5, 0x40);		/* a stale word in the slack */
+		snprintf(line, sizeof(line), "slots=0x1 entry=0 pds=%s pdsat=fw14 form=sbc43",
+			 t[k].img);
+		KUNIT_ASSERT_EQ(test, own_apply_pds(f, own_ok_emitsb_sbc43, sizeof(own_ok_emitsb_sbc43),
+						    line, &pds), 0);
+		KUNIT_EXPECT_EQ(test, pds.at, at);
+		KUNIT_EXPECT_EQ(test, own_pdsn(f, &b, 0), 0x01800100u);
+		KUNIT_EXPECT_EQ(test, own_pdsn(f, &b, 1), at >> 4);
+		KUNIT_EXPECT_EQ(test, own_pdsn(f, &b, 2), 0u);
+		KUNIT_EXPECT_EQ(test, memcmp(f->f14, f->stock14, F14_SIZE), 0);
+		KUNIT_EXPECT_TRUE(test, zero(f->f14, F14_SIZE, 0x100));
+		for (i = 0; i < t[k].n; i++) {
+			u32 want = i == SGX_OWN_PDS_U0 ? sgx_own_pds_u0(sgx_own_entry(&b, 1)) :
+				   t[k].fillv && i == SGX_OWN_PDS_V0 ? OWN_V0 :
+				   t[k].fillv && i == SGX_OWN_PDS_V2 ? OWN_V2 : t[k].words[i];
+
+			KUNIT_EXPECT_EQ_MSG(test, dw(f->f14, 0x100 + 4 * i), want, "%s dword %u",
+					    t[k].img, i);
+		}
+		KUNIT_EXPECT_EQ(test, dw(f->f14, 0x100 + 4 * SGX_OWN_PDS_U0), 0x080401efu);
+		KUNIT_EXPECT_TRUE(test, zero(f->f14, 0x100 + 4 * t[k].n, F14_ROOM));
+		KUNIT_EXPECT_TRUE(test, zero(page, 0, SGX_OWN_PDS_SIZE));
+		KUNIT_EXPECT_EQ(test, dw(f->pds, 4), 0x0804000fu);
+		/* the disarm: the build rewrites #14's bytes, the clear zeroes the slack */
+		KUNIT_ASSERT_EQ(test, sgx_fw_build(&f->fw, &f->l, f->bufs), 0);
+		sgx_own_fw14_clear(f->f14, F14_SIZE, F14_ROOM);
+		KUNIT_EXPECT_EQ(test, memcmp(f->f14, f->stock14, F14_ROOM), 0);
+		/* in the own page: the same words */
+		snprintf(line, sizeof(line), "slots=0x1 entry=0 pds=%s form=sbc43", t[k].img);
+		KUNIT_ASSERT_EQ(test, own_apply_pds(f, own_ok_emitsb_sbc43, sizeof(own_ok_emitsb_sbc43),
+						    line, &pds), 0);
+		KUNIT_EXPECT_EQ(test, pds.at, OWN_PDS_ADDR);
+		KUNIT_EXPECT_EQ(test, dw(page, 4 * SGX_OWN_PDS_V0),
+				t[k].fillv ? OWN_V0 : 0x5a5a3a18u);
+		KUNIT_EXPECT_EQ(test, dw(page, 4 * (t[k].n - 1)), 0xaf000000u);
+		/* refused, nothing written: another form's name */
+		own_fw14_reset(f);
+		snprintf(line, sizeof(line), "slots=0x1 entry=0 pds=%s pdsat=fw14 form=fw14",
+			 t[k].img);
+		KUNIT_EXPECT_EQ(test, own_apply_pds(f, own_ok_emitsb_sbc43, sizeof(own_ok_emitsb_sbc43),
+						    line, &pds), -EINVAL);
+		KUNIT_EXPECT_EQ(test, memcmp(f->f14, f->stock14, F14_ROOM), 0);
+	}
+}
+
 static struct kunit_case sgxfive_owntask_test_cases[] = {
 	KUNIT_CASE(sgxfive_owntask_test_accepts_our_blobs),
 	KUNIT_CASE(sgxfive_owntask_test_refuses_crafted_blobs),
@@ -1971,6 +2160,9 @@ static struct kunit_case sgxfive_owntask_test_cases[] = {
 	KUNIT_CASE(sgxfive_owntask_test_mark_landv_names_and_room),
 	KUNIT_CASE(sgxfive_owntask_test_pds_build_mark_landv),
 	KUNIT_CASE(sgxfive_owntask_test_apply_mark_landv),
+	KUNIT_CASE(sgxfive_owntask_test_crumbz_landq_names_and_room),
+	KUNIT_CASE(sgxfive_owntask_test_pds_build_crumbz_landq),
+	KUNIT_CASE(sgxfive_owntask_test_apply_crumbz_landq),
 	{}
 };
 
