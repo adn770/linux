@@ -619,6 +619,10 @@ static const struct {
 				 SGX_OWN_PDS_CRUMBZ_CTL, SGX_OWN_PDS_CRUMBZ_FILLV },
 	[SGX_OWN_IMG_LANDQ] = { "landq", sgx_own_pds_landq, SGX_OWN_PDS_LANDQ_WORDS,
 				SGX_OWN_PDS_LANDQ_CTL, SGX_OWN_PDS_LANDQ_FILLV },
+	[SGX_OWN_IMG_LANDR] = { "landr", sgx_own_pds_landr, SGX_OWN_PDS_LANDR_WORDS,
+				SGX_OWN_PDS_LANDR_CTL, SGX_OWN_PDS_LANDR_FILLV },
+	[SGX_OWN_IMG_LANDP] = { "landp", sgx_own_pds_landp, SGX_OWN_PDS_LANDP_WORDS,
+				SGX_OWN_PDS_LANDP_CTL, SGX_OWN_PDS_LANDP_FILLV },
 };
 
 static const char *const sgx_own_ats[SGX_OWN_AT_COUNT] = {
